@@ -102,9 +102,9 @@
       "repo": "plugins/dsh-android-bridge"
     },
     {
-      "id": "android-manage",
-      "pkg": "@dsh-android/dsh-android-manage",
-      "repo": "plugins/dsh-android-manage"
+      "id": "android-phone-control",
+      "pkg": "@dsh-android/dsh-android-phone-control",
+      "repo": "plugins/dsh-android-phone-control"
     },
     {
       "id": "android-linux-env",
@@ -120,11 +120,6 @@
       "id": "android-browser",
       "pkg": "@dsh-android/dsh-android-browser",
       "repo": "plugins/dsh-android-browser"
-    },
-    {
-      "id": "android-vdisplay",
-      "pkg": "@dsh-android/dsh-android-vdisplay",
-      "repo": "plugins/dsh-android-vdisplay"
     },
     {
       "id": "session-delete",

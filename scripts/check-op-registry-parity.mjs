@@ -1,143 +1,158 @@
 #!/usr/bin/env node
-// check-op-registry-parity.mjs —— 跨语言 op 清单对等门禁（0.14.1 块N）。
+// check-op-registry-parity.mjs — 读屏 op 清单的跨语言对等门禁（2026-11-14 迁移）。
 //
-// 为什么需要（0.14.1 设备实测缺陷 B4 的直接根因）：
-//   「会读设备屏的 op」有**两份**清单——引擎 `plugins/dsh-android-bridge/src/screen-scope.ts` 的
-//   `REAL_SCREEN_CONTROL_OPS` 与壳侧 `app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt`
-//   的 `REAL_SCREEN_OPS`。两份不一致时没有任何一层为不一致负责：
-//   壳侧曾把 `state`/`webSnapshot`/`webAction` 也算成真实屏 op（那是 `A11Y_OPS` 后端能力清单的陈旧拷贝），
-//   而这三条都不带 `screenId` ⇒ 默认 real ⇒ 在缺省范围 virtual-only 下被壳侧范围门拦死。
-//   后果：android_web_dump、android_ui_click/ui_input 的 WebView ref 路径、以及点击生效校验
-//   （verifyClick 读 `state`）**在缺省范围下全部不可用**，而引擎侧毫无察觉。
+// 旧实现比对 `screen-scope.ts` 的 `REAL_SCREEN_CONTROL_OPS` 与 Kotlin
+// `DeviceControlService.REAL_SCREEN_OPS`。两条源都已删除；新的单一真值是 Rust
+// `native/phone-control-core/src/policy.rs` 的 `OPERATIONS` 条目，其中
+// `reads_device_display=true` 的集合就是「会读设备屏」的权威清单。
 //
-// 本门禁把这份一致性变成机械可判的红线：两份清单必须**逐条相同**（排序后比对）。
-// 修改任一侧都要同批改另一侧——这是跨语言契约，不是实现细节。
+// 断言：
+//   A. Rust 目录可解析，读屏集合非空且无重复；
+//   B. 每个读屏 op 都被至少一个 Kotlin adapter 接受（否则模型面承诺可用、真机落空）；
+//   C. 两个手机屏幕 adapter 只能接 AndroidDisplay 域，不能夹带浏览器或 Root 操作；
+//   D. 读屏 op 必须被手机薄桥转发；浏览器 / WebView / 特权 shell 不在此集合。
 //
-// 用法：
-//   node scripts/check-op-registry-parity.mjs            # 两仓布局自适应（apk 仓 / 协调仓根）
-//   node scripts/check-op-registry-parity.mjs --self-test # 判别力自证（正例 / 反例 / 缺锚）
-import { readFileSync, existsSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+// 用法：node scripts/check-op-registry-parity.mjs [--shell-root <含 app/src/main 的树>] [--self-test]
+// 退出码：0 = 通过；1 = 漂移或解析失败。
+import { readFileSync, existsSync, readdirSync } from 'node:fs'
+import { join, dirname, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { missingFrom, parseRustOperations, parseTsArray, sorted, unique } from './lib/native-control-contract.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const APK_ROOT = resolve(HERE, '..')
-
-/** 两个布局下的相对坐标（apk 仓自包含 / 协调仓带子目录）。 */
-function locate(name) {
-  const candidates = name === 'engine'
-    ? [join(APK_ROOT, 'plugins', 'dsh-android-bridge', 'src', 'screen-scope.ts'),
-       join(APK_ROOT, '..', 'plugins', 'dsh-android-bridge', 'src', 'screen-scope.ts')]
-    : [join(APK_ROOT, 'app', 'src', 'main', 'java', 'com', 'dsharnessmobile', 'shell', 'DeviceControlService.kt'),
-       join(APK_ROOT, 'dsh-mobile-apk', 'app', 'src', 'main', 'java', 'com', 'dsharnessmobile', 'shell', 'DeviceControlService.kt')]
-  for (const c of candidates) if (existsSync(c)) return c
-  throw new Error(`找不到${name === 'engine' ? '引擎' : '壳侧'}清单源文件：` + candidates.join(' | '))
+const ROOT = dirname(HERE)
+const argv = process.argv.slice(2)
+const option = (name) => {
+  const at = argv.indexOf('--' + name)
+  return at >= 0 ? argv[at + 1] : undefined
 }
 
-/** 引擎面：`export const REAL_SCREEN_CONTROL_OPS: readonly string[] = [ 'a', 'b', ]` */
-export function parseEngineOps(text) {
-  const m = /REAL_SCREEN_CONTROL_OPS[^=]*=\s*\[([\s\S]*?)\]/.exec(text)
-  if (m === null) return null
-  return [...m[1].matchAll(/'([^']+)'|"([^"]+)"/g)].map((x) => x[1] ?? x[2])
-}
-
-/** 壳侧面：`private val REAL_SCREEN_OPS = setOf( "a", "b", )` */
-export function parseShellOps(text) {
-  const m = /REAL_SCREEN_OPS\s*=\s*setOf\(([\s\S]*?)\)/.exec(text)
-  if (m === null) return null
-  return [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1])
-}
-
-const sorted = (list) => [...list].sort()
-
-export function compare(engineOps, shellOps) {
-  const a = sorted(engineOps)
-  const b = sorted(shellOps)
-  const missingInShell = a.filter((x) => !b.includes(x))
-  const extraInShell = b.filter((x) => !a.includes(x))
-  return { ok: missingInShell.length === 0 && extraInShell.length === 0, missingInShell, extraInShell }
+export function compare(reads, implemented) {
+  const missing = missingFrom(reads, implemented)
+  const extra = missingFrom(implemented, reads)
+  return { ok: missing.length === 0 && extra.length === 0, missing, extra }
 }
 
 function selfTest() {
   const cases = [
-    ['正例：两边同 8 条', ['snapshot', 'click'], ['click', 'snapshot'], true],
-    ['反例：壳侧多 3 条（0.14.1 缺陷原形）', ['snapshot'], ['snapshot', 'state', 'webSnapshot', 'webAction'], false],
-    ['反例：壳侧少一条', ['snapshot', 'click'], ['snapshot'], false],
-    ['反例：同名不同序不算差异', ['b', 'a'], ['a', 'b'], true],
+    ['正例：读屏集合一致', ['snapshot', 'screenshot'], ['screenshot', 'snapshot'], true],
+    ['负控：壳侧少一个读屏 op', ['snapshot', 'screenshot'], ['snapshot'], false],
+    ['负控：壳侧多一个非读屏 op', ['snapshot'], ['snapshot', 'state'], false],
   ]
   let failed = 0
-  for (const [name, engine, shell, expect] of cases) {
-    const r = compare(engine, shell)
-    if (r.ok !== expect) {
-      failed += 1
-      console.error(`SELF-TEST FAIL：${name} 期望 ${expect} 实得 ${r.ok}`)
-    }
+  for (const [label, rust, kotlin, want] of cases) {
+    const result = compare(rust, kotlin)
+    if (result.ok !== want) { failed += 1; console.error('SELF-TEST FAIL：' + label) }
   }
-  // 解析器判别力：反例文本必须解析出预期条数，锚点缺失必须返回 null（fail-closed）。
-  const engSample = "export const REAL_SCREEN_CONTROL_OPS: readonly string[] = [\n  'a', 'b',\n]"
-  const shellSample = 'private val REAL_SCREEN_OPS = setOf(\n  "a", "b", "c",\n)'
-  const e = parseEngineOps(engSample)
-  const s = parseShellOps(shellSample)
-  if (e === null || e.length !== 2) { failed += 1; console.error('SELF-TEST FAIL：引擎解析器') }
-  if (s === null || s.length !== 3) { failed += 1; console.error('SELF-TEST FAIL：壳侧解析器') }
-  if (parseEngineOps('const X = 1') !== null) { failed += 1; console.error('SELF-TEST FAIL：引擎锚点缺失未 fail-closed') }
-  if (parseShellOps('val X = listOf("a")') !== null) { failed += 1; console.error('SELF-TEST FAIL：壳侧锚点缺失未 fail-closed') }
+  // 用模板字面量写夹具，避免在 patch 文本里再叠一层转义；内容与真实源码同形。
+  const sample = [
+    'pub static OPERATIONS: &[OperationSpec] = &[',
+    '  spec("snapshot", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),',
+    '];',
+  ].join('\n')
+  // `sample` 由多个字符串拼接而来，末尾 `];` 只截到第一个 `]` 是设计如此；解析器错在这里时
+  // 必须显式报出实际结果，便于区分「夹具写错」与「解析器失效」。
+  const parsed = parseRustOperations(sample)
+  if (parsed === null) console.error('SELF-TEST sample:', JSON.stringify(sample))
+  if (parsed === null || parsed.length !== 1) { failed += 1; console.error('SELF-TEST FAIL：Rust 目录解析') }
+  if (parseRustOperations('const X = []') !== null) { failed += 1; console.error('SELF-TEST FAIL：锚点缺失未 fail-closed') }
+  const tsSample = "export const NATIVE_CONTROL_OPERATIONS = [\n  'snapshot', 'click',\n] as const\n"
+  if (JSON.stringify(parseTsArray(tsSample, 'NATIVE_CONTROL_OPERATIONS')) !== JSON.stringify(['snapshot', 'click'])) {
+    failed += 1; console.error('SELF-TEST FAIL：TS 清单解析')
+  }
   if (failed > 0) {
-    console.error(`CHECK-OP-REGISTRY-PARITY SELF-TEST FAILED（${failed} 例）`)
+    console.error('CHECK-OP-REGISTRY-PARITY SELF-TEST FAILED（' + failed + ' 例）')
     process.exit(1)
   }
-  console.log(`CHECK-OP-REGISTRY-PARITY SELF-TEST PASSED（${cases.length + 4} 例：正/反/锚点缺失）`)
+  console.log('CHECK-OP-REGISTRY-PARITY SELF-TEST PASSED（' + (cases.length + 3) + ' 例：正例 / 负控 / 锚点缺失）')
+  process.exit(0)
 }
 
-function main() {
-  if (process.argv.includes('--self-test')) {
-    selfTest()
-    return
+if (argv.includes('--self-test')) selfTest()
+
+function findShellRoot(start) {
+  for (const candidate of [start, join(start, 'dsh-mobile-apk')]) {
+    if (existsSync(join(candidate, 'native', 'phone-control-core', 'src', 'policy.rs'))) return candidate
   }
-  const enginePath = locate('engine')
-  const shellPath = locate('shell')
-  const engineOps = parseEngineOps(readFileSync(enginePath, 'utf8'))
-  const shellOps = parseShellOps(readFileSync(shellPath, 'utf8'))
-  if (engineOps === null) {
-    console.error('CHECK-OP-REGISTRY-PARITY FAILED：引擎侧 REAL_SCREEN_CONTROL_OPS 未解析到（锚点被改名/改形？）\n  ' + enginePath)
-    process.exit(1)
-  }
-  if (shellOps === null) {
-    console.error('CHECK-OP-REGISTRY-PARITY FAILED：壳侧 REAL_SCREEN_OPS 未解析到（锚点被改名/改形？）\n  ' + shellPath)
-    process.exit(1)
-  }
-  // issue #1047：旧实现只比两侧差集，于是**两侧同时清空**也会「逐条相同」通过（vacuous pass）。
-  // 空清单不表示一致，表示锚点被改名或正则失配 —— 任一侧为空必须判红。
-  if (engineOps.length === 0 || shellOps.length === 0) {
-    console.error('CHECK-OP-REGISTRY-PARITY FAILED：清单解析为空（引擎 ' + engineOps.length + ' 条，壳侧 ' + shellOps.length + ' 条）——')
-    console.error('  空清单不等于「一致」：多半是锚点被改名或正则失配。')
-    console.error('  引擎 ' + enginePath)
-    console.error('  壳侧 ' + shellPath)
-    process.exit(1)
-  }
-  // issue #1047：旧实现只比差集，两侧同时清空也会「逐条相同」通过（vacuous）。
-  // 空清单不表示一致，表示锚点/正则坏了 —— 任一侧为空必须判红。
-  if (engineOps.length === 0 || shellOps.length === 0) {
-    console.error('CHECK-OP-REGISTRY-PARITY FAILED：清单解析为空（引擎 ' + engineOps.length + ' 条，壳侧 ' + shellOps.length + ' 条）——')
-    console.error('  空清单不等于「一致」：多半是锚点被改名或正则失配。')
-    process.exit(1)
-  }
-  const r = compare(engineOps, shellOps)
-  if (!r.ok) {
-    console.error('CHECK-OP-REGISTRY-PARITY FAILED：两份「会读设备屏的 op」清单不一致——')
-    console.error('  引擎 ' + enginePath)
-    console.error('  壳侧 ' + shellPath)
-    if (r.missingInShell.length > 0) console.error('  壳侧缺少（引擎有、壳侧无）：' + r.missingInShell.join(', '))
-    if (r.extraInShell.length > 0) {
-      console.error('  壳侧多出（**这些 op 会被壳侧范围门按「真实屏」拦掉**）：' + r.extraInShell.join(', '))
-      console.error('  修法二选一：① 该 op 确实读设备屏 → 加进引擎清单；② 它不读设备屏（元数据/自有 WebView）→ 从壳侧移除。')
-      console.error('  先例：0.14.1 的 state/webSnapshot/webAction 属情形②，移除后 virtual-only 下的点击校验与 WebView 路径才恢复。')
-    }
-    process.exit(1)
-  }
-  console.log(`CHECK-OP-REGISTRY-PARITY PASSED（两份清单逐条相同，共 ${engineOps.length} 条：${sorted(engineOps).join(', ')}）`)
+  return null
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main()
+const shellRoot = findShellRoot(option('shell-root') ?? ROOT)
+if (shellRoot === null) {
+  console.error('CHECK-OP-REGISTRY-PARITY FAILED：找不到壳侧树（native/phone-control-core/src/policy.rs）')
+  process.exit(1)
 }
+const policy = readFileSync(join(shellRoot, 'native/phone-control-core/src/policy.rs'), 'utf8')
+const operations = parseRustOperations(policy)
+if (operations === null) {
+  console.error('CHECK-OP-REGISTRY-PARITY FAILED：解析不到 Rust OPERATIONS（锚点被改名/改形？）')
+  process.exit(1)
+}
+const reads = unique(operations.filter((row) => row.readsDisplay).map((row) => row.name))
+if (reads.length === 0) {
+  console.error('CHECK-OP-REGISTRY-PARITY FAILED：Rust 目录没有任何 reads_device_display=true 的 op')
+  process.exit(1)
+}
+if (new Set(operations.map((row) => row.name)).size !== operations.length) {
+  console.error('CHECK-OP-REGISTRY-PARITY FAILED：Rust OPERATIONS 有重复名字')
+  process.exit(1)
+}
+
+// Kotlin 真实执行面：只读 adapter 的 `implements` 接受的屏幕 op。这里用与 check-control-ops
+// 同一份解析口径，避免两份判据各自漂移。
+const { kotlinReachable, stripComments } = await import('./check-control-ops.mjs')
+const shellDir = join(shellRoot, 'app/src/main/java/com/dsharnessmobile/shell/nativecontrol')
+const kotlin = {}
+if (existsSync(shellDir)) {
+  for (const name of readdirSync(shellDir)) {
+    if (name.endsWith('.kt')) kotlin[name] = readFileSync(join(shellDir, name), 'utf8')
+  }
+}
+const implemented = kotlinReachable(kotlin).filter((op) => op !== 'backend' && op !== 'operation' && op !== 'target')
+const notImplemented = missingFrom(reads, implemented)
+// Kotlin 的 implements 会被复用做虚拟屏/按键参数分派；判定必须用 Rust 目录的语义，
+// 而不是「是否出现在某个 setOf 里」。只把 Rust 目录里 reads_device_display=false
+// 且 target 不是 AndroidDisplay 的 op 视为越界。
+const phoneAdapters = Object.fromEntries(Object.entries(kotlin).filter(([name]) =>
+  /^Native(?:A11y|Shizuku)Execution\.kt$/.test(name)))
+if (Object.keys(phoneAdapters).length !== 2) {
+  console.error('CHECK-OP-REGISTRY-PARITY FAILED：手机屏幕 adapter 缺席')
+  process.exit(1)
+}
+const nonReadOps = kotlinReachable(phoneAdapters).filter(op => {
+  const row = operations.find(entry => entry.name === op)
+  return row !== undefined && row.targetDomain !== 'AndroidDisplay'
+})
+
+if (notImplemented.length > 0) {
+  console.error('CHECK-OP-REGISTRY-PARITY FAILED：Rust 读屏 op 没有 Kotlin 执行面')
+  console.error('  壳侧缺少: [' + notImplemented.join(', ') + ']')
+  process.exit(1)
+}
+if (nonReadOps.length > 0) {
+    console.error('CHECK-OP-REGISTRY-PARITY FAILED：Kotlin 把非屏幕域 op 暴露在屏幕执行面')
+  console.error('  不应出现: [' + sorted(unique(nonReadOps)).join(', ') + ']')
+  process.exit(1)
+}
+
+// 传输层同样必须承载全部读屏 op。手机薄桥与共享浏览器桥都由 check-control-ops 校验，
+// 这里额外核对手机桥，因为读屏 op 只能经它到达模型。
+const bridgePath = join(ROOT, 'plugins/dsh-android-phone-control/src/native-bridge.ts')
+if (!existsSync(bridgePath)) {
+  console.error('CHECK-OP-REGISTRY-PARITY FAILED：手机薄桥源文件缺席')
+  process.exit(1)
+}
+{
+  const phoneOps = parseTsArray(readFileSync(bridgePath, 'utf8'), 'NATIVE_CONTROL_OPERATIONS')
+  if (phoneOps === null) {
+    console.error('CHECK-OP-REGISTRY-PARITY FAILED：解析不到手机薄桥 NATIVE_CONTROL_OPERATIONS')
+    process.exit(1)
+  }
+  const unforwarded = missingFrom(reads, phoneOps)
+  if (unforwarded.length > 0) {
+    console.error('CHECK-OP-REGISTRY-PARITY FAILED：读屏 op 未被手机薄桥转发: [' + unforwarded.join(', ') + ']')
+    process.exit(1)
+  }
+}
+
+console.log('CHECK-OP-REGISTRY-PARITY PASSED（读屏 ' + reads.length + ' 条，Rust 目录 ' + operations.length + ' 条：' + sorted(reads).join(', ') + '）')

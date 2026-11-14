@@ -122,7 +122,6 @@ object ShizukuTransport {
           // 票与代次因此必然同源；放到锁外发布则可能与重置/看门狗换代交错。
           NativeShizukuFacts.shared.onBound(NativeShizukuFacts.shared.tokenAt(bindState.currentGeneration), valid)
         }
-        ControlCarrier.invalidateShizukuCache()
         Log.i(TAG, "user service callback " + name.className + " generation=" + generation)
       }
 
@@ -138,7 +137,6 @@ object ShizukuTransport {
           // 用旧代会被当成迟到回调丢弃，用锁外发布则可能盖掉刚建立的新连接。
           NativeShizukuFacts.shared.onConnectionLost(bindState.currentGeneration)
         }
-        ControlCarrier.invalidateShizukuCache()
         Log.w(TAG, "user service disconnected " + name.className + " generation=" + generation)
       }
     }
@@ -195,7 +193,6 @@ object ShizukuTransport {
       previous?.latch?.countDown()
       discardOnMain(previous?.userArgs ?: args(app), previous?.connection, remove = true)
     }
-    ControlCarrier.invalidateShizukuCache()
     Log.i(TAG, "shizuku connection reset (user action); attempts=" + bindState.attempts)
     return shizukuResetResponse(status(app))
   }
@@ -214,7 +211,6 @@ object ShizukuTransport {
       // 看门狗刚换代：事实面在同一临界区内按新代降级。
       NativeShizukuFacts.shared.onConnectionLost(bindState.currentGeneration)
     }
-    ControlCarrier.invalidateShizukuCache()
     Log.w(TAG, "bind watchdog: remove stale user service (attempts=" + bindState.attempts + ")")
   }
 
@@ -837,7 +833,12 @@ object ShizukuTransport {
       })
   }
 
-  /** Shared Activity/Service startup guard; coalesce near-simultaneous completed scans only. */
+  /**
+   * Shared Activity/Service startup guard; coalesce near-simultaneous completed scans only.
+   *
+   * PRD 5.2：属主修复是异常恢复，不是启动常态。没有残留租约、上次也没报问题时，这里直接返回
+   * 「无需维护」，不探测 root 通道、不做有界遍历。
+   */
   fun prepareStartupOwnership(context: Context): JSONObject = RootOwnershipJobs.runBlocking(context, reuseRecent = true)
 
   internal fun autoHealOwnershipDirect(context: Context): JSONObject {
@@ -879,19 +880,25 @@ object ShizukuTransport {
   }
 
   /** Native-only fixed argv execution. Never pass user/model-controlled shell text here. */
-  fun runController(context: Context, argv: Array<String>): JSONObject = RootExecutionFence.command(context) {
-    runControllerInternal(context, argv)
+  fun runController(context: Context, argv: Array<String>, authorize: (() -> Boolean)? = null): JSONObject = RootExecutionFence.command(context) {
+    runControllerInternal(context, argv, authorize)
   }
 
-  private fun runControllerInternal(context: Context, argv: Array<String>): JSONObject {
+  private fun runControllerInternal(context: Context, argv: Array<String>, authorize: (() -> Boolean)? = null): JSONObject {
     val (remote, refusal) = readyService(context)
-    if (remote == null) return refusal ?: unavailableShell()
+    if (remote == null) return (refusal ?: unavailableShell()).put("executed", "no")
     val lease = RpcLease(context, "shizuku-controller")
     return try {
-      lease.beforeRpc(remote)?.let { return it }
+      lease.beforeRpc(remote)?.let { return it.put("executed", "no") }
+      if (authorize != null && !authorize()) {
+        lease.acknowledged()
+        return lease.complete(JSONObject().put("ok", false).put("code", "authorize-denied").put("executed", "no"))
+      }
       val reply = remote.exec(argv, 8_000)
       lease.acknowledged()
-      lease.complete(bundleJson(reply).put("transport", "shizuku"), executionDefinitive(reply))
+      val definitive = executionDefinitive(reply)
+      lease.complete(bundleJson(reply).put("transport", "shizuku")
+        .put("executed", if (definitive) "yes" else "unknown"), definitive)
     } catch (failure: Throwable) {
       lease.complete(shellFailure(failure), definitive = false)
     }
@@ -923,6 +930,12 @@ object ShizukuTransport {
   private const val PULL_CHUNK = 512 * 1024
   private const val MAX_TRANSFER_BYTES = 512L * 1024 * 1024
   private const val SHELL_PATH_PREFIX = "export PATH=/system/bin:/system/xbin:\$PATH; "
+  /** Typed tree reply budget; the service bounds its own body below this. */
+  private const val TREE_BODY_LIMIT = 512 * 1024
+  /** One per-display capability call must answer well inside the 10s observation tick. */
+  private const val DISPLAY_PROBE_BUDGET_MS = 2_000L
+  /** The controller creates at most one virtual display today; keep the probe bounded anyway. */
+  private const val MAX_OBSERVED_DISPLAYS = 4
 
   /** v2 协议面就绪判定：返回 (service, refusal)——refusal 非空即结构化拒绝，调用方直接透传。 */
   private fun readyService(
@@ -980,7 +993,13 @@ object ShizukuTransport {
     runShellInternal(context, command, timeoutMs, capture)
   }
 
-  private fun runShellInternal(context: Context, command: String, timeoutMs: Int = SHELL_TIMEOUT_MS, capture: Boolean = false): JSONObject {
+  internal fun runNativeDiagnostic(context: Context, command: String, expectedUid: Int, authorize: () -> Boolean): JSONObject =
+    RootExecutionFence.command(context) {
+      runShellInternal(context, command, 20_000, expectedUid = expectedUid, authorize = authorize)
+    }
+
+  private fun runShellInternal(context: Context, command: String, timeoutMs: Int = SHELL_TIMEOUT_MS,
+    capture: Boolean = false, expectedUid: Int? = null, authorize: (() -> Boolean)? = null): JSONObject {
     if (command.isBlank()) {
       return JSONObject().put("ok", false).put("code", "shell-empty").put("guidance", "空命令")
     }
@@ -988,10 +1007,14 @@ object ShizukuTransport {
     if (remote == null) return refusal ?: unavailableShell()
     val timeout = timeoutMs.coerceIn(1_000, MAX_SHELL_TIMEOUT_MS)
     val argv = arrayOf("sh", "-c", SHELL_PATH_PREFIX + command)
-    val lease = RpcLease(context, if (capture) "shizuku-capture" else "shizuku-exec")
+    val lease = RpcLease(context, if (capture) "shizuku-capture" else "shizuku-exec", expectedUid = expectedUid)
     return try {
       // argv/timeout and all local setup are complete before the final dispatch-point check.
       lease.beforeRpc(remote)?.let { return it }
+      if (authorize != null && !authorize()) {
+        lease.acknowledged()
+        return lease.complete(JSONObject().put("ok", false).put("code", "authorize-denied").put("executed", "no"))
+      }
       val reply = if (capture) remote.execCapture(argv, timeout, 8 * 1024) else remote.exec(argv, timeout)
       lease.acknowledged()
       val result = bundleJson(reply).put("transport", "shizuku")
@@ -1213,16 +1236,21 @@ object ShizukuTransport {
 
   /** One lease per actual-root operation; never replay an RPC whose acknowledgement is unknown. */
   private class RpcLease(private val context: Context, private val operation: String,
-    private val applyGate: Boolean = true) {
+    private val applyGate: Boolean = true, private val expectedUid: Int? = null) {
     private var leased = false
+    private var leaseOperationId: String? = null
     private var inFlight = false
     private var settledResult: JSONObject? = null
 
     fun beforeRpc(remote: ShizukuUserService): JSONObject? {
       val (uid, refusal) = dispatchIdentity(context, remote, applyGate)
       if (refusal != null) return complete(refusal)
+      if (expectedUid != null && uid != expectedUid) return complete(JSONObject().put("ok", false)
+        .put("code", "shizuku-identity-changed").put("executed", "no"))
       if (uid == 0 && !leased) {
-        RootMaintenanceLease.begin(context, operation)?.let { return it }
+        val begun = RootMaintenanceLease.beginOperation(context, operation)
+        begun.second?.let { return it }
+        leaseOperationId = begun.first ?: return JSONObject().put("ok", false).put("code", "root-lease-id-unavailable")
         leased = true
         // 派发证据（复审第 2、4 点）：这条租约从此**不能**再被自动清算。证据**落不了盘就不派发**——
         // 与 `begin()` 同一条纪律（"If durability cannot be established, do not launch privileged work"）：
@@ -1233,7 +1261,10 @@ object ShizukuTransport {
             .put("guidance", "无法把「已派发」证据落盘，本次不派发特权工作（避免以后误判为未派发）。"), definitive = false)
         }
         // Persisting the lease is local setup: consent/actual identity must be current AFTER it.
-        dispatchIdentity(context, remote, applyGate).second?.let { return complete(it) }
+        val (verifiedUid, changed) = dispatchIdentity(context, remote, applyGate)
+        changed?.let { return complete(it) }
+        if (expectedUid != null && verifiedUid != expectedUid) return complete(JSONObject().put("ok", false)
+          .put("code", "shizuku-identity-changed").put("executed", "no"))
       }
       inFlight = true
       return null
@@ -1250,7 +1281,7 @@ object ShizukuTransport {
       settledResult?.let { return it }
       val result = if (!definitive || inFlight) unknown(out, operation + "-result-incomplete")
       else {
-        val finished = try { RootMaintenanceLease.finish(context) } catch (_: Throwable) { false }
+        val finished = try { RootMaintenanceLease.finish(context, leaseOperationId) } catch (_: Throwable) { false }
         if (finished) out else unknown(out, operation + "-lease-finish-failed")
       }
       settledResult = result
@@ -1410,21 +1441,266 @@ object ShizukuTransport {
   /** 最近一次 shell 失败的快照（判据与诊断面用）。 */
   internal fun lastShellFailureSnapshot(): JSONObject? = synchronized(shellFailureLock) { lastShellFailure }
 
-  /** Explicit preparation, outside the native fact reader and dispatcher. Never prompts. */
-  internal fun observeNativeRealTap(context: Context): Boolean {
-    if (!ensureBound(context, requestPermission = false).optBoolean("ok")) return false
-    val (remote, token) = nativeInputConnection() ?: return false
-    if (!configureIfNeeded(context) || !isNativeInputConnection(remote, token)) return false
+  private class NativeInputObservation(val capabilities: Int, val token: LinkToken)
+
+  /**
+   * 一轮 per-display 实测：真实屏用上一条连接握手测出的位，虚拟屏逐个当场测。
+   *
+   * 只测**本应用自己的注册表**里已有的屏：真实屏固定 display 0，其它一律来自
+   * [VdisplayController.nativeDisplayAllocations] 的当前快照。测不到的屏不进表，
+   * 已销毁的屏这一轮就会从表里消失——事实面因此不会残留上一块屏的能力。
+   * 全程不弹权限、不新建绑定，任何失败只让对应屏缺席。
+   */
+  internal fun observeNativeDisplays(context: Context): Int {
+    val observed = observeNativeInput(context) ?: return 0
+    val bits = observed.capabilities
+    val measured = LinkedHashMap<Int, com.dsharnessmobile.shell.nativecontrol.DisplayCapabilities>()
+    // display 0 的四位来自同一轮 whole-connection 握手，不再单独打一次 Binder。
+    measured[0] = com.dsharnessmobile.shell.nativecontrol.DisplayCapabilities(
+      "real",
+      (if (bits and 2 != 0) 1 else 0) or (if (bits and 4 != 0) 2 else 0) or
+        (if (bits and 8 != 0) 8 else 0) or (if (bits and 32 != 0) 4 else 0),
+    )
+    val targets = ArrayList<Pair<Int, String>>(2)
+    for (allocation in VdisplayController.nativeDisplayAllocations().take(MAX_OBSERVED_DISPLAYS)) {
+      val displayId = runCatching { allocation.display.displayId }.getOrDefault(-1)
+      if (displayId > 0) targets += displayId to allocation.alias
+    }
+    for ((displayId, alias) in targets) {
+      val (remote, token) = nativeInputConnection() ?: break
+      if (!token.sameConnectionAs(observed.token)) break
+      val deadline = SystemClock.elapsedRealtime() + DISPLAY_PROBE_BUDGET_MS
+      val reply = runCatching { remote.nativeDisplayCapabilities(displayId, alias) }.getOrNull()
+      if (reply == null) continue
+      if (!isNativeInputConnection(remote, token) || !NativeShizukuFacts.shared.sameShellConnection(token)) {
+        break
+      }
+      // 一位都没测到的屏同样记账：那是「测过、都不支持」，不是未知。
+      measured[displayId] = com.dsharnessmobile.shell.nativecontrol.DisplayCapabilities(alias, reply)
+      if (deadline <= SystemClock.elapsedRealtime()) break
+    }
+    val (_, token) = nativeInputConnection() ?: return 0
+    if (!token.sameConnectionAs(observed.token) ||
+      !NativeShizukuFacts.shared.sameShellConnection(token)) return 0
+    NativeShizukuFacts.shared.onDisplayCapabilities(observed.token, measured)
+    return measured.size
+  }
+
+  /**
+   * Explicit preparation, outside the native fact reader and dispatcher. Never prompts.
+   *
+   * Both capability bits are published from this one measured answer, each on the ticket taken
+   * before the Binder call. A failed observation publishes nothing.
+   */
+  private fun observeNativeInput(context: Context): NativeInputObservation? {
+    if (!ensureBound(context, requestPermission = false).optBoolean("ok")) return null
+    val (remote, token) = nativeInputConnection() ?: return null
+    if (!configureIfNeeded(context) || !isNativeInputConnection(remote, token)) return null
     val uid = runCatching { remote.uid() }.getOrNull()
     // An older service can fail this optional transaction without breaking the v4 contract.
-    val supported = if (uid == 2000) runCatching { remote.nativeInputCapabilities() and 1 != 0 }.getOrNull()
-      else if (uid == null) null else false
+    val capabilities = if (uid == 2000) runCatching { remote.nativeInputCapabilities() }.getOrNull()
+      else if (uid == null) null else 0
     return synchronized(lock) {
-      if (!isNativeInputConnection(remote, token)) return false
+      if (!isNativeInputConnection(remote, token)) return null
       NativeShizukuFacts.shared.onServerUid(token, uid)
-      NativeShizukuFacts.shared.onRealTapCapability(token, supported)
-      NativeShizukuFacts.shared.permitsRealTap(token)
+      NativeShizukuFacts.shared.onRealTapCapability(token, capabilities?.let { it and 1 != 0 })
+      NativeShizukuFacts.shared.onRealTextCapability(token, capabilities?.let { it and 2 != 0 })
+      NativeShizukuFacts.shared.onRealTreeCapability(token, capabilities?.let { it and 4 != 0 })
+      NativeShizukuFacts.shared.onNativeFeatures(token, capabilities)
+      if (capabilities == null) null else NativeInputObservation(capabilities, token)
     }
+  }
+
+  /** True only when this connection measured bit 0 and still permits a real point tap. */
+  internal fun observeNativeRealTap(context: Context): Boolean {
+    val observed = observeNativeInput(context) ?: return false
+    return NativeShizukuFacts.shared.permitsRealTap(observed.token)
+  }
+
+  /**
+   * True only when this connection measured bit 1 and still permits focused text.
+   * It never reuses a tap verdict: both bits come from separate capability observations.
+   */
+  internal fun observeNativeRealText(context: Context): Boolean {
+    val observed = observeNativeInput(context) ?: return false
+    if (observed.capabilities and 2 == 0) return false
+    return NativeShizukuFacts.shared.permitsRealText(observed.token)
+  }
+
+  /** True only when this connection measured bit 2 and still permits a real-display tree read. */
+  internal fun observeNativeRealTree(context: Context): Boolean {
+    val observed = observeNativeInput(context) ?: return false
+    if (observed.capabilities and 4 == 0) return false
+    return NativeShizukuFacts.shared.permitsRealTree(observed.token)
+  }
+
+  private fun nativeFeatureConnection(bit: Int, deadlineMs: Long, authorize: () -> Boolean): Pair<ShizukuUserService, LinkToken>? {
+    if (deadlineMs <= SystemClock.elapsedRealtime()) return null
+    val (remote, token) = nativeInputConnection() ?: return null
+    if (!NativeShizukuFacts.shared.permitsFeature(token, bit)) return null
+    val granted = runCatching { Shizuku.pingBinder() &&
+      Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED && remote.uid() == 2000 }.getOrDefault(false)
+    if (!granted || !authorize() || deadlineMs <= SystemClock.elapsedRealtime() ||
+      !isNativeInputConnection(remote, token) || !NativeShizukuFacts.shared.permitsFeature(token, bit)) return null
+    return remote to token
+  }
+
+  internal fun nativeCaptureReal(deadlineMs: Long, authorize: () -> Boolean): android.os.ParcelFileDescriptor? {
+    val (remote, token) = nativeFeatureConnection(8, deadlineMs, authorize) ?: return null
+    val descriptor = runCatching { remote.nativeCaptureReal(deadlineMs) }.getOrNull() ?: return null
+    if (!isNativeInputConnection(remote, token) || !NativeShizukuFacts.shared.sameRealShellConnection(token)) {
+      descriptor.close()
+      return null
+    }
+    return descriptor
+  }
+
+  /**
+   * One typed capture for an explicit screen.
+   *
+   * The caller (the Rust-committed plan) already resolved alias and displayId; this method only
+   * re-checks that the pair still matches this app's own registration and that this connection
+   * measured capture for exactly that display. A virtual request never borrows the real screen.
+   */
+  internal fun nativeCaptureDisplay(displayId: Int, alias: String, deadlineMs: Long,
+    authorize: () -> Boolean): android.os.ParcelFileDescriptor? {
+    if (displayId < 0 || deadlineMs <= SystemClock.elapsedRealtime()) return null
+    if (displayId != 0 && VdisplayController.displayIdForAlias(alias) != displayId) return null
+    val (remote, token) = nativeInputConnection() ?: return null
+    if (!NativeShizukuFacts.shared.permitsDisplay(token, displayId, alias, "screenshot")) return null
+    val granted = runCatching { Shizuku.pingBinder() &&
+      Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED && remote.uid() == 2000 }.getOrDefault(false)
+    if (!granted || !authorize() || deadlineMs <= SystemClock.elapsedRealtime() ||
+      !isNativeInputConnection(remote, token) ||
+      !NativeShizukuFacts.shared.permitsDisplay(token, displayId, alias, "screenshot")) return null
+    val descriptor = runCatching { remote.nativeCaptureDisplay(displayId, alias, deadlineMs) }.getOrNull()
+      ?: return null
+    // 回执只能在同一条连接上被接受；虚拟屏还要确认它此刻仍在注册表里。
+    val stillRegistered = displayId == 0 || VdisplayController.displayIdForAlias(alias) == displayId
+    if (!isNativeInputConnection(remote, token) || !NativeShizukuFacts.shared.sameShellConnection(token) ||
+      !stillRegistered) {
+      descriptor.close()
+      return null
+    }
+    return descriptor
+  }
+
+  internal fun nativeMotionReal(operation: String, args: JSONObject, deadlineMs: Long, authorize: () -> Boolean): JSONObject {
+    fun result(code: String, executed: String) = JSONObject().put("ok", false).put("code", code).put("executed", executed)
+    val (remote, token) = nativeFeatureConnection(16, deadlineMs, authorize)
+      ?: return result("shizuku-motion-unavailable", "no")
+    return try {
+      val reply = remote.nativeMotionReal(operation, args.toString(), deadlineMs)
+      if (!isNativeInputConnection(remote, token) || !NativeShizukuFacts.shared.sameRealShellConnection(token))
+        return result("shizuku-motion-stale", "unknown")
+      val executed = reply.getString("executed").takeIf { it in setOf("yes", "no", "unknown") } ?: "unknown"
+      JSONObject().put("ok", reply.getBoolean("ok") && executed == "yes")
+        .put("code", reply.getString("code") ?: "shizuku-motion-unconfirmed").put("executed", executed)
+    } catch (_: Exception) { result("shizuku-motion-unconfirmed", "unknown") }
+  }
+
+  /** Trimmed capability bits for one explicit display, measured on this connection only. */
+  internal fun nativeDisplayCapabilities(displayId: Int, alias: String): Int? {
+    val (remote, token) = nativeInputConnection() ?: return null
+    val deadline = SystemClock.elapsedRealtime() + DISPLAY_PROBE_BUDGET_MS
+    val reply = runCatching { remote.nativeDisplayCapabilities(displayId, alias) }.getOrNull()
+      ?: return null
+    if (deadline <= SystemClock.elapsedRealtime()) return null
+    if (!isNativeInputConnection(remote, token) || !NativeShizukuFacts.shared.sameShellConnection(token))
+      return null
+    return reply
+  }
+
+  /**
+   * Coordinate gesture on one explicit screen.
+   *
+   * The display id and alias come from the Rust plan and are re-checked against this app's own
+   * registration. Only coordinate gestures are handled here; global actions and app launch keep
+   * their real-display transactions. Nothing is replayed and nothing falls back to display 0.
+   */
+  internal fun nativeMotionDisplay(displayId: Int, alias: String, operation: String, args: JSONObject,
+    deadlineMs: Long, authorize: () -> Boolean): JSONObject {
+    fun result(code: String, executed: String) =
+      JSONObject().put("ok", false).put("code", code).put("executed", executed)
+    if (displayId < 0 ||
+      operation !in setOf("click", "longClick", "scroll", "swipe", "keyEvent", "global"))
+      return result("shizuku-motion-unavailable", "no")
+    if (displayId != 0 && VdisplayController.displayIdForAlias(alias) != displayId)
+      return result("shizuku-motion-target-unregistered", "no")
+    if (deadlineMs <= SystemClock.elapsedRealtime()) return result("shizuku-motion-deadline", "no")
+    val (remote, token) = nativeInputConnection() ?: return result("shizuku-motion-unavailable", "no")
+    if (!NativeShizukuFacts.shared.permitsCoordinateGesture(token, displayId, alias))
+      return result("shizuku-motion-unavailable", "no")
+    val granted = runCatching { Shizuku.pingBinder() &&
+      Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED && remote.uid() == 2000 }
+      .getOrDefault(false)
+    if (!granted) return result("shizuku-motion-unavailable", "no")
+    if (!authorize()) return result("authorize-denied", "no")
+    if (!isNativeInputConnection(remote, token) ||
+      !NativeShizukuFacts.shared.permitsCoordinateGesture(token, displayId, alias))
+      return result("shizuku-motion-stale", "no")
+    return try {
+      val reply = remote.nativeMotionDisplay(displayId, operation, args.toString(), deadlineMs)
+      if (!isNativeInputConnection(remote, token) || !NativeShizukuFacts.shared.sameShellConnection(token))
+        return result("shizuku-motion-stale", if (reply.getString("executed") == "no") "no" else "unknown")
+      val executed = reply.getString("executed").takeIf { it in setOf("yes", "no", "unknown") } ?: "unknown"
+      JSONObject().put("ok", reply.getBoolean("ok") && executed == "yes")
+        .put("code", reply.getString("code") ?: "shizuku-motion-unconfirmed").put("executed", executed)
+    } catch (_: Exception) {
+      // The command may already have run on the device; never downgrade that to "no".
+      result("shizuku-motion-unconfirmed", "unknown")
+    }
+  }
+
+  internal fun nativeNodeReal(windowId: Int, path: IntArray, operation: String, args: JSONObject,
+    expectedNode: String, deadlineMs: Long, authorize: () -> Boolean): JSONObject {
+    return nativeNode(0, "real", windowId, path, operation, args, expectedNode, deadlineMs, authorize)
+  }
+
+  /** Node read/action bound to one explicit screen and one window on it. No selected-screen fallback. */
+  internal fun nativeNodeDisplay(displayId: Int, alias: String, windowId: Int, path: IntArray,
+    operation: String, args: JSONObject, expectedNode: String, deadlineMs: Long,
+    authorize: () -> Boolean): JSONObject =
+    nativeNode(displayId, alias, windowId, path, operation, args, expectedNode, deadlineMs, authorize)
+
+  private fun nativeNode(displayId: Int, alias: String, windowId: Int, path: IntArray,
+    operation: String, args: JSONObject, expectedNode: String, deadlineMs: Long,
+    authorize: () -> Boolean): JSONObject {
+    fun result(code: String, executed: String) = JSONObject().put("ok", false).put("code", code).put("executed", executed)
+    if (displayId < 0) return result("shizuku-node-display-unsupported", "no")
+    if (displayId != 0 && VdisplayController.displayIdForAlias(alias) != displayId)
+      return result("shizuku-node-target-unregistered", "no")
+    // 节点级动作（含节点 setText）由该屏的节点能力把关；焦点编辑器文本才看 setText 位。
+    val capability = if (operation == "read" || operation == "setText") "nodeText" else operation
+    val connection = if (displayId == 0) {
+      nativeFeatureConnection(32, deadlineMs, authorize)
+    } else {
+      // 虚拟屏没有独立的 whole-connection bit 32，改由该屏实测的节点位把关。
+      val current = nativeInputConnection() ?: return result("shizuku-node-unavailable", "no")
+      if (!NativeShizukuFacts.shared.permitsDisplay(current.second, displayId, alias, capability))
+        return result("shizuku-node-unavailable", "no")
+      val granted = runCatching { Shizuku.pingBinder() &&
+        Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED &&
+        current.first.uid() == 2000 }.getOrDefault(false)
+      if (!granted) return result("shizuku-node-unavailable", "no")
+      if (!authorize()) return result("authorize-denied", "no")
+      if (!isNativeInputConnection(current.first, current.second) ||
+        !NativeShizukuFacts.shared.permitsDisplay(current.second, displayId, alias, capability))
+        return result("shizuku-node-stale", "no")
+      current
+    } ?: return result("shizuku-node-unavailable", "no")
+    val (remote, token) = connection
+    return try {
+      val reply = if (displayId == 0)
+        remote.nativeNodeReal(windowId, path, operation, args.toString(), expectedNode, deadlineMs)
+      else remote.nativeNodeDisplay(displayId, windowId, path, operation, args.toString(), expectedNode, deadlineMs)
+      if (!isNativeInputConnection(remote, token) || !NativeShizukuFacts.shared.sameShellConnection(token))
+        return result("shizuku-node-stale", if (operation == "read") "no" else "unknown")
+      val executed = reply.getString("executed").takeIf { it in setOf("yes", "no", "unknown") } ?: "unknown"
+      JSONObject().put("ok", reply.getBoolean("ok") && executed == "yes")
+        .put("code", reply.getString("code") ?: "shizuku-node-unconfirmed").put("executed", executed)
+        .also { if (reply.containsKey("body")) it.put("body", reply.getString("body")) }
+    } catch (_: Exception) { result("shizuku-node-unconfirmed", if (operation == "read") "no" else "unknown") }
   }
 
   private fun nativeInputConnection(): Pair<ShizukuUserService, LinkToken>? = synchronized(lock) {
@@ -1441,9 +1717,11 @@ object ShizukuTransport {
       JSONObject().put("ok", executed == "yes").put("code", code).put("executed", executed)
     val (remote, token) = nativeInputConnection() ?: return result("shizuku-native-input-unavailable")
     if (!NativeShizukuFacts.shared.permitsRealTap(token)) return result("shizuku-native-input-unavailable")
+    // permitsRealTap already carries this connection's measured bit 0; a tap must not build the
+    // editor automation just to re-read a capability it does not use.
     val granted = runCatching {
       Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED &&
-        remote.uid() == 2000 && remote.nativeInputCapabilities() and 1 != 0
+        remote.uid() == 2000
     }.getOrDefault(false)
     if (!granted) return result("shizuku-native-input-unavailable")
     if (!authorize()) return result("authorize-denied")
@@ -1462,6 +1740,128 @@ object ShizukuTransport {
       }
     } catch (_: Exception) {
       result("shizuku-input-unconfirmed", "unknown")
+    }
+  }
+
+  /**
+   * Focused-editor text: one typed Binder call after all gates, no replay and no fallback channel.
+   * The deadline is computed here so an expired request never reaches the service.
+   */
+  internal fun nativeSetTextReal(text: String, clear: Boolean, deadlineMs: Long, authorize: () -> Boolean): JSONObject {
+    return nativeSetText(text, clear, deadlineMs, authorize, displayId = 0, alias = "real")
+  }
+
+  /**
+   * Focused-editor text for one explicit screen.
+   *
+   * [displayId]/[alias] are fixed by the Rust plan; a virtual pair is re-checked against this app's
+   * own registration and against the per-display measurement of the same connection. Nothing falls
+   * back to the currently selected screen or to display 0.
+   */
+  internal fun nativeSetTextDisplay(displayId: Int, alias: String, text: String, clear: Boolean,
+    deadlineMs: Long, authorize: () -> Boolean): JSONObject =
+    nativeSetText(text, clear, deadlineMs, authorize, displayId, alias)
+
+  private fun nativeSetText(text: String, clear: Boolean, deadlineMs: Long, authorize: () -> Boolean,
+    displayId: Int, alias: String): JSONObject {
+    fun result(code: String, executed: String = "no") =
+      JSONObject().put("ok", executed == "yes").put("code", code).put("executed", executed)
+    if (text.toByteArray(Charsets.UTF_8).size > 8192) return result("invalid-text")
+    if (deadlineMs <= SystemClock.elapsedRealtime()) return result("shizuku-editor-deadline")
+    if (displayId < 0) return result("shizuku-editor-display-unsupported")
+    if (displayId != 0 && VdisplayController.displayIdForAlias(alias) != displayId)
+      return result("shizuku-editor-target-unregistered")
+    val (remote, token) = nativeInputConnection() ?: return result("shizuku-editor-unavailable")
+    if (!NativeShizukuFacts.shared.permitsFocusedText(token, displayId, alias))
+      return result("shizuku-editor-unavailable")
+    // permitsRealText already required this ticket's measured bit 1; re-probing here would only
+    // add latency before the single dispatch. Identity and grant are still re-read live.
+    val granted = runCatching {
+      Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED &&
+        remote.uid() == 2000
+    }.getOrDefault(false)
+    if (!granted) return result("shizuku-editor-unavailable")
+    if (!authorize()) return result("authorize-denied")
+    if (!isNativeInputConnection(remote, token) ||
+      !NativeShizukuFacts.shared.permitsFocusedText(token, displayId, alias))
+      return result("shizuku-editor-stale")
+    return try {
+      val reply = if (displayId == 0) remote.nativeSetTextReal(text, clear, deadlineMs)
+        else remote.nativeSetTextDisplay(displayId, text, clear, deadlineMs)
+      // The sheet only reads replies from the connection that dispatched them.
+      if (!isNativeInputConnection(remote, token) ||
+        !NativeShizukuFacts.shared.sameShellConnection(token))
+        return result("shizuku-editor-stale", if (reply.getString("executed") == "no") "no" else "unknown")
+      val code = reply.getString("code") ?: "shizuku-text-unconfirmed"
+      when (reply.getString("executed")) {
+        "yes" -> if (code == "shizuku-text-confirmed") result(code, "yes")
+          else result("shizuku-text-unconfirmed", "unknown")
+        "no" -> result(code)
+        else -> result("shizuku-text-unconfirmed", "unknown")
+      }
+    } catch (_: Exception) {
+      result("shizuku-text-unconfirmed", "unknown")
+    }
+  }
+
+  /**
+   * Real-display raw tree: one typed Binder call after all gates, then the same connection is
+   * re-checked before the body is returned to the caller. Nothing is replayed on failure and there
+   * is no accessibility fallback for a Shizuku plan.
+   *
+   * The returned body carries only measured facts (window, nodes, completion). The Rust plan owns
+   * screenId/epoch/generation/size; this method never derives those.
+   */
+  internal fun nativeSnapshotReal(deadlineMs: Long, authorize: () -> Boolean): JSONObject {
+    return nativeSnapshot(0, "real", deadlineMs, authorize)
+  }
+
+  /**
+   * Raw tree for one explicit screen. The plan owns the target; this method only re-checks that a
+   * virtual pair still matches this app's registration and that this connection measured a tree for
+   * exactly that display.
+   */
+  internal fun nativeSnapshotDisplay(displayId: Int, alias: String, deadlineMs: Long,
+    authorize: () -> Boolean): JSONObject = nativeSnapshot(displayId, alias, deadlineMs, authorize)
+
+  private fun nativeSnapshot(displayId: Int, alias: String, deadlineMs: Long,
+    authorize: () -> Boolean): JSONObject {
+    fun result(code: String, executed: String = "no") =
+      JSONObject().put("ok", false).put("code", code).put("executed", executed)
+    if (deadlineMs <= SystemClock.elapsedRealtime()) return result("shizuku-tree-deadline")
+    if (displayId < 0) return result("shizuku-tree-display-unsupported")
+    if (displayId != 0 && VdisplayController.displayIdForAlias(alias) != displayId)
+      return result("shizuku-tree-target-unregistered")
+    val (remote, token) = nativeInputConnection() ?: return result("shizuku-tree-unavailable")
+    if (!NativeShizukuFacts.shared.permitsDisplay(token, displayId, alias, "snapshot"))
+      return result("shizuku-tree-unavailable")
+    // Identity and grant are read live; the measured bit 2 was already required for this ticket.
+    val granted = runCatching {
+      Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED &&
+        remote.uid() == 2000
+    }.getOrDefault(false)
+    if (!granted) return result("shizuku-tree-unavailable")
+    if (!authorize()) return result("authorize-denied")
+    if (!isNativeInputConnection(remote, token) ||
+      !NativeShizukuFacts.shared.permitsDisplay(token, displayId, alias, "snapshot"))
+      return result("shizuku-tree-stale")
+    return try {
+      val reply = remote.nativeSnapshotReal(displayId, deadlineMs)
+      val code = reply.getString("code")
+      // The body is only usable while it still belongs to the connection that read it.
+      if (!isNativeInputConnection(remote, token) ||
+        !NativeShizukuFacts.shared.sameShellConnection(token))
+        return result("shizuku-tree-stale")
+      if (!reply.getBoolean("ok") || reply.getString("executed") != "yes")
+        return result(code ?: "shizuku-tree-unavailable")
+      val body = reply.getString("body")
+      if (body.isNullOrEmpty() || body.toByteArray(Charsets.UTF_8).size > TREE_BODY_LIMIT)
+        return result("shizuku-tree-too-large")
+      JSONObject().put("ok", true).put("code", "shizuku-tree-captured")
+        .put("executed", "yes").put("body", body)
+    } catch (_: Exception) {
+      // A read is side-effect free, but an unconfirmed reply is still not a tree.
+      result("shizuku-tree-unconfirmed")
     }
   }
 

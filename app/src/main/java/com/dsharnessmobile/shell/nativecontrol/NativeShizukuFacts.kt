@@ -11,7 +11,18 @@ import org.json.JSONObject
  * 只带代次不够：断连、重置、看门狗回收、探活失败都可能发生在**同一代次内**，
  * 那时代次没变，靠 [epoch] 才能认出「这是上一条连接的迟到结果」。
  */
-internal data class LinkToken(val generation: Long, val epoch: Long, val takenAtMs: Long)
+internal data class LinkToken(val generation: Long, val epoch: Long, val takenAtMs: Long) {
+  fun sameConnectionAs(other: LinkToken): Boolean = generation == other.generation && epoch == other.epoch
+}
+
+/**
+ * 一次 per-display 能力观测。
+ *
+ * [bits] 是 AIDL `nativeDisplayCapabilities` 当场测出来的位图：
+ * bit 0 = 焦点编辑器文本、bit 1 = 原始树、bit 2 = 节点动作、bit 3 = 原始帧。
+ * 本类不推导未测的位，也不把某块屏的能力算到另一块屏头上。
+ */
+internal data class DisplayCapabilities(val alias: String, val bits: Int)
 
 /**
  * Shizuku 事实的**非阻塞**入口：只读进程内同代缓存，不启动 Binder、不做 I/O、不读文件。
@@ -68,6 +79,17 @@ internal class NativeShizukuFacts(
   private var functionalReady: Timed<Boolean>? = null
   private var serverUid: Timed<Int>? = null
   private var realTap: Timed<Boolean>? = null
+  private var realText: Timed<Boolean>? = null
+  private var realTree: Timed<Boolean>? = null
+  private var featureBits: Timed<Int>? = null
+
+  /**
+   * per-display 实测能力：displayId -> (alias, bits)。
+   *
+   * 只能由 [onDisplayCapabilities] 在**同一条连接**上写入；整表随连接失效一起清空，
+   * 绝不让旧连接测到的虚拟屏能力继续对新一代连接可见。
+   */
+  private var displayBits: Timed<Map<Int, DisplayCapabilities>>? = null
 
   /**
    * 为指定绑定代次取一张当前票（连接回调自带代次时用）。
@@ -106,6 +128,10 @@ internal class NativeShizukuFacts(
       this.functionalReady = null
       this.serverUid = null
       realTap = null
+      realText = null
+      realTree = null
+      featureBits = null
+      displayBits = null
       invalidate()
     } else if (running == null) {
       // 探不到：不能断言 no，也不能沿用上次的 yes。
@@ -140,6 +166,10 @@ internal class NativeShizukuFacts(
       functionalReady = null
       serverUid = null
       realTap = null
+      realText = null
+      realTree = null
+      featureBits = null
+      displayBits = null
       invalidate()
     }
   }
@@ -172,13 +202,201 @@ internal class NativeShizukuFacts(
     realTap = supported?.let { Timed(it, token.takenAtMs) }
   }
 
+  /**
+   * 记录实测的焦点编辑器文本能力（bit 1）。未知不得由点按能力推导，也不得由就绪状态推导。
+   * 同一连接内迟到的旧观测不覆盖较新的观测。
+   */
+  fun onRealTextCapability(token: LinkToken, supported: Boolean?) = synchronized(lock) {
+    if (!open(token)) return
+    val existing = realText
+    if (existing != null && token.takenAtMs < existing.atMs) return
+    realText = supported?.let { Timed(it, token.takenAtMs) }
+  }
+
+  /**
+   * 记录实测的原始 UI 树读取能力（bit 2）。未知不得由点按/文本能力或就绪状态推导。
+   * 同一连接内迟到的旧观测不覆盖较新的观测。
+   */
+  fun onRealTreeCapability(token: LinkToken, supported: Boolean?) = synchronized(lock) {
+    if (!open(token)) return
+    val existing = realTree
+    if (existing != null && token.takenAtMs < existing.atMs) return
+    realTree = supported?.let { Timed(it, token.takenAtMs) }
+  }
+
+  fun onNativeFeatures(token: LinkToken, bits: Int?) = synchronized(lock) {
+    if (!open(token)) return
+    if (featureBits?.let { token.takenAtMs < it.atMs } == true) return
+    featureBits = bits?.let { Timed(it, token.takenAtMs) }
+  }
+
+  fun permitsFeature(token: LinkToken, bit: Int): Boolean = synchronized(lock) {
+    token.generation == currentGeneration && token.epoch == epoch && readyFeature(bit, clock())
+  }
+
+  private fun readyFeature(bit: Int, now: Long): Boolean =
+    listOf(installed, running, granted, bound, functionalReady).all { tri(it, now) == "yes" } &&
+      serverUid?.let { it.value == 2000 && fresh(it.atMs, now) } == true &&
+      featureBits?.let { fresh(it.atMs, now) && it.value and bit != 0 } == true
+
   fun permitsRealTap(token: LinkToken): Boolean = synchronized(lock) {
     val now = clock()
     token.generation == currentGeneration && token.epoch == epoch && readyForRealTap(now)
   }
 
+  /** 文本派发同样要求整条连接就绪、真实 uid2000 与已实测的 bit 1；不认识的能力不会放行。 */
+  fun permitsRealText(token: LinkToken): Boolean = synchronized(lock) {
+    val now = clock()
+    token.generation == currentGeneration && token.epoch == epoch && readyForRealText(now)
+  }
+
+  /** 树读取要求整条连接就绪、真实 uid2000 与已实测的 bit 2；三种能力互不推导。 */
+  fun permitsRealTree(token: LinkToken): Boolean = synchronized(lock) {
+    val now = clock()
+    token.generation == currentGeneration && token.epoch == epoch && readyForRealTree(now)
+  }
+
+  /**
+   * 记录一轮 per-display 实测能力。[displays] 是本次**真正测过**的屏；null 表示这一轮没测成
+   * （观测未知，不得沿用上一轮的结论）。
+   *
+   * 整表覆盖：某块虚拟屏这一轮测不到 / 已销毁，就必须从表里消失，不能让上一次的位继续生效。
+   */
+  fun onDisplayCapabilities(token: LinkToken, displays: Map<Int, DisplayCapabilities>?) =
+    synchronized(lock) {
+      if (!open(token)) return@synchronized
+      if (displayBits?.let { token.takenAtMs < it.atMs } == true) return@synchronized
+      displayBits = displays?.let { Timed(LinkedHashMap(it), token.takenAtMs) }
+    }
+
+  /**
+   * 某块屏上的某个 op 现在是否可派发。
+   *
+   * display 0 只认真实屏的实测位；其它 display 只认同一连接上按该 displayId 测出来的位，
+   * 并且要求 alias 与当前注册一致——绝不用别块屏的能力代替目标屏。
+   */
+  fun permitsDisplay(token: LinkToken, displayId: Int, alias: String, operation: String): Boolean =
+    synchronized(lock) {
+      if (token.generation != currentGeneration || token.epoch != epoch) return@synchronized false
+      val now = clock()
+      if (!shellReady(now)) return@synchronized false
+      val measured = displayOpsAt(now)[displayId] ?: return@synchronized false
+      if (displayId != 0 && displayAlias(now, displayId) != alias) return@synchronized false
+      when (operation) {
+        // "read" 是节点动作前的只读核对，不是独立 op：它要求该屏测到节点能力。
+        "read" -> "nodeText" in measured
+        else -> operation in measured
+      }
+    }
+
+  /** 当前连接已实测的屏与它们的 op（诊断/探针用；不刷新 TTL）。 */
+  fun measuredDisplayOperations(): Map<Int, List<String>> = synchronized(lock) {
+    displayOpsAt(clock())
+  }
+
+  /**
+   * 坐标手势（input -d &lt;displayId&gt;）的准入：必须是该屏自己测到的 bit 16。
+   * 节点位也能点，但那是「按 window/path 的节点动作」，不能替代坐标落点。
+   */
+  fun permitsCoordinateGesture(token: LinkToken, displayId: Int, alias: String): Boolean =
+    synchronized(lock) {
+      if (token.generation != currentGeneration || token.epoch != epoch) return@synchronized false
+      if (!shellReady(clock())) return@synchronized false
+      if (displayId == 0) return@synchronized readyFeature(16, clock())
+      val measured = measuredDisplays(clock())[displayId] ?: return@synchronized false
+      measured.alias == alias && measured.bits and 16 != 0
+    }
+
+  /**
+   * 焦点编辑器文本的准入：display 0 看实测的 bit 1；虚拟屏看该屏自己的 bit 0。
+   *
+   * 事实面按 op 名发布时，「setText」既要覆盖节点 setText 也要覆盖焦点文本，二者同名但通道不同。
+   * 所以真正的区分放在这里：焦点文本只认文本位，节点 setText 走节点位。
+   */
+  fun permitsFocusedText(token: LinkToken, displayId: Int, alias: String): Boolean =
+    synchronized(lock) {
+      if (token.generation != currentGeneration || token.epoch != epoch) return@synchronized false
+      if (!shellReady(clock())) return@synchronized false
+      if (displayId == 0) return@synchronized readyForRealText(clock())
+      val measured = measuredDisplays(clock())[displayId] ?: return@synchronized false
+      measured.alias == alias && measured.bits and 1 != 0
+    }
+
+  /**
+   * 服务端回执的取票核对：同一条连接、票据仍有效、远端仍是真实 uid2000。
+   * 回执只能在其派发所属连接上被接受，不能跨代写入。
+   */
+  internal fun sameRealShellConnection(token: LinkToken): Boolean = synchronized(lock) {
+    token.generation == currentGeneration && token.epoch == epoch &&
+      serverUid?.let { it.value == 2000 && fresh(it.atMs, clock()) } == true
+  }
+
+  /** 与 [sameRealShellConnection] 同一判据；多屏路径用这个名字表达「同一条 shell 连接」。 */
+  internal fun sameShellConnection(token: LinkToken): Boolean = sameRealShellConnection(token)
+
+  private fun shellReady(now: Long): Boolean =
+    listOf(installed, running, granted, bound, functionalReady).all { tri(it, now) == "yes" } &&
+      serverUid?.let { it.value == 2000 && fresh(it.atMs, now) } == true
+
+  /** 真实屏（display 0）当前可派的 op；每条都来自各自实测的位，互不推导。 */
+  private fun realOps(now: Long): List<String> = buildList {
+    if (readyForRealTap(now)) add("click")
+    if (readyForRealText(now)) add("setText")
+    if (readyForRealTree(now)) add("snapshot")
+    if (readyFeature(8, now)) addAll(listOf("screenshot", "readRegion"))
+    if (readyFeature(16, now)) addAll(listOf("longClick", "scroll", "swipe", "keyEvent", "global", "launchApp"))
+    if (readyFeature(32, now)) add("nodeText")
+  }
+
+  /**
+   * 虚拟屏的 op 只由该屏实测的位图展开。五个位互相独立：
+   * 1 = 焦点编辑器文本、2 = 原始树、4 = 节点读数/动作、8 = 原始帧、16 = 坐标手势。
+   * 节点 setText 属于节点位，焦点文本属于文本位，两者不能互相顶替。
+   */
+  private fun virtualOps(bits: Int): List<String> = buildList {
+    if (bits and 1 != 0) add("setText")
+    if (bits and 2 != 0) add("snapshot")
+    // 节点位覆盖「按 window/path」的节点读数与动作（click/longClick/scroll/setText/nodeText）。
+    // 坐标形态的 click/longClick/scroll 由位 16 单独发布；两处都出现时只保留一份。
+    if (bits and 4 != 0) for (operation in listOf("click", "longClick", "scroll", "setText", "nodeText")) {
+      if (operation !in this) add(operation)
+    }
+    if (bits and 8 != 0) addAll(listOf("screenshot", "readRegion"))
+    // 位 16 = coordinate/key gestures：click/longClick/scroll 的坐标形态 + swipe + keyEvent。
+    // global 也由这一位发布（虚拟屏只有 back 能带目标 display 成立）；
+    // home/recents/notifications 的拒绝在执行侧按动作逐条给出明确错误码，绝不落到真实屏。
+    if (bits and 16 != 0) addAll(listOf("click", "longClick", "scroll", "swipe", "keyEvent", "global"))
+  }
+
+  private fun measuredDisplays(now: Long): Map<Int, DisplayCapabilities> =
+    displayBits?.takeIf { fresh(it.atMs, now) }?.value ?: emptyMap()
+
+  private fun displayAlias(now: Long, displayId: Int): String? =
+    measuredDisplays(now)[displayId]?.alias
+
+  /** displayId -> 当前可派 op。display 0 只来自真实屏实测位，其它只来自该屏实测位。 */
+  private fun displayOpsAt(now: Long): Map<Int, List<String>> {
+    val out = LinkedHashMap<Int, List<String>>()
+    val real = realOps(now)
+    if (real.isNotEmpty()) out[0] = real
+    for ((id, capability) in measuredDisplays(now)) {
+      if (id <= 0) continue
+      // 一块屏测过就如实出现，哪怕这一轮四位全零：全零是「测过、但都不支持」，不是 unknown。
+      out[id] = virtualOps(capability.bits)
+    }
+    return out
+  }
+
   private fun readyForRealTap(now: Long): Boolean =
     listOf(installed, running, granted, bound, functionalReady, realTap).all { tri(it, now) == "yes" } &&
+      serverUid?.let { it.value == 2000 && fresh(it.atMs, now) } == true
+
+  private fun readyForRealText(now: Long): Boolean =
+    listOf(installed, running, granted, bound, functionalReady, realText).all { tri(it, now) == "yes" } &&
+      serverUid?.let { it.value == 2000 && fresh(it.atMs, now) } == true
+
+  private fun readyForRealTree(now: Long): Boolean =
+    listOf(installed, running, granted, bound, functionalReady, realTree).all { tri(it, now) == "yes" } &&
       serverUid?.let { it.value == 2000 && fresh(it.atMs, now) } == true
 
   /**
@@ -188,23 +406,31 @@ internal class NativeShizukuFacts(
    * 调用方须在与绑定状态机同一临界区内调用，避免与回调交错。
    */
   fun onConnectionLost(generation: Long) = synchronized(lock) {
-    if (generation < currentGeneration) return
+    if (generation < currentGeneration) return@synchronized
     currentGeneration = generation
     bound = Timed(false, clock())
     functionalReady = null
     serverUid = null
     realTap = null
+    realText = null
+    realTree = null
+    featureBits = null
+    displayBits = null
     invalidate()
   }
 
   /** 新一次绑定已发起（发起前已确认未绑定）：此刻不处于绑定态。 */
   fun onBindStarted(generation: Long) = synchronized(lock) {
-    if (generation < currentGeneration) return
+    if (generation < currentGeneration) return@synchronized
     currentGeneration = generation
     bound = Timed(false, clock())
     functionalReady = null
     serverUid = null
     realTap = null
+    realText = null
+    realTree = null
+    featureBits = null
+    displayBits = null
     invalidate()
   }
 
@@ -222,18 +448,38 @@ internal class NativeShizukuFacts(
     NativeControlDispatcher.Facts { attachTo(inner.capture()) }
 
   internal fun snapshotAt(now: Long): JSONObject = synchronized(lock) {
-    val tap = readyForRealTap(now)
-    JSONObject()
+    val perDisplay = displayOpsAt(now)
+    // supportedOps 是各屏可派 op 的并集（Rust 只在缺 displayOperations 时才回落到它）。
+    // 列表顺序固定，便于判据与诊断对齐；内容只来自各屏实测，不补默认项。
+    val union = JSONArray()
+    for (operation in KNOWN_OPERATIONS) {
+      if (perDisplay.values.any { operation in it }) union.put(operation)
+    }
+    // displayOperations 是实时 per-display 真源：只列出本次真正测过的屏，绝不补默认值。
+    val displayOperations = JSONObject()
+    for ((displayId, operations) in perDisplay.entries.sortedBy { it.key }) {
+      val ordered = JSONArray()
+      for (operation in KNOWN_OPERATIONS) if (operation in operations) ordered.put(operation)
+      displayOperations.put(displayId.toString(), ordered)
+    }
+    val displayValues = JSONObject()
+    for (displayId in perDisplay.keys.sorted()) displayValues.put(displayId.toString(), true)
+    val facts = JSONObject()
       .put("installed", tri(installed, now))
       .put("running", tri(running, now))
       .put("granted", tri(granted, now))
       .put("bound", tri(bound, now))
       .put("functionalReady", tri(functionalReady, now))
       .put("serverUid", serverUidJson(now))
-      .put("supportedOps", if (tap) JSONObject().put("state", "known").put("ops", JSONArray().put("click"))
+      .put("supportedOps", if (union.length() > 0)
+        JSONObject().put("state", "known").put("ops", union)
         else JSONObject().put("state", "unknown"))
-      .put("displaySupport", if (tap) JSONObject().put("state", "known").put("values", JSONObject().put("0", true))
+      .put("displaySupport", if (perDisplay.isNotEmpty())
+        JSONObject().put("state", "known").put("values", displayValues)
         else JSONObject().put("state", "unknown"))
+    // 一个屏都没测过时整键缺席：Rust 只有在该键存在时才把它当唯一真源。
+    if (perDisplay.isNotEmpty()) facts.put("displayOperations", displayOperations)
+    facts
   }
 
   /**
@@ -257,6 +503,10 @@ internal class NativeShizukuFacts(
     functionalReady = null
     serverUid = null
     realTap = null
+    realText = null
+    realTree = null
+    featureBits = null
+    displayBits = null
   }
 
   private fun invalidate() {
@@ -283,6 +533,15 @@ internal class NativeShizukuFacts(
   }
 
   companion object {
+    /** 事实面与判据共用的固定 op 顺序；不含任何未实测项。 */
+    /**
+     * 事实面与判据共用的固定 op 顺序；不含任何未实测项。
+     *
+     * 顺序把同一类动作聚在一起：坐标手势 → 键事件 → 文本 → 树 → 图像 → 全局/启动。
+     */
+    private val KNOWN_OPERATIONS = listOf("click", "longClick", "scroll", "swipe", "keyEvent",
+      "setText", "nodeText", "global", "snapshot", "screenshot", "readRegion", "launchApp")
+
     /**
      * 事实有效期：与既有功能探测缓存同口径（30s）。过期不是 no，而是 unknown——
      * 读侧只报「我还知道什么」，不替 Rust 猜。

@@ -70,7 +70,11 @@ internal object FactoryProfilePatch {
    * 这里只提供历史身份供**急救与诊断**识别；它们不再参与 [merge] 的装机追加。
    * 工厂安装项的启动迁移由 `EngineManager.repairProfilePatch()` 负责。
    */
-  internal val RETIRED_FACTORY_ENTRIES = mapOf("dsh-undo-savepoint" to "dsh-undo-savepoint")
+  internal val RETIRED_FACTORY_ENTRIES = mapOf(
+    "dsh-undo-savepoint" to "dsh-undo-savepoint",
+    "android-manage" to "@dsh-android/dsh-android-manage",
+    "android-vdisplay" to "@dsh-android/dsh-android-vdisplay",
+  )
   /**
    * issue #903：退役条目的**可读报告**（进可导出诊断，不是只进开发日志）。
    *

@@ -3,7 +3,7 @@
 //! Rust 持有 facts/revision/epoch/plan 与派发记录；Kotlin 只执行已经获准的
 //! 平台调用。这里不启动监听、不注册工具、不接触 Android API、不执行副作用。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use serde::Deserialize;
@@ -159,6 +159,7 @@ struct SavedPlan {
     args: Value,
     node: Option<crate::ui_tree::ActionTarget>,
     node_verified: bool,
+    dispatch_validated: bool,
 }
 
 struct TreeDelivery {
@@ -178,6 +179,10 @@ pub struct Controller<J: Journal> {
     images: crate::vision_runtime::ImageCache,
     trees: crate::ui_tree::UiTreeStore,
     tree_deliveries: BTreeMap<String, TreeDelivery>,
+    audit: VecDeque<Value>,
+    exchanges: u64,
+    elapsed_us: u64,
+    device: Value,
 }
 
 impl Controller<FileJournal> {
@@ -210,6 +215,10 @@ impl<J: Journal> Controller<J> {
             images: crate::vision_runtime::ImageCache::default(),
             trees: crate::ui_tree::UiTreeStore::new(epoch),
             tree_deliveries: BTreeMap::new(),
+            audit: VecDeque::new(),
+            exchanges: 0,
+            elapsed_us: 0,
+            device: Value::Null,
         })
     }
 
@@ -222,7 +231,7 @@ impl<J: Journal> Controller<J> {
     }
 
     fn resolve_node(&self, plan: &DispatchPlan, reference: &str) -> Result<crate::ui_tree::ActionTarget, ControllerError> {
-        if plan.backend != Backend::A11y {
+        if !matches!(plan.backend, Backend::A11y | Backend::Shizuku) {
             return Err(ControllerError::new("node-backend-unavailable", "this channel cannot verify the node reference"));
         }
         let screen = plan.screen().ok_or_else(|| ControllerError::new("screen-required", "node requires a display"))?;
@@ -395,9 +404,29 @@ impl<J: Journal> Controller<J> {
         if self.poisoned {
             return error_json("core-poisoned", "controller stopped after an internal panic", None);
         }
+        let started = std::time::Instant::now();
         let result = catch_unwind(AssertUnwindSafe(|| self.exchange_inner(payload, nonblocking)));
         match result {
-            Ok(response) => response,
+            Ok(response) => {
+                let elapsed = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+                self.exchanges = self.exchanges.saturating_add(1);
+                self.elapsed_us = self.elapsed_us.saturating_add(elapsed);
+                if let (false, Ok(request), Ok(reply)) = (nonblocking, serde_json::from_str::<Value>(payload), serde_json::from_str::<Value>(&response)) {
+                    if matches!(request["kind"].as_str(), Some("prepare" | "commit" | "settle" | "cancel" | "fallbackUnavailableA11y")) {
+                        let saved = request["callId"].as_str().and_then(|id| self.saved.get(id));
+                        let plan = reply.get("plan");
+                        let operation = saved.map(|saved| saved.plan.op).or_else(|| request["operation"].as_str()).filter(|value| value.len() <= 64);
+                        let channel = saved.map(|saved| backend_wire(saved.plan.backend)).or_else(|| plan.and_then(|plan| plan["backend"].as_str()));
+                        let screen = saved.and_then(|saved| saved.plan.target.alias()).or_else(|| reply["screenId"].as_str()).filter(|value| value.len() <= 64);
+                        // Never retain arguments, text, image data, stdout or command strings.
+                        self.audit.push_back(json!({"kind":request["kind"], "operation":operation,
+                            "channel":channel, "screenId":screen, "code":reply["code"],
+                            "ok":reply["ok"], "executed":reply["executed"], "elapsedUs":elapsed}));
+                        while self.audit.len() > 64 { self.audit.pop_front(); }
+                    }
+                }
+                response
+            },
             Err(_) => {
                 self.poisoned = true;
                 error_json("core-poisoned", "internal panic; controller is now unavailable", None)
@@ -425,7 +454,7 @@ impl<J: Journal> Controller<J> {
             Err(response) => return response,
         };
 
-        if nonblocking && !matches!(kind.as_str(), "publishFacts" | "capabilities" | "validateDispatch" | "verifyNode") {
+        if nonblocking && !matches!(kind.as_str(), "publishFacts" | "capabilities" | "diagnostics" | "validateDispatch" | "verifyNode") {
             return error_json(
                 "blocking-operation-rejected",
                 "exchangeNonblocking only accepts facts and dispatch verification",
@@ -436,11 +465,18 @@ impl<J: Journal> Controller<J> {
         match kind.as_str() {
             "publishFacts" => self.handle_publish_facts(object),
             "capabilities" => self.handle_capabilities(object),
+            "diagnostics" => {
+                if let Err(response) = allowed(object, &["protocolVersion", "kind"]) { return response; }
+                json!({"protocolVersion":PROTOCOL_VERSION,"ok":true,"code":"native-diagnostics",
+                    "exchanges":self.exchanges,"elapsedUs":self.elapsed_us,"recent":self.audit,
+                    "lifecycleRecords":self.lifecycle.record_count()}).to_string()
+            },
             "prepare" => self.handle_prepare(object),
             "commit" => self.handle_commit(object),
             "settle" => self.handle_settle(object),
             "cancel" => self.handle_cancel(object),
             "fallback" => self.handle_fallback(object),
+            "fallbackUnavailableA11y" => self.handle_observed_fallback(object),
             "operationStatus" => self.handle_operation_status(object),
             "readTree" => self.handle_read_tree(object),
             "validateDispatch" => self.handle_validate_dispatch(object),
@@ -460,6 +496,10 @@ impl<J: Journal> Controller<J> {
             Ok(facts) => facts,
             Err(error) => return error_json("invalid-facts", error.to_string(), None),
         };
+        if facts.device.as_ref().is_some_and(|device| device.manufacturer.len() > 128 || device.model.len() > 128 ||
+            device.release.len() > 128 || !(16..=1000).contains(&device.sdk)) {
+            return error_json("invalid-device-facts", "device metadata is out of bounds", None);
+        }
 
         let mut policy = self.policy.clone();
         let mut known = BTreeSet::new();
@@ -497,6 +537,9 @@ impl<J: Journal> Controller<J> {
         policy.set_a11y_facts(facts.a11y.map(A11yFactsWire::into_policy).unwrap_or_default());
         policy.set_shizuku_facts(facts.shizuku.map(ShizukuFactsWire::into_policy).unwrap_or_default());
         policy.set_root_facts(facts.root.map(RootFactsWire::into_policy).unwrap_or_default());
+        policy.set_termux_ready(facts.termux_ready.unwrap_or_default());
+        self.device = facts.device.map(|device| json!({"manufacturer":device.manufacturer,"model":device.model,
+            "sdk":device.sdk,"release":device.release})).unwrap_or(Value::Null);
         self.policy = policy;
         let policy = &self.policy;
         self.images.retain(|ticket| policy.revalidate(&ticket.plan).is_ok());
@@ -528,6 +571,24 @@ impl<J: Journal> Controller<J> {
             object.insert("epoch".into(), json!(epoch_wire(self.epoch)));
             object.insert("revision".into(), json!(u64_wire(self.policy.revision())));
             object.insert("scope".into(), json!(self.policy.scope().wire()));
+            let operations: Vec<&str> = crate::policy::OPERATIONS.iter().filter(|spec| {
+                let candidates = match spec.target_domain {
+                    TargetDomain::AndroidDisplay => self.known_screens.iter().filter_map(|alias|
+                        self.target_for(spec.name, Some(alias)).ok()).collect::<Vec<_>>(),
+                    TargetDomain::VirtualDisplay => {
+                        let mut targets = self.known_screens.iter().filter(|alias| crate::policy::is_virtual_alias(alias))
+                            .filter_map(|alias| self.target_for(spec.name, Some(alias)).ok()).collect::<Vec<_>>();
+                        if matches!(spec.name, "vdCreate" | "vdInfo") {
+                            targets.push(TargetRequest::NewVirtual("virtual-1".into()));
+                        }
+                        targets
+                    },
+                    _ => self.target_for(spec.name, None).into_iter().collect(),
+                };
+                candidates.into_iter().any(|target| self.policy.plan(spec.name, target).is_ok())
+            }).map(|spec| spec.name).collect();
+            object.insert("operations".into(), json!(operations));
+            object.insert("device".into(), self.device.clone());
             object.insert(
                 "channels".into(),
                 json!({
@@ -546,11 +607,13 @@ impl<J: Journal> Controller<J> {
                         "functionalReady": tri_wire(self.policy.shizuku().functional_ready),
                         "serverUid": server_uid_wire(self.policy.shizuku().server_uid),
                         "supportedOps": op_set_wire(&self.policy.shizuku().supported_ops),
-                        "displaySupport": display_wire(&self.policy.shizuku().display_support)
+                        "displaySupport": display_wire(&self.policy.shizuku().display_support),
+                        "displayOperations": self.policy.shizuku().display_operations
                     },
                     "root": {
                         "authorization": tri_wire(self.policy.root().authorization),
-                        "consentValid": tri_wire(self.policy.root().consent_valid)
+                        "consentValid": tri_wire(self.policy.root().consent_valid),
+                        "appSu": tri_wire(self.policy.root().app_su)
                     }
                 }),
             );
@@ -594,7 +657,8 @@ impl<J: Journal> Controller<J> {
             return error_json("epoch-mismatch", "request epoch does not match this native session", screen_id.as_deref());
         }
         if let Err(error) = validate_operation_args(&operation, &args) {
-            return error_json(error.code(), error.detail(), screen_id.as_deref());
+            // Argument rejection happens before any plan or lifecycle admission exists.
+            return rejection_json(error.code(), error.detail(), screen_id.as_deref());
         }
         let target = match self.target_for(&operation, screen_id.as_deref()) {
             Ok(target) => target,
@@ -655,9 +719,14 @@ impl<J: Journal> Controller<J> {
 
         match self.lifecycle.begin(&call_id, &request_bytes) {
             Ok(Admission::Dispatch(permit)) => {
-                self.saved.insert(call_id.clone(), SavedPlan { plan: plan.clone(), permit, args: args.clone(), node, node_verified: false });
+                self.saved.insert(call_id.clone(), SavedPlan { plan: plan.clone(), permit, args: args.clone(), node, node_verified: false, dispatch_validated: false });
                 let mut response = success_json("prepared", &self.policy, Some(&plan), None);
                 response["plan"]["args"] = args;
+                // The host preflights adapter support before commit. Give it the same
+                // resolved node binding as commit; a ref operation is not a point operation.
+                if let Some(node) = &self.saved[&call_id].node {
+                    response["plan"]["nodeTarget"] = json!({"windowId":node.window_id(), "path":node.raw_child_path()});
+                }
                 response.to_string()
             }
             Ok(Admission::Replay(receipt)) => replay_json(&call_id, &receipt),
@@ -682,10 +751,10 @@ impl<J: Journal> Controller<J> {
             return error_json("invalid-state", "call is not in prepared state", plan.target.alias());
         }
         if let Err(error) = self.policy.revalidate(&plan) {
-            return error_json(error.code(), error.detail(), plan.target.alias());
+            return rejection_json(error.code(), error.detail(), plan.target.alias());
         }
         if let Err(error) = self.revalidate_node(saved) {
-            return error_json(error.code(), error.detail(), plan.target.alias());
+            return rejection_json(error.code(), error.detail(), plan.target.alias());
         }
 
         match self.lifecycle.mark_dispatched(&permit) {
@@ -966,6 +1035,9 @@ impl<J: Journal> Controller<J> {
                 code = "node-not-verified";
             }
         }
+        if valid {
+            self.saved.get_mut(&call_id).expect("validated plan exists").dispatch_validated = true;
+        }
         let mut value = json!({
             "protocolVersion": PROTOCOL_VERSION,
             "ok": false,
@@ -991,6 +1063,39 @@ impl<J: Journal> Controller<J> {
             object.insert("plan".into(), plan_json(&plan, &self.policy));
         }
         value.to_string()
+    }
+
+    /// Only the trusted dispatcher calls this after its prior adapter has returned and never
+    /// obtained the final execution guard. The persisted dispatch record stays in place.
+    fn handle_observed_fallback(&mut self, request: &Map<String, Value>) -> String {
+        if let Err(response) = allowed(request, &["protocolVersion", "kind", "callId"]) {
+            return response;
+        }
+        let call_id = match required_string(request, "callId") {
+            Ok(value) => value.to_owned(),
+            Err(response) => return response,
+        };
+        let Some(saved) = self.saved.get_mut(&call_id) else {
+            return error_json("call-not-found", "no native plan for this call", None);
+        };
+        let phase = self.lifecycle.phase(&call_id);
+        if saved.node.is_some() || saved.dispatch_validated ||
+            !matches!(phase, Some(Phase::Prepared | Phase::Dispatching)) {
+            return error_json("fallback-not-allowed", "the original action can no longer safely switch adapters", saved.plan.target.alias());
+        }
+        let fallback = match self.policy.observed_a11y_fallback(&saved.plan) {
+            Ok(plan) => plan,
+            Err(error) => return rejection_json(error.code(), error.detail(), saved.plan.target.alias()),
+        };
+        saved.plan = fallback.clone();
+        let args = saved.args.clone();
+        let mut response = success_json("fallback-prepared", &self.policy, Some(&fallback), None);
+        response["callId"] = json!(call_id);
+        if phase == Some(Phase::Dispatching) {
+            response["dispatch"] = json!("permitted");
+        }
+        response["plan"]["args"] = args;
+        response.to_string()
     }
 
     fn handle_fallback(&mut self, request: &Map<String, Value>) -> String {
@@ -1154,6 +1259,116 @@ fn screen_alias<'a>(operation: &str, target: &'a TargetRequest) -> Option<&'a st
 }
 
 fn validate_operation_args(operation: &str, args: &Value) -> Result<(), ControllerError> {
+    if operation == "prepareEnvironment" {
+        allowed_fields(args, &["restore"]).map_err(|response| ControllerError::new("invalid-request", response))?;
+        if args.get("restore").is_some_and(|value| !value.is_boolean()) {
+            return Err(ControllerError::new("invalid-restore", "restore must be a boolean"));
+        }
+        return Ok(());
+    }
+    if operation == "keyEvent" {
+        allowed_fields(args, &["key"]).map_err(|response| ControllerError::new("invalid-request", response))?;
+        return if matches!(args["key"].as_str(), Some("enter" | "tab" | "escape" | "backspace" | "delete" |
+            "space" | "up" | "down" | "left" | "right" | "back")) { Ok(()) }
+            else { Err(ControllerError::new("invalid-key", "one supported key is required")) };
+    }
+    if operation == "swipe" {
+        allowed_fields(args, &["x1", "y1", "x2", "y2", "durationMs"])
+            .map_err(|response| ControllerError::new("invalid-request", response))?;
+        let object = args.as_object().ok_or_else(|| ControllerError::new("invalid-swipe", "swipe args are required"))?;
+        for key in ["x1", "y1", "x2", "y2"] { coordinate(object, key)?; }
+        if args["x1"] == args["x2"] && args["y1"] == args["y2"] {
+            return Err(ControllerError::new("invalid-swipe", "swipe endpoints must differ"));
+        }
+        if args.get("durationMs").is_some_and(|value| !value.as_u64().is_some_and(|duration| (50..=2000).contains(&duration))) {
+            return Err(ControllerError::new("invalid-duration", "swipe duration is 50 to 2000 milliseconds"));
+        }
+        return Ok(());
+    }
+    if operation == "webAction" {
+        allowed_fields(args, &["action", "ref", "text", "clear", "direction"])
+            .map_err(|response| ControllerError::new("invalid-request", response))?;
+        let action = args["action"].as_str().unwrap_or("");
+        if !matches!(action, "click" | "longClick" | "setText" | "scroll") ||
+            !args["ref"].as_str().is_some_and(|value| value.starts_with('w') && value.len() <= 96 && value.contains('_')) {
+            return Err(ControllerError::new("invalid-web-action", "a current WebView reference and action are required"));
+        }
+        if action == "setText" && (!args["text"].as_str().is_some_and(|text| text.len() <= 65_536) ||
+            args.get("clear").is_some_and(|value| !value.is_boolean())) {
+            return Err(ControllerError::new("invalid-text", "bounded text and optional boolean clear are required"));
+        }
+        if action == "scroll" && !matches!(args["direction"].as_str(), Some("up" | "down" | "left" | "right")) {
+            return Err(ControllerError::new("invalid-direction", "a scroll direction is required"));
+        }
+        return Ok(());
+    }
+    if matches!(operation, "shExec" | "rootExec" | "termuxExec") {
+        allowed_fields(args, &["command"]).map_err(|response| ControllerError::new("invalid-request", response))?;
+        if !args.get("command").and_then(Value::as_str).is_some_and(|command| {
+            match operation {
+                "shExec" => crate::shell_policy::shizuku_query(command),
+                "termuxExec" => crate::shell_policy::termux(command),
+                _ => crate::shell_policy::bounded(command),
+            }
+        }) {
+            return Err(ControllerError::new("shell-command-denied", "command is not allowed by this native channel"));
+        }
+        return Ok(());
+    }
+    if operation == "webSnapshot" {
+        allowed_fields(args, &["root"]).map_err(|response| ControllerError::new("invalid-request", response))?;
+        if args.get("root").is_some_and(|value| !value.as_str().is_some_and(|root| root.len() <= 2048)) {
+            return Err(ControllerError::new("invalid-request", "root must be a bounded selector"));
+        }
+        return Ok(());
+    }
+    if matches!(operation, "vdCreate" | "vdDestroy" | "vdInfo" | "vdLaunch" | "vdLaunchApp" | "launchApp") {
+        let object = args.as_object().ok_or_else(|| ControllerError::new("invalid-request", "args must be an object"))?;
+        let keys: &[&str] = match operation {
+            "vdCreate" => &["width", "height", "densityDpi", "session"],
+            "vdLaunchApp" => &["pkg", "session"],
+            "launchApp" => &["pkg"],
+            _ => &["session"],
+        };
+        allowed_fields(args, keys).map_err(|response| ControllerError::new("invalid-request", response))?;
+        if let Some(session) = object.get("session") {
+            if !session.as_str().is_some_and(|value| !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)) {
+                return Err(ControllerError::new("invalid-session", "session must be a bounded identifier"));
+            }
+        }
+        if operation == "vdCreate" {
+            for (key, min, max) in [("width", 64, 4096), ("height", 64, 4096), ("densityDpi", 120, 640)] {
+                if let Some(value) = object.get(key) {
+                    if !value.as_i64().is_some_and(|value| (min..=max).contains(&value)) {
+                        return Err(ControllerError::new("invalid-virtual-geometry", format!("{key} is out of range")));
+                    }
+                }
+            }
+            if object.contains_key("width") != object.contains_key("height") {
+                return Err(ControllerError::new("invalid-virtual-geometry", "width and height must be supplied together"));
+            }
+        }
+        if matches!(operation, "vdLaunchApp" | "launchApp") {
+            let valid = object.get("pkg").and_then(Value::as_str).is_some_and(|package| {
+                !package.is_empty() && package.len() <= 255 && package.split('.').all(|part| {
+                    let mut bytes = part.bytes();
+                    bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic()) &&
+                        bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                })
+            });
+            if !valid { return Err(ControllerError::new("invalid-package", "a valid Android package is required")); }
+        }
+        return Ok(());
+    }
+    // BrowserHost is a shared application workspace, not an Android display controller.
+    // Its existing DOM/navigation schema remains at that boundary; never reinterpret its
+    // CSS coordinates as physical-screen input or run its payload through shell parsers.
+    if crate::policy::OperationSpec::for_name(operation)
+        .is_some_and(|spec| spec.target_domain == TargetDomain::BrowserWorkspace)
+    {
+        return if args.is_object() { Ok(()) }
+            else { Err(ControllerError::new("invalid-request", "browser args must be an object")) };
+    }
     if matches!(operation, "screenshot" | "snapshot") {
         return allowed_fields(args, &[]).map_err(|response| ControllerError::new("invalid-request", response));
     }
@@ -1198,7 +1413,17 @@ fn validate_operation_args(operation: &str, args: &Value) -> Result<(), Controll
         if operation == "scroll" { validate_direction(object)?; }
         return Ok(());
     }
-    if matches!(operation, "nodeText" | "setText") {
+    if operation == "setText" {
+        allowed_fields(args, &["text", "clear"]).map_err(|response| ControllerError::new("invalid-request", response))?;
+        if !object.get("text").and_then(Value::as_str).is_some_and(|text| text.len() <= 8192) {
+            return Err(ControllerError::new("invalid-text", "text must be a string of at most 8192 bytes"));
+        }
+        if object.get("clear").is_some_and(|clear| !clear.is_boolean()) {
+            return Err(ControllerError::new("invalid-clear", "clear must be a boolean"));
+        }
+        return Ok(());
+    }
+    if operation == "nodeText" {
         return Err(ControllerError::new("invalid-node-ref", "a snapshot ref is required for this operation"));
     }
     if operation == "scroll" {
@@ -1230,10 +1455,13 @@ fn validate_operation_args(operation: &str, args: &Value) -> Result<(), Controll
 }
 
 fn canonical_args(operation: &str, args: &Value) -> Value {
-    if args.get("ref").is_some() {
+    if operation == "setText" {
         let mut canonical = args.clone();
-        if operation == "setText" && canonical.get("clear").is_none() { canonical["clear"] = json!(true); }
+        if canonical.get("clear").is_none() { canonical["clear"] = json!(true); }
         return canonical;
+    }
+    if args.get("ref").is_some() {
+        return args.clone();
     }
     if operation == "scroll" {
         let mut canonical = args.clone();
@@ -1364,6 +1592,22 @@ fn optional_object<'a>(request: &'a Map<String, Value>, key: &str) -> Result<Opt
 }
 
 fn validate_args(policy: &PolicyState, plan: &DispatchPlan, args: &Value) -> Result<(), ControllerError> {
+    if plan.op == "global" && plan.target.alias() != Some("real") && args["action"].as_str() != Some("back") {
+        return Err(ControllerError::new("target-unsupported", "only Back is scoped to a virtual display"));
+    }
+    if plan.op == "swipe" {
+        let object = args.as_object().expect("swipe args checked by caller");
+        policy.validate_point(plan, coordinate(object, "x1")?, coordinate(object, "y1")?).map_err(policy_error)?;
+        policy.validate_point(plan, coordinate(object, "x2")?, coordinate(object, "y2")?).map_err(policy_error)?;
+        return Ok(());
+    }
+    if plan.op == "shExec" && crate::shell_policy::reads_display(args["command"].as_str().unwrap_or("")) &&
+        !policy.scope().allows("real") {
+        return Err(ControllerError::new("screen-out-of-scope", "display inspection requires real-screen access"));
+    }
+    if matches!(plan.target, PlanTarget::BrowserWorkspace) {
+        return Ok(());
+    }
     let object = args.as_object().expect("args object checked by caller");
     let point = ["x", "y"].iter().all(|key| object.contains_key(*key));
     let any_point = ["x", "y"].iter().any(|key| object.contains_key(*key));
@@ -1613,7 +1857,15 @@ struct Facts {
     shizuku: Option<ShizukuFactsWire>,
     #[serde(default)]
     root: Option<RootFactsWire>,
+    #[serde(default)]
+    termux_ready: Option<Tri>,
+    #[serde(default)]
+    device: Option<DeviceFacts>,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeviceFacts { manufacturer: String, model: String, sdk: u32, release: String }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -1674,6 +1926,8 @@ struct ShizukuFactsWire {
     supported_ops: OpSetWire,
     #[serde(default)]
     display_support: DisplaySupportWire,
+    #[serde(default)]
+    display_operations: Option<BTreeMap<i32, BTreeSet<String>>>,
 }
 
 impl ShizukuFactsWire {
@@ -1687,6 +1941,7 @@ impl ShizukuFactsWire {
             server_uid: self.server_uid.into_policy(),
             supported_ops: self.supported_ops.into_policy(),
             display_support: self.display_support.into_policy(),
+            display_operations: self.display_operations,
         }
     }
 }
@@ -1698,11 +1953,13 @@ struct RootFactsWire {
     authorization: Tri,
     #[serde(default)]
     consent_valid: Tri,
+    #[serde(default)]
+    app_su: Tri,
 }
 
 impl RootFactsWire {
     fn into_policy(self) -> RootFacts {
-        RootFacts { authorization: self.authorization, consent_valid: self.consent_valid }
+        RootFacts { authorization: self.authorization, consent_valid: self.consent_valid, app_su: self.app_su }
     }
 }
 

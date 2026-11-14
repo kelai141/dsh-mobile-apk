@@ -58,7 +58,6 @@
   <string name="ds_notify_channel_desc">Engine task status, pending questions, and file export results</string>
   <string name="ds_notify_permission_rationale">Notification permission is needed: when the engine asks a question or waits for approval, only a notification brings you back (the task waits forever). Without it these alerts stay in the app.</string>
   <string name="ds_notify_denied_note">Notification permission is not granted: engine questions and approval requests will not reach the notification shade; they stay in the app.</string>
-  <string name="adb_keyboard_label">DeepSeek ADB input channel</string>
   <string name="a11y_service_label">DeepCode device control</string>
   <string name="a11y_service_summary">Lets the AI read the screen semantically and operate controls</string>
   <string name="a11y_service_description">When enabled, the AI can read the current screen controls (text, description, position) and tap, type, or scroll. It only works while you keep it on, stops as soon as you turn it off, and also requires a session in full-access mode.</string>

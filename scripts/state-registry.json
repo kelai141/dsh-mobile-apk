@@ -46,10 +46,10 @@
     {
       "id": "engine-process-generation-ledger",
       "holder": "EngineManager 与 OwnedEngineStop 的进程归属账本",
-      "writePath": "app/src/main/java/com/dsharnessmobile/shell/OwnedEngineStop.kt:recordGeneration；EngineManager spawn 前落盘、停止后清理",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/OwnedEngineStop.kt:recordGeneration；EngineManager spawn 前落盘、停止后清理",
       "sourceOfTruth": "本代引擎 token、PID/starttime/UID 与停止结果；不按进程名或全 UID 认领",
       "syncPath": "GuidePhase.Stopping 等待归属进程退出；下一次启动结算旧代际后才能 spawn，未确认清理不报告 Closed 或叠加引擎。",
-      "evidence": { "kind": "grep", "file": "app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt", "pattern": "recordGeneration" }
+      "evidence": { "kind": "grep", "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt", "pattern": "recordGeneration" }
     },
     {
       "id": "immersive-mode",
@@ -89,10 +89,10 @@
     },
     {
       "id": "a11y-control-channel",
-      "holder": "壳侧（DeviceControlService）+ 插件 dsh-android-manage",
+      "holder": "壳侧（DeviceControlService 只做系统服务生命周期与 WindowPick 兼容）+ 原生执行器 NativeA11yExecution",
       "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt",
-      "sourceOfTruth": "AccessibilityManager 服务在线 + 控制队列轮询心跳",
-      "syncPath": "桥 a11yStatus() 实时读（含队列心跳），不缓存偏好（坑 46 僵尸 a11yEnabled 的根因）",
+      "sourceOfTruth": "AccessibilityManager 绑定实例在线（DeviceControlService.connected）；控制语义不在壳侧，由原生宿主执行",
+      "syncPath": "桥 a11yStatus() 实时读绑定事实（不读偏好、不缓存，坑 46 僵尸 a11yEnabled 的根因）；模型工具由 dsh-android-phone-control 注册，原生 Rust 控制器按每步能力事实决定可用性",
       "evidence": {
         "kind": "grep",
         "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt",
@@ -101,14 +101,14 @@
     },
     {
       "id": "shizuku-privileged-channel",
-      "holder": "壳侧（ShizukuTransport / ShizukuUserService）+ 插件 dsh-android-bridge",
+      "holder": "壳侧（ShizukuTransport / ShizukuUserService / NativeShizukuFacts）+ 原生执行宿主 NativeControlRuntime",
       "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/ShizukuTransport.kt",
       "sourceOfTruth": "Shizuku API binder 可达（官方 Shizuku 或分支兼容实现，如 Stellar——0.14.8 起官方包名不再是能力判据，管理器包名只用于引导）+ UserService 绑定（live；授权只由管理器写，应用不自授）",
-      "syncPath": "控制队列 caps.shizuku 实时上报（ControlCarrier，5s TTL）；引擎侧 shizukuReady() 现读 caps，不做启动期快照（0.14.0：内置 adb 三条门随 AdbState 退役）",
+      "syncPath": "壳侧 NativeShizukuFacts 按需现读 binding 与 functionalReady（无 5s 快照缓存）；Node 侧只经私有 socket（control-v1.sock）向 NativeControlRuntime 请求能力事实与执行，能力判定在 Rust 控制器内完成（0.14.0：内置 adb 三条门随 AdbState 退役）",
       "evidence": {
         "kind": "grep",
-        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/ControlCarrier.kt",
-        "pattern": "shizuku"
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/nativecontrol/NativeShizukuFacts.kt",
+        "pattern": "functionalReady"
       }
     },
     {

@@ -175,6 +175,35 @@ fn node_dispatch_requires_fresh_identity_on_the_planned_window_and_path() {
 }
 
 #[test]
+fn shizuku_nodes_require_the_same_fresh_identity_gate_as_accessibility() {
+    let mut controller = Controller::with_journal(MemoryJournal::default(), 7).unwrap();
+    let facts = exchange(&mut controller, json!({"kind":"publishFacts","facts":{
+        "scope":"real-only","screens":{"real":{"displayId":0,"width":1080,"height":2400,"rotation":0}},
+        "a11y":{"enabled":"no","online":"no"},
+        "shizuku":{"installed":"yes","running":"yes","granted":"yes","bound":"yes","functionalReady":"yes",
+            "serverUid":{"kind":"shell2000"},"supportedOps":{"state":"known","ops":["snapshot","nodeText"]},
+            "displaySupport":{"state":"known","values":{"0":true}}}
+    }}));
+    assert_eq!(facts["ok"], true, "{facts}");
+    let caps = exchange(&mut controller, json!({"kind":"capabilities"}));
+    let generation = caps["screens"][0]["generation"].as_str().unwrap();
+    let (reference, fresh) = settled_snapshot(&mut controller, "shell-tree", generation);
+    let prepared = exchange(&mut controller, json!({"kind":"prepare","operation":"nodeText","callId":"shell-node",
+        "epoch":"7","screenId":"real","generation":generation,"args":{"ref":reference}}));
+    assert_eq!(prepared["code"], "prepared", "{prepared}");
+    assert_eq!(prepared["plan"]["backend"], "shizuku");
+    assert!(prepared["plan"]["nodeTarget"].is_object(), "{prepared}");
+    let committed = exchange(&mut controller, json!({"kind":"commit","callId":"shell-node"}));
+    assert_eq!(committed["dispatch"], "permitted");
+    assert_eq!(prepared["plan"]["nodeTarget"], committed["plan"]["nodeTarget"]);
+    assert_eq!(exchange(&mut controller, json!({"kind":"validateDispatch","callId":"shell-node"}))["valid"], false);
+    let mut stale = fresh.clone(); stale.window_id += 1;
+    assert_eq!(exchange(&mut controller, json!({"kind":"verifyNode","callId":"shell-node","node":stale}))["ok"], false);
+    assert_eq!(exchange(&mut controller, json!({"kind":"verifyNode","callId":"shell-node","node":fresh}))["ok"], true);
+    assert_eq!(exchange(&mut controller, json!({"kind":"validateDispatch","callId":"shell-node"}))["valid"], true);
+}
+
+#[test]
 fn replacing_snapshot_before_dispatch_refuses_old_node_plan() {
     let mut controller = Controller::with_journal(MemoryJournal::default(), 7).unwrap();
     let generation = publish_facts(&mut controller, "all");

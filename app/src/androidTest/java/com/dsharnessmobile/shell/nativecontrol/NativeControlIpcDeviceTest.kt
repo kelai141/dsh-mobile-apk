@@ -27,6 +27,34 @@ import java.util.concurrent.CompletableFuture
 
 /** 仅在专用模拟器验证隔离 JNI、私有 socket 与真实 A11y；手势只作用于本测试按钮。 */
 class NativeControlIpcDeviceTest {
+  @Test fun listenerReclaimsOnlyAProvenAbandonedSocket() {
+    requireTestEmulator()
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val directory = java.io.File(context.filesDir.canonicalFile, ".native-control")
+    directory.mkdir()
+    val name = "test-${System.nanoTime().toString(16)}.sock"
+    val endpoint = java.io.File(directory, name)
+    val address = LocalSocketAddress(endpoint.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM)
+    LocalSocket().use { it.bind(address) }
+    assertTrue(android.system.OsConstants.S_ISSOCK(Os.lstat(endpoint.absolutePath).st_mode))
+    val handler = object : NativeControlSocketServer.Handler {
+      override fun handle(request: JSONObject, cancellation: NativeControlSocketServer.Cancellation) = JSONObject()
+    }
+    try {
+      NativeControlSocketServer(context, handler, name).use { first ->
+        assertEquals(endpoint, first.start())
+        NativeControlSocketServer(context, handler, name).use { second ->
+          val failure = runCatching { second.start() }.exceptionOrNull()
+          assertEquals("native-server-already-running", failure?.message)
+        }
+        LocalSocket().use { it.connect(address) }
+      }
+      assertFalse(endpoint.exists())
+    } finally {
+      endpoint.delete()
+    }
+  }
+
   @Test fun appUidSocketUsesRustAndRejectsRealScreenUnderDefaultScope() {
     requireTestEmulator()
     val context: Context = InstrumentationRegistry.getInstrumentation().targetContext

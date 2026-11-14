@@ -619,7 +619,9 @@ class SnapshotTransactionTest {
       val merged = livePatch.readText()
       assertFalse("旧版遗留的 ui-layout disable 必须被纠正（#214 规格断言）", merged.contains("ui-layout"))
       assertTrue("live 既有工厂块保留", merged.contains("shell-termux"))
-      assertTrue("live 缺失的工厂块照旧追加", merged.contains("android-manage"))
+      // 这份夹具的工厂块里恰好是已退役的 android-manage：追加后立刻被退役清理摘掉，
+      // 因此这里断言的是「工厂新增的**未退役**块照旧追加」，不再拿退役条目当追加证据。
+      assertTrue("live 缺失的工厂块照旧追加", merged.contains("bash-sandbox"))
       assertTrue("纠正必须留说明（供升级现场追溯）", notes.any { it.contains("ui-layout") })
       SnapshotTransaction.finish(filesDir)
     } finally {
@@ -1358,6 +1360,432 @@ class SnapshotTransactionTest {
     } finally {
       SnapshotFs.deletePath(filesDir)
     }
+  }
+
+  // ── native 控制切流：android-manage / android-vdisplay 的精确物理清退 ─────────────
+  //
+  // 覆盖升级里 profile 根的两个清单是用户面（不会被工厂面替换），所以「从注入集删掉一个插件」
+  // 在老设备上等于没删：条目还在、包还在、引擎照旧装配。这里钉住清退的四个边界：
+  //   ① 这两个旧执行器对**所有** profile 生效（用户自建 profile 里挂一份也是第二个输入源），
+  //      其它历史退役插件仍只清工厂 profile（web/headless）；
+  //   ② 身份按「id + 包名」或「包名」匹配：同 id 不同包的用户 fork 保留；
+  //   ③ 父路径是符号链接时不跟随，绝不删到 profile 之外；
+  //   ④ 重复迁移是空操作，失败可回滚到迁移前。
+
+  @Test
+  fun retiresAndroidManageAndVdisplayAcrossFactoryProfilesOnly() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(stage, "new-node", "new-profile")
+      writeFactoryProfile(live, "web")
+      writeFactoryProfile(live, "headless")
+      val userProfile = File(live, "home/.dsh/profiles/custom")
+      writeProfilePatch(
+        userProfile,
+        listOf(
+          "- insert:",
+          "    - id: android-manage",
+          "      name: '@dsh-android/dsh-android-manage'",
+        ),
+      )
+      File(userProfile, "package.json").writeText(
+        "{\"name\":\"my-own-profile\",\"dependencies\":{\"@dsh-android/dsh-android-manage\":\"9.9.9\"}}\n",
+      )
+      val userPackage = File(userProfile, "node_modules/@dsh-android/dsh-android-manage")
+      File(userPackage, "index.js").apply { parentFile!!.mkdirs(); writeText("user") }
+
+      SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp-retire-1",
+        startedAt = 11L,
+      )
+
+      for (name in listOf("web", "headless")) {
+        val patch = File(live, "home/.dsh/profiles/" + name + "/cordis.patch.yml").readText()
+        assertFalse(name + "：android-manage 条目必须消失", patch.contains("id: android-manage"))
+        assertFalse(name + "：android-vdisplay 条目必须消失", patch.contains("id: android-vdisplay"))
+        assertTrue(name + "：无关装配条目必须保留", patch.contains("id: keep-me"))
+        assertFalse(
+          name + "：存量包目录必须删除",
+          File(live, "home/.dsh/profiles/" + name + "/node_modules/@dsh-android/dsh-android-manage").exists(),
+        )
+        assertFalse(
+          name + "：vdisplay 包目录必须删除",
+          File(live, "home/.dsh/profiles/" + name + "/node_modules/@dsh-android/dsh-android-vdisplay").exists(),
+        )
+        val deps = org.json.JSONObject(
+          File(live, "home/.dsh/profiles/" + name + "/package.json").readText(),
+        ).getJSONObject("dependencies")
+        assertFalse(name + "：退役依赖必须从 package.json 摘掉", deps.has("@dsh-android/dsh-android-manage"))
+        assertFalse(name + "：vdisplay 依赖同样摘掉", deps.has("@dsh-android/dsh-android-vdisplay"))
+        assertTrue(name + "：用户依赖必须保留", deps.has("user-plugin"))
+      }
+
+      // 两个旧执行器是**完整退役**（用户明确定例）：用户自建 profile 里挂一份同样是第二个输入源，
+      // 所以这里也解除注册、摘依赖、清包；条目落进 profile 内的备份文件而不是直接消失。
+      // 其它历史退役插件（dsh-model-sync 等）仍只动工厂 profile。
+      val userPatch = File(userProfile, "cordis.patch.yml").readText()
+      assertFalse("用户自建 profile 的旧执行器条目也必须摘除（否则双 input）",
+        userPatch.contains("name: '@dsh-android/dsh-android-manage'"))
+      assertFalse("用户自建 profile 的旧执行器包必须删除", userPackage.exists())
+      assertFalse(
+        "用户自建 profile 的旧执行器依赖必须摘掉",
+        org.json.JSONObject(File(userProfile, "package.json").readText())
+          .getJSONObject("dependencies").has("@dsh-android/dsh-android-manage"),
+      )
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  @Test
+  fun retirementKeepsUserOwnedSameIdOrSameNameEntries() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(stage, "new-node", "new-profile")
+      writeFactoryProfile(live, "web")
+      val web = File(live, "home/.dsh/profiles/web")
+      writeProfilePatch(
+        web,
+        listOf(
+          "- insert:",
+          "    - id: android-manage",
+          "      name: '@user/my-own-manage'",
+          "    - id: custom-vdisplay",
+          "      name: '@dsh-android/dsh-android-vdisplay'",
+          "    - id: android-manage",
+          "      name: '@dsh-android/dsh-android-manage'",
+          "      config:",
+          "        keep: true",
+          "    - id: keep-me",
+          "      name: '@dsh-android/keep-me'",
+        ),
+      )
+      val userPackage = File(web, "node_modules/@dsh-android/dsh-android-manage")
+      File(userPackage, "index.js").apply { parentFile!!.mkdirs(); writeText("user") }
+
+      SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp-retire-2",
+        startedAt = 12L,
+      )
+
+      val patch = File(web, "cordis.patch.yml").readText()
+      // 身份边界：同 id 但换了包名 = 用户自己的 fork，保留；
+      // 同包名但换了挂载 id = 仍是旧执行器，照样注册旧工具面，必须退役。
+      assertTrue("同 id 不同包名的用户 fork 必须保留", patch.contains("@user/my-own-manage"))
+      assertTrue("保留的 fork 条目 id 仍在", patch.contains("id: android-manage"))
+      assertFalse("同包名不同 id 仍是旧执行器，必须退役", patch.contains("id: custom-vdisplay"))
+      assertTrue("无关条目保留", patch.contains("id: keep-me"))
+      // 变的是退役力度：旧执行器即使带用户 config 也要解除注册（配置进备份），
+      // 否则它一旦被装配就是第二个输入执行器。
+      assertEquals(
+        "带 config 的旧执行器条目同样退役，只留一条同 id 不同包的用户条目",
+        1,
+        Regex("id: android-manage").findAll(patch).count(),
+      )
+      assertFalse("用户 config 不得留在装配面（旧执行器不再注册）", patch.contains("keep: true"))
+      assertFalse(
+        "旧执行器包目录必须清掉：清单里只剩指向别的包的条目",
+        File(web, "node_modules/@dsh-android/dsh-android-manage").exists(),
+      )
+      val backups = (web.listFiles() ?: emptyArray()).filter { it.name.startsWith(".pre-cordis.patch.yml-") }
+      assertEquals("带 config 的退役条目留一份备份", 1, backups.size)
+      assertTrue("备份里保留用户配置原文", backups.single().readText().contains("keep: true"))
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  @Test
+  fun retirementDoesNotFollowSymlinkedScopeOutsideTheProfile() {
+    val filesDir = tempDir()
+    val outside = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(stage, "new-node", "new-profile")
+      writeFactoryProfile(live, "web")
+      val web = File(live, "home/.dsh/profiles/web")
+      writeProfilePatch(
+        web,
+        listOf(
+          "- insert:",
+          "    - id: android-manage",
+          "      name: '@dsh-android/dsh-android-manage'",
+        ),
+      )
+      // 逃逸形态：@dsh-android 这一层是指向 profile 之外的链接，真实内容在 outside 里。
+      val outsideScope = File(outside, "@dsh-android")
+      File(outsideScope, "dsh-android-manage").apply { mkdirs(); File(this, "index.js").writeText("outside") }
+      SnapshotFs.createDirectories(File(web, "node_modules"))
+      val linked = File(web, "node_modules/@dsh-android")
+      val created = runCatching { Files.createSymbolicLink(linked.toPath(), outsideScope.toPath()) }.isSuccess
+      if (!created) return
+
+      SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp-retire-3",
+        startedAt = 13L,
+      )
+
+      assertTrue(
+        "父路径是链接时不得跟随删除（会把 profile 之外的用户内容删掉）",
+        File(outsideScope, "dsh-android-manage/index.js").isFile,
+      )
+      assertTrue("链接本体也不得被删", SnapshotFs.isSymbolicLink(linked))
+      val patch = File(web, "cordis.patch.yml").readText()
+      assertFalse("清单条目仍然按精确身份摘除", patch.contains("id: android-manage"))
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+      SnapshotFs.deletePath(outside)
+    }
+  }
+
+  /**
+   * 回滚证据：清退是 profiles 合并的一部分，合并中断时整目录从 previous 备份还原。
+   *
+   * 只验证「成功清退」不够：清退是删除动作，合并中途被杀若留下半清退的 profile，装配面
+   * 会既缺工厂条目又缺用户条目。这里构造 SWAPPING + 完整 previous 备份，确认 recovery 把
+   * 退役条目、退役包目录和用户依赖按迁移前的样子还原（下一次刷新再重试清退）。
+   */
+  @Test
+  fun interruptedRetirementRestoresThePreMigrationProfileFromBackup() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(stage, "new-node", "new-profile")
+      // live 已被清退一半：条目与包都没了，只剩无关条目。
+      writeFactoryProfile(live, "web")
+      val liveProfile = File(live, "home/.dsh/profiles/web")
+      writeProfilePatch(liveProfile, listOf("- id: keep-me", "  name: '@dsh-android/keep-me'"))
+      SnapshotFs.deletePath(File(liveProfile, "node_modules/@dsh-android/dsh-android-manage"))
+      SnapshotFs.deletePath(File(liveProfile, "node_modules/@dsh-android/dsh-android-vdisplay"))
+      // previous = 清退之前的备份：清单是迁移前的样子，且**不含 node_modules**。
+      // 不带 node_modules 是有意的：完整性判据只在它存在时要求符号链接（issue #273 的形态），
+      // 而本机没有建链权限。本用例要证的是「两个清单与依赖随备份整目录还原」。
+      val previous = SnapshotTransaction.previousRoot(filesDir)
+      val backupProfile = File(previous, "home/.dsh/profiles/web")
+      SnapshotFs.createDirectories(backupProfile)
+      File(backupProfile, "package.json").writeText(
+        "{\"name\":\"dsh-profile-web\",\"dsh\":{\"profile\":{\"bundles\":[]}}," +
+          "\"dependencies\":{\"@dsh-android/dsh-android-manage\":\"0.3.0\",\"user-plugin\":\"7\"}}\n",
+      )
+      writeProfilePatch(
+        backupProfile,
+        listOf(
+          "- id: keep-me",
+          "  name: '@dsh-android/keep-me'",
+          "- insert:",
+          "    - id: android-manage",
+          "      name: '@dsh-android/dsh-android-manage'",
+        ),
+      )
+      SnapshotTransaction.writeMarker(
+        filesDir,
+        SnapshotTransaction.Marker(
+          SnapshotTransaction.Phase.SWAPPING, "fp-retire-rollback", 16L, listOf("home/.dsh/profiles"),
+        ),
+      )
+
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
+
+      assertEquals(SnapshotTransaction.Outcome.ROLLED_BACK, recovery.outcome)
+      val restored = File(live, "home/.dsh/profiles/web")
+      val patch = File(restored, "cordis.patch.yml").readText()
+      assertTrue("回滚必须还原退役前的装配条目", patch.contains("id: android-manage"))
+      assertFalse("备份里没有 vdisplay 条目，回滚后也不得凭空多出来", patch.contains("id: android-vdisplay"))
+      assertTrue("回滚必须还原无关条目", patch.contains("id: keep-me"))
+      val deps = org.json.JSONObject(File(restored, "package.json").readText()).getJSONObject("dependencies")
+      assertTrue("回滚必须还原退役前的依赖行", deps.has("@dsh-android/dsh-android-manage"))
+      assertTrue("回滚保留用户依赖", deps.has("user-plugin"))
+      assertFalse(
+        "回滚后不得残留本次事务的 marker（下次启动重新走完整刷新）",
+        File(filesDir, SnapshotTransaction.MARKER_NAME).exists(),
+      )
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  /**
+   * 用户自建 profile 也必须退役旧执行器（用户明确授权的兼容升级）。
+   *
+   * 只清工厂 profile 不够：自定义 profile 里挂一份旧 manage/vdisplay 照样注册旧工具面，
+   * 与原生 setText/点击并存 = 双 input。两个旧包即使带用户 `config:` 也解除注册，
+   * 但配置先备份到 profile 内的 `.pre-cordis.patch.yml-*.retired`，用户可复查。
+   * 同 id 但不同包名的自定义 fork 仍保留（精确包名才退役），其它第三方插件一概不动。
+   */
+  @Test
+  fun retiresOldExecutorsEvenInUserCreatedProfilesButKeepsCustomForks() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(stage, "new-node", "new-profile")
+      // 用户自建 profile：名字与结构都不像工厂容器（无 dsh-profile-* / dsh.profile）。
+      val custom = File(live, "home/.dsh/profiles/custom")
+      writeProfilePatch(
+        custom,
+        listOf(
+          "- insert:",
+          "    - id: android-manage",
+          "      name: '@dsh-android/dsh-android-manage'",
+          "      config:",
+          "        keep: true",
+          "    - id: user-manage-fork",
+          "      name: '@dsh-android/dsh-android-manage'",
+          "    - id: android-manage",
+          "      name: '@user/my-own-manage'",
+          "    - id: my-vdisplay",
+          "      name: '@dsh-android/dsh-android-vdisplay'",
+          "    - id: keep-me",
+          "      name: '@user/third-party'",
+        ),
+      )
+      File(custom, "package.json").writeText(
+        "{\"name\":\"my-own-profile\",\"dsh\":{\"profile\":{\"bundles\":[" +
+          "\"@dsh-android/dsh-android-manage\",\"@user/third-party\"]}},\"dependencies\":{" +
+          "\"@dsh-android/dsh-android-manage\":\"0.3.0\"," +
+          "\"@dsh-android/dsh-android-vdisplay\":\"0.1.0\",\"@user/third-party\":\"1.0.0\"}}\n",
+      )
+      for (pkg in listOf("dsh-android-manage", "dsh-android-vdisplay")) {
+        File(custom, "node_modules/@dsh-android/" + pkg + "/lib").apply {
+          mkdirs()
+          File(this, "index.js").writeText("old-executor")
+        }
+      }
+      File(custom, "node_modules/@user/third-party").apply { mkdirs(); File(this, "index.js").writeText("keep") }
+
+      SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp-retire-custom",
+        startedAt = 17L,
+      )
+
+      val patch = File(custom, "cordis.patch.yml").readText()
+      assertFalse("旧 manage 条目必须从用户自建 profile 摘除（否则双 input）",
+        patch.contains("name: '@dsh-android/dsh-android-manage'"))
+      assertFalse("旧 vdisplay 条目必须摘除，即使挂载 id 是用户自定的",
+        patch.contains("name: '@dsh-android/dsh-android-vdisplay'"))
+      assertTrue("同 id 但不同包名的自定义 fork 必须保留", patch.contains("name: '@user/my-own-manage'"))
+      assertTrue("无关第三方插件保留", patch.contains("name: '@user/third-party'"))
+      assertFalse("旧 manage 包目录必须清掉",
+        File(custom, "node_modules/@dsh-android/dsh-android-manage").exists())
+      assertFalse("旧 vdisplay 包目录必须清掉",
+        File(custom, "node_modules/@dsh-android/dsh-android-vdisplay").exists())
+      assertTrue("其它第三方包不得连带删除",
+        File(custom, "node_modules/@user/third-party/index.js").isFile)
+      val manifest = org.json.JSONObject(File(custom, "package.json").readText())
+      val deps = manifest.getJSONObject("dependencies")
+      assertFalse("旧 manage 依赖必须摘除", deps.has("@dsh-android/dsh-android-manage"))
+      assertFalse("旧 vdisplay 依赖必须摘除", deps.has("@dsh-android/dsh-android-vdisplay"))
+      assertTrue("用户其它依赖必须保留", deps.has("@user/third-party"))
+      val bundles = manifest.getJSONObject("dsh").getJSONObject("profile").getJSONArray("bundles")
+      val bundleList = (0 until bundles.length()).map { bundles.getString(it) }
+      assertTrue("退役包不得留在 bundles",
+        bundleList.none { it == "@dsh-android/dsh-android-manage" || it == "@dsh-android/dsh-android-vdisplay" })
+      assertTrue("用户 bundle 保留", bundleList.contains("@user/third-party"))
+      val backups = (custom.listFiles() ?: emptyArray()).filter { it.name.startsWith(".pre-cordis.patch.yml-") }
+      assertEquals("带 config 的退役条目必须留一份备份", 1, backups.size)
+      val backupText = backups.single().readText()
+      assertTrue("备份里必须含用户配置原文", backupText.contains("keep: true"))
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  fun retirementIsIdempotentAcrossRepeatedRefreshes() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      writeFactoryProfile(live, "web")
+      val first = SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = SnapshotTransaction.stageRoot(filesDir).also { writeRuntime(it, "n1", "p1") },
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp-retire-4a",
+        startedAt = 14L,
+      )
+      assertTrue(
+        "第一轮必须留下清退记录：" + first.joinToString("；"),
+        first.any { it.contains("android-manage") },
+      )
+      val stage2 = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(stage2, "n2", "p2")
+      val second = SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage2,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp-retire-4b",
+        startedAt = 15L,
+      )
+      assertTrue(
+        "第二轮不得再报清退动作（幂等）：" + second.joinToString("；"),
+        second.none { it.contains("删除存量包") || it.contains("摘除挂载") },
+      )
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  /** 出厂 profile：name=dsh-profile-* + dsh.profile 块，带两条退役插件与一条用户依赖。 */
+  private fun writeFactoryProfile(root: File, name: String) {
+    val profile = File(root, "home/.dsh/profiles/" + name)
+    SnapshotFs.createDirectories(profile)
+    File(profile, "package.json").writeText(
+      "{\"name\":\"dsh-profile-" + name + "\",\"dsh\":{\"profile\":{\"bundles\":[]}}," +
+        "\"dependencies\":{\"@dsh-android/dsh-android-manage\":\"0.3.0\"," +
+        "\"@dsh-android/dsh-android-vdisplay\":\"0.1.0\",\"user-plugin\":\"7\"}}\n",
+    )
+    writeProfilePatch(
+      profile,
+      listOf(
+        "- id: keep-me",
+        "  name: '@dsh-android/keep-me'",
+        "- insert:",
+        "    - id: android-manage",
+        "      name: '@dsh-android/dsh-android-manage'",
+        "    - id: android-vdisplay",
+        "      name: '@dsh-android/dsh-android-vdisplay'",
+      ),
+    )
+    for (pkg in listOf("dsh-android-manage", "dsh-android-vdisplay")) {
+      File(profile, "node_modules/@dsh-android/" + pkg + "/lib").apply {
+        mkdirs()
+        File(this, "index.js").writeText("stale")
+      }
+    }
+  }
+
+  private fun writeProfilePatch(profile: File, lines: List<String>) {
+    SnapshotFs.createDirectories(profile)
+    File(profile, "cordis.patch.yml").writeText(lines.joinToString("\n") + "\n")
   }
 
   // ── M.2 A（issue #273 ①）：回滚不得丢符号链接、不得把半份备份当 live ──────────────

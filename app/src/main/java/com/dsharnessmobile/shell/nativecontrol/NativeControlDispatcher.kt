@@ -70,28 +70,50 @@ internal class NativeControlDispatcher(
 
   private fun dispatchOwned(callId: String, request: JSONObject, prepared: JSONObject,
     cancellation: NativeControlSocketServer.Cancellation): JSONObject {
-    val plan = prepared.optJSONObject("plan") ?: return withdraw(callId, "missing-native-plan")
-    if (!platform.implements(plan)) return withdraw(callId, "platform-adapter-unavailable")
+    var plan = prepared.optJSONObject("plan") ?: return withdraw(callId, "missing-native-plan")
     if (cancellation.isCancelled()) return exchange("cancel", callId)
     val latest = refresh()
     if (!latest.optBoolean("ok")) return withdraw(callId, "facts-refresh-failed")
     if (cancellation.isCancelled()) return exchange("cancel", callId)
-    val committed = exchange("commit", callId)
+    if (!platform.implements(plan)) {
+      plan = fallback(callId, plan, cancellation)?.optJSONObject("plan")
+        ?: return withdraw(callId, "platform-adapter-unavailable")
+    }
+    if (cancellation.isCancelled()) return exchange("cancel", callId)
+    var committed = exchange("commit", callId)
+    if (committed.optString("code") == "authorization-changed" && fallback(callId, plan, cancellation) != null) {
+      if (cancellation.isCancelled()) return exchange("cancel", callId)
+      committed = exchange("commit", callId)
+    }
     if (committed.optString("dispatch") != "permitted") {
       // 未取得派发许可只撤销 prepared；不要留下可误派的待办。
       exchange("cancel", callId)
       return committed
     }
+    val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(request.optLong("timeoutMs", 15_000L))
+    return dispatchCommitted(callId, committed, cancellation, deadline)
+  }
+
+  private fun fallback(callId: String, original: JSONObject, cancellation: NativeControlSocketServer.Cancellation): JSONObject? {
+    if (original.optString("backend") != "a11y" || original.has("nodeTarget") || cancellation.isCancelled()) return null
+    val alternate = exchange("fallbackUnavailableA11y", callId)
+    val plan = alternate.optJSONObject("plan") ?: return null
+    return alternate.takeIf { it.optBoolean("ok") && platform.implements(plan) }
+  }
+
+  private fun dispatchCommitted(callId: String, committed: JSONObject,
+    cancellation: NativeControlSocketServer.Cancellation, deadline: Long): JSONObject {
     val committedPlan = committed.optJSONObject("plan") ?: return settle(callId, error("missing-dispatch-plan", "unknown"))
     val nativeArgs = committedPlan.optJSONObject("args")
       ?: return settle(callId, error("missing-native-arguments", "no")
         .put("screenId", committedPlan.opt("screenId") ?: JSONObject.NULL))
     if (committed.optString("callId") != callId) return settle(callId, error("dispatch-call-mismatch", "unknown"))
     var denied: JSONObject? = null
+    val gateLock = Any()
     val gateConsumed = AtomicBoolean(false)
     val gateGranted = AtomicBoolean(false)
-    val gate = {
-      val allowed = if (!gateConsumed.compareAndSet(false, true) || cancellation.isCancelled()) false else {
+    val gate = { synchronized(gateLock) {
+      val allowed = if (!gateConsumed.compareAndSet(false, true) || cancellation.isCancelled() || System.nanoTime() >= deadline) false else {
         val latestFacts = core.fastExchange(envelope("publishFacts").put("facts", facts.capture()))
         val check = if (latestFacts.optBoolean("ok")) core.fastExchange(envelope("validateDispatch", callId))
           else JSONObject().put("valid", false).put("settleHint", error("facts-current-unavailable", "no"))
@@ -101,10 +123,10 @@ internal class NativeControlDispatcher(
       }
       if (allowed) gateGranted.set(true)
       allowed
-    }
+    } }
     val receipt = try {
       platform.execute(callId, committedPlan, nativeArgs, { refresh().optBoolean("ok") }, gate)
-        .get(request.optLong("timeoutMs", 15_000L), TimeUnit.MILLISECONDS)
+        .get((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)
     } catch (_: TimeoutException) {
       exchange("cancel", callId)
       return exchange("operationStatus", callId)
@@ -116,6 +138,15 @@ internal class NativeControlDispatcher(
       error("platform-result-unknown", "unknown")
     } catch (_: Exception) {
       error("platform-result-unknown", "unknown")
+    }
+    // Permanently close this adapter's gate before attempting a different adapter. Only a
+    // returned definite no may switch, and Rust independently checks current A11y facts.
+    synchronized(gateLock) { gateConsumed.set(true) }
+    if (!gateGranted.get() && receipt.optString("executed") == "no" && !cancellation.isCancelled() &&
+      System.nanoTime() < deadline && committedPlan.optString("backend") == "a11y" &&
+      refresh().optBoolean("ok")) {
+      val alternate = fallback(callId, committedPlan, cancellation)
+      if (alternate?.optString("dispatch") == "permitted") return dispatchCommitted(callId, alternate, cancellation, deadline)
     }
     var result = denied ?: if (receipt.optString("executed") == "yes" && !gateGranted.get()) {
       error("platform-authorization-unconfirmed", "unknown")

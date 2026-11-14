@@ -5,13 +5,20 @@
 // 体验也很好（因为猜像素就是折磨）」。
 //
 // 三层口径（AGENTS.md §2.1）：
-//   - 代码层：`plugins/dsh-android-manage/test/ui-tree-parity.test.mjs`（schema 同形 / 节点清单 / ref 落坐标）；
+//   - 代码层：`app/src/test/java/com/dsharnessmobile/shell/nativecontrol/NativeShizukuTreeTest.kt`
+//     （服务位与原生树位的分离、树体字段同形、目标屏只来自 Rust 计划、预算与截断）+
+//     `NativeControlDispatcherTest.kt`（回执与树的一致判定）；
 //   - 本文件 = ADB 用户层 + 设备事实：**开一个全新对话**（能力解锁是**对话级**的，新对话必然是全掩蔽起点），
 //     给一个**自然任务**（不提工具名、不提解锁——按 §2.1 第 3 条，那条链路本身就是要测的东西），
 //     然后断言两件事：
 //       ① **设备事实**：目标界面真的到了前台（`dumpsys` 读，不信任何自述文案）；
-//       ② **路由证据**：本次会话里出现过 `android_ui_tree`（说明模型自己找到了纯 ADB 那条控件树路，
-//          而不是撞在 android_ui_dump 上——无障碍关时后者恒不可用）。
+//       ② **路由证据**：本次会话里出现过 `android_ui_dump`（切流后手机工具面只剩这一个取树入口，
+//          无障碍关时它必须由原生 Shizuku 树兑现，而不是回一句「不可用」）。
+//
+// 【旧版基线入口】2026-11 之前取树用的是独立工具 `android_ui_tree`（旧 dsh-android-manage 实现在
+// 无障碍关时回落到 ADB uiautomator）。那个插件已从装配集退役、目录也已删除，工具名不再注册。
+// 本脚本保留 `LEGACY_TREE_TOOL` 这个具名入口：会话里若仍出现旧名，判红并指明「旧执行器又回来了」——
+// 这正是清退要防的回归，而不是把它从判据里抹掉。
 //
 // 用法：
 //   node scripts/verify-adb-only-tree.mjs --serial 127.0.0.1:16416 [--timeout 240] [--self-test]
@@ -30,6 +37,14 @@ const SERIAL = argOf('serial')
 const TIMEOUT_S = Number(argOf('timeout') ?? 240)
 const STAMP = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
 const EVID = join(ROOT, '.deploy-tmp', 'adb-only-tree', STAMP)
+
+/**
+ * 已退役的独立取树工具名（旧 dsh-android-manage 的 ADB 回落实现）。
+ *
+ * 只作为**反证入口**保留：会话里出现它就说明旧执行器又被装配回来了，判红。
+ * 当前唯一取树入口是 android_ui_dump（原生 Shizuku 树），见 [main] 的路由证据段。
+ */
+export const LEGACY_TREE_TOOL = /\bandroid_ui_tree\b/
 
 const results = []
 const record = (name, verdict, detail) => {
@@ -75,8 +90,11 @@ function selfTest() {
   if (topOnDisplay0('') !== '') { failed++; console.error('SELF-TEST FAIL：空输入必须为空串') }
   if (topOnDisplay0('    topResumedActivity=ActivityRecord{1 u0 a/.M t1}') !== '') { failed++; console.error('SELF-TEST FAIL：无 Display 锚点不得猜屏') }
   if (a11yBound('Bound services:{Service[1]\n  com.dsharnessmobile.shell/.DeviceControlService}', 'dsharnessmobile') !== true) { failed++; console.error('SELF-TEST FAIL：a11y 绑定判定') }
+  // 路由判据自身也要有判别力：旧工具名必须被抓到，新入口不得被误判成旧名。
+  if (!LEGACY_TREE_TOOL.test('调用了 android_ui_tree')) { failed++; console.error('SELF-TEST FAIL：旧工具名必须被识别') }
+  if (LEGACY_TREE_TOOL.test('android_ui_dump 返回了树')) { failed++; console.error('SELF-TEST FAIL：新入口不得命中旧名') }
   if (failed > 0) { console.error(`VERIFY-ADB-ONLY-TREE SELF-TEST FAILED（${failed}）`); process.exit(1) }
-  console.log('VERIFY-ADB-ONLY-TREE SELF-TEST PASSED（4 例：前台解析 / 空输入 / 无锚点 fail-closed / a11y 绑定）')
+  console.log('VERIFY-ADB-ONLY-TREE SELF-TEST PASSED（6 例：前台解析 / 空输入 / 无锚点 fail-closed / a11y 绑定 / 旧工具名识别 / 新入口不误判）')
 }
 
 async function bridge(exprs) {
@@ -203,15 +221,24 @@ async function main() {
   record('设备事实：设置界面已到前台', after === 'com.android.settings' ? 'PASS' : 'FAIL',
     `display 0 前台：${before || '(未知)'} → ${after || '(未知)'}`)
 
-  // ── ② 路由证据：本次会话里出现过 android_ui_tree（纯 ADB 那条控件树路） ──
+  // ── ② 路由证据：取树走的是当前唯一入口 android_ui_dump ──
+  //
+  // 判据分三段，而不是简单「看到名字就绿」：
+  //   1. 旧工具名 android_ui_tree 出现 = 旧执行器回来过，直接判红（这是退役要防的形态）；
+  //   2. 当前入口 android_ui_dump 出现，且**同一会话里没有它的失败信号**，才算模型真用上了；
+  //   3. 两者都没有 = 证据不足（INCONCLUSIVE，不得当通过）。
   if (/MISSING_CREDENTIAL|no API key for provider/i.test(text)) {
-    record('路由证据：用到 android_ui_tree', 'INCONCLUSIVE', '引擎未配置模型凭据（模型没跑起来）——不是设备缺陷')
-  } else if (/android_ui_tree/.test(text)) {
-    record('路由证据：用到 android_ui_tree', 'PASS', '会话里出现 android_ui_tree（模型自己找到了纯 ADB 的控件树路）')
-  } else if (/android_ui_dump/.test(text) && /不可用|没有|失败|unknown tool/i.test(text)) {
-    record('路由证据：用到 android_ui_tree', 'FAIL', '模型撞在 android_ui_dump 上并失败——无障碍关时它恒不可用，指引未生效')
+    record('路由证据：用到 android_ui_dump', 'INCONCLUSIVE', '引擎未配置模型凭据（模型没跑起来）——不是设备缺陷')
+  } else if (LEGACY_TREE_TOOL.test(text)) {
+    record('路由证据：用到 android_ui_dump', 'FAIL',
+      '会话里出现已退役的 ' + LEGACY_TREE_TOOL.source + '——旧手机插件又被装配了（双执行器回归）')
+  } else if (/android_ui_dump/.test(text) && /shizuku-tree-unavailable|snapshot-unavailable|unknown tool/i.test(text)) {
+    record('路由证据：用到 android_ui_dump', 'FAIL',
+      '模型用了 android_ui_dump 但原生取树失败——无障碍关时它是唯一取树入口，失败即该链路不可用')
+  } else if (/android_ui_dump/.test(text)) {
+    record('路由证据：用到 android_ui_dump', 'PASS', '会话里出现 android_ui_dump（模型用上了原生 Shizuku 取树）')
   } else {
-    record('路由证据：用到 android_ui_tree', 'INCONCLUSIVE', '会话里未同时看到成功与失败信号（证据不足，不得当通过）')
+    record('路由证据：用到 android_ui_dump', 'INCONCLUSIVE', '会话里未看到取树工具（证据不足，不得当通过）')
   }
 
   writeFileSync(join(EVID, 'results.json'), JSON.stringify({ serial: SERIAL, results }, null, 2))

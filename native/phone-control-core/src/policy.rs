@@ -276,6 +276,8 @@ pub struct ShizukuFacts {
     pub server_uid: ServerUid,
     pub supported_ops: OpSet,
     pub display_support: DisplaySupport,
+    #[serde(default)]
+    pub display_operations: Option<BTreeMap<i32, BTreeSet<String>>>,
 }
 
 impl ShizukuFacts {
@@ -289,6 +291,7 @@ impl ShizukuFacts {
             server_uid,
             supported_ops: OpSet::known(ops.iter().copied()),
             display_support: DisplaySupport::known(displays.iter().copied()),
+            display_operations: None,
         }
     }
 }
@@ -298,11 +301,13 @@ impl ShizukuFacts {
 pub struct RootFacts {
     pub authorization: Tri,
     pub consent_valid: Tri,
+    #[serde(default)]
+    pub app_su: Tri,
 }
 
 impl RootFacts {
     pub fn granted() -> Self {
-        Self { authorization: Tri::Yes, consent_valid: Tri::Yes }
+        Self { authorization: Tri::Yes, consent_valid: Tri::Yes, app_su: Tri::Unknown }
     }
 }
 
@@ -332,6 +337,8 @@ pub enum BackendRequirement {
     A11yRequired,
     /// Shizuku 专属，不因 A11y 优先规则被误拦。
     ShizukuRequired,
+    RootRequired,
+    TermuxHost,
     /// 壳内浏览器工作台。
     BrowserHost,
     /// 壳内 WebView。
@@ -378,17 +385,20 @@ const fn spec(
 
 /// 原生 op 语义单源目录。这里只描述原生语义与后端要求，不定义模型工具 schema。
 pub static OPERATIONS: &[OperationSpec] = &[
+    spec("launchApp", TargetDomain::AndroidDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::ScreenContent, false),
     spec("snapshot", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("click", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("longClick", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("setText", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("scroll", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
+    spec("swipe", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
+    spec("keyEvent", TargetDomain::AndroidDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::ScreenContent, false),
     spec("global", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("screenshot", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("nodeText", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("readRegion", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("state", TargetDomain::ControlMemory, BackendRequirement::A11yRequired, ScopePolicy::NotScreenScoped, false),
-    spec("wait", TargetDomain::ControlMemory, BackendRequirement::LocalOnly, ScopePolicy::NotScreenScoped, false),
+    spec("wait", TargetDomain::ControlMemory, BackendRequirement::Unsupported, ScopePolicy::NotScreenScoped, false),
     spec("webSnapshot", TargetDomain::AppWebView, BackendRequirement::WebViewHost, ScopePolicy::NotScreenScoped, false),
     spec("webAction", TargetDomain::AppWebView, BackendRequirement::WebViewHost, ScopePolicy::NotScreenScoped, false),
     spec("browserCaps", TargetDomain::BrowserWorkspace, BackendRequirement::BrowserHost, ScopePolicy::NotScreenScoped, false),
@@ -413,6 +423,9 @@ pub static OPERATIONS: &[OperationSpec] = &[
     spec("vdInfo", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::VirtualNamespace, false),
     spec("vdMoveTask", TargetDomain::VirtualDisplay, BackendRequirement::Unsupported, ScopePolicy::RegisteredVirtual, false),
     spec("shExec", TargetDomain::PrivilegedShell, BackendRequirement::ShizukuRequired, ScopePolicy::NotScreenScoped, false),
+    spec("rootExec", TargetDomain::PrivilegedShell, BackendRequirement::RootRequired, ScopePolicy::NotScreenScoped, false),
+    spec("termuxExec", TargetDomain::PrivilegedShell, BackendRequirement::TermuxHost, ScopePolicy::NotScreenScoped, false),
+    spec("prepareEnvironment", TargetDomain::ControlMemory, BackendRequirement::ShizukuRequired, ScopePolicy::NotScreenScoped, false),
     spec("shPull", TargetDomain::PrivilegedShell, BackendRequirement::ShizukuRequired, ScopePolicy::NotScreenScoped, false),
     spec("shPush", TargetDomain::PrivilegedShell, BackendRequirement::ShizukuRequired, ScopePolicy::NotScreenScoped, false),
     spec("shRemove", TargetDomain::PrivilegedShell, BackendRequirement::ShizukuRequired, ScopePolicy::NotScreenScoped, false),
@@ -565,6 +578,7 @@ pub struct PolicyState {
     a11y: A11yFacts,
     shizuku: ShizukuFacts,
     root: RootFacts,
+    termux_ready: Tri,
     observed_at_ms: u64,
 }
 
@@ -582,6 +596,7 @@ impl PolicyState {
             a11y: A11yFacts::default(),
             shizuku: ShizukuFacts::default(),
             root: RootFacts::default(),
+            termux_ready: Tri::Unknown,
             observed_at_ms: 0,
         }
     }
@@ -725,11 +740,20 @@ impl PolicyState {
         true
     }
 
+    pub fn set_termux_ready(&mut self, ready: Tri) {
+        if self.termux_ready != ready {
+            self.termux_ready = ready;
+            self.authorization_generation = self.authorization_generation.saturating_add(1);
+            self.revision = self.revision.saturating_add(1);
+        }
+    }
+
     /// Root 专属策略：必须是真实观测到的 uid 0，并有独立授权与有效同意。
     pub fn root_only_available(&self) -> bool {
-        self.shizuku.server_uid == ServerUid::Root0
-            && self.root.authorization.is_yes()
-            && self.root.consent_valid.is_yes()
+        self.root.authorization.is_yes() && self.root.consent_valid.is_yes() &&
+            (self.root.app_su.is_yes() || (self.shizuku.server_uid == ServerUid::Root0 &&
+                combine_verdicts(&[self.shizuku.installed, self.shizuku.running, self.shizuku.granted,
+                    self.shizuku.bound, self.shizuku.functional_ready]).is_yes()))
     }
 
     /// 为一次操作生成计划。所有范围与目标检查都发生在副作用之前。
@@ -741,13 +765,11 @@ impl PolicyState {
         }
 
         let plan_target = self.resolve_target(spec, target)?;
-        if op == "global" && plan_target.alias() != Some(REAL_ALIAS) {
-            return Err(PolicyError::new("target-unsupported", "Android global actions target only the real display"));
-        }
         let scope_generation = match spec.scope_policy {
             ScopePolicy::ScreenContent
             | ScopePolicy::VirtualNamespace
             | ScopePolicy::RegisteredVirtual => Some(self.scope_generation),
+            ScopePolicy::NotScreenScoped if spec.name == "shExec" => Some(self.scope_generation),
             ScopePolicy::NotScreenScoped => None,
         };
         self.check_scope(spec, &plan_target)?;
@@ -756,7 +778,9 @@ impl PolicyState {
         let authorization_generation = match spec.backend {
             BackendRequirement::A11yPreferred
             | BackendRequirement::A11yRequired
-            | BackendRequirement::ShizukuRequired => Some(self.authorization_generation),
+            | BackendRequirement::ShizukuRequired
+            | BackendRequirement::RootRequired
+            | BackendRequirement::TermuxHost => Some(self.authorization_generation),
             _ => None,
         };
 
@@ -828,7 +852,7 @@ impl PolicyState {
         }
         self.revalidate_target_and_scope(spec, failed)?;
 
-        let backend = self.select_shizuku(spec, &failed.target, false)?;
+        let backend = self.select_shizuku(spec, &failed.target)?;
         Ok(DispatchPlan {
             op: failed.op,
             epoch: self.epoch,
@@ -837,6 +861,16 @@ impl PolicyState {
             authorization_generation: Some(self.authorization_generation),
             backend,
         })
+    }
+
+    /// Production fallback requires a fresh, definitive loss of the original A11y capability.
+    pub(crate) fn observed_a11y_fallback(&self, failed: &DispatchPlan) -> Result<DispatchPlan, PolicyError> {
+        let spec = OperationSpec::for_name(failed.op)
+            .ok_or_else(|| PolicyError::new("op-unknown", "unregistered operation"))?;
+        if self.a11y_verdict(spec, &failed.target) != Tri::No {
+            return Err(PolicyError::new("fallback-not-proven", "A11y unavailability was not established"));
+        }
+        self.fallback_plan(failed, DispatchEvidence::No, DispatchFailure::ServiceOffline)
     }
 
     /// 在计划原来的逻辑尺寸内校验点坐标。重验会先拒绝旧 generation。
@@ -986,6 +1020,8 @@ impl PolicyState {
             BackendRequirement::BrowserHost => Ok(Backend::BrowserHost),
             BackendRequirement::WebViewHost => Ok(Backend::WebViewHost),
             BackendRequirement::LocalOnly => Ok(Backend::Local),
+            BackendRequirement::TermuxHost if self.termux_ready.is_yes() => Ok(Backend::Local),
+            BackendRequirement::TermuxHost => Err(PolicyError::new("termux-unavailable", "application shell is not ready")),
             BackendRequirement::Unsupported => {
                 Err(PolicyError::new("operation-unsupported", format!("{} is not implemented", spec.name)))
             }
@@ -997,13 +1033,19 @@ impl PolicyState {
             BackendRequirement::A11yPreferred => match self.a11y_verdict(spec, target) {
                 Tri::Yes => Ok(Backend::A11y),
                 Tri::Unknown => Err(PolicyError::new("facts-unknown", "A11y capability is unknown; refusing to guess or fall back")),
-                Tri::No => self.select_shizuku(spec, target, false),
+                Tri::No => self.select_shizuku(spec, target),
             },
-            BackendRequirement::ShizukuRequired => self.select_shizuku(spec, target, true),
+            BackendRequirement::ShizukuRequired => self.select_shizuku(spec, target),
+            BackendRequirement::RootRequired if self.root_only_available() => Ok(Backend::Root),
+            BackendRequirement::RootRequired => Err(PolicyError::new("root-authorization-required", "no verified and independently authorized Root channel")),
         }
     }
 
     fn a11y_verdict(&self, spec: &OperationSpec, target: &PlanTarget) -> Tri {
+        // Android AccessibilityService.performGlobalAction has no display target.
+        if spec.name == "global" && target.screen().is_some_and(|screen| screen.display_id != 0) {
+            return Tri::No;
+        }
         let mut facts = Vec::with_capacity(4);
         facts.push(self.a11y.enabled);
         facts.push(self.a11y.online);
@@ -1025,7 +1067,7 @@ impl PolicyState {
         combine_verdicts(&facts)
     }
 
-    fn select_shizuku(&self, spec: &OperationSpec, target: &PlanTarget, allow_root: bool) -> Result<Backend, PolicyError> {
+    fn select_shizuku(&self, spec: &OperationSpec, target: &PlanTarget) -> Result<Backend, PolicyError> {
         let readiness = combine_verdicts(&[
             self.shizuku.installed,
             self.shizuku.running,
@@ -1047,7 +1089,14 @@ impl PolicyState {
 
         if spec.target_domain == TargetDomain::AndroidDisplay {
             if let Some(binding) = target.screen() {
-                match self.shizuku.display_support.contains(binding.display_id) {
+                match self.shizuku.display_operations.as_ref().map_or_else(
+                    || self.shizuku.display_support.contains(binding.display_id),
+                    |displays| match displays.get(&binding.display_id) {
+                        Some(operations) if operations.contains(spec.name) => Tri::Yes,
+                        Some(_) => Tri::No,
+                        None => Tri::Unknown,
+                    },
+                ) {
                     Tri::Yes => {}
                     Tri::No => return Err(PolicyError::new("target-unsupported", "Shizuku cannot target this display")),
                     Tri::Unknown => return Err(PolicyError::new("facts-unknown", "Shizuku display support is unknown")),
@@ -1057,14 +1106,6 @@ impl PolicyState {
 
         match self.shizuku.server_uid {
             ServerUid::Shell2000 => Ok(Backend::Shizuku),
-            ServerUid::Root0 if allow_root => {
-                let root = combine_verdicts(&[self.root.authorization, self.root.consent_valid]);
-                match root {
-                    Tri::Yes => Ok(Backend::Root),
-                    Tri::No => Err(PolicyError::new("root-authorization-required", "uid 0 needs independent Root authorization and valid consent")),
-                    Tri::Unknown => Err(PolicyError::new("facts-unknown", "Root authorization is unknown")),
-                }
-            }
             ServerUid::Root0 => Err(PolicyError::new(
                 "root-channel-not-allowed",
                 "basic screen control may not silently use a uid 0 channel",

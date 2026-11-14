@@ -589,6 +589,15 @@ class AndroidBridge(
   @JavascriptInterface
   fun shizukuStatus(): String = trusted { onShizukuStatus() }
 
+  /** Explicit, read-only native diagnostics. No arbitrary JNI request is exposed to the page. */
+  @JavascriptInterface
+  fun nativeControlDiagnostics(): String = trusted {
+    runCatching {
+      com.dsharnessmobile.shell.nativecontrol.NativeControlCore.exchangeNonblocking(
+        "{\"protocolVersion\":1,\"kind\":\"diagnostics\"}")
+    }.getOrElse { "{\"ok\":false,\"code\":\"native-diagnostics-unavailable\"}" }
+  }
+
   /**
    * 0.14.2 P1 设置页「手机控制」：「重置链接」按钮。
    *
@@ -707,6 +716,48 @@ class AndroidBridge(
     val app = ShellAppContext.get()
       ?: return """{"ok":false,"reason":"no-shell-context"}"""
     return RootOwnershipJobs.request(app).toString()
+  }
+
+  /**
+   * 本次维护结果的结算读面（PRD 5.2 / AC-08）：回执自带唯一 operationId，
+   * 只在结果自身的 ID 与当前任务相符时返回 result；否则明确告诉调用方「还不是本次的结果」。
+   *
+   * 与 repairRootOwnership 的「提交成功」严格分开：提交成功不等于修复完成，也不等于历史结果可用。
+   * @param operationId 调用方持有的本次 ID；空串表示只要状态，不领取结果。
+   */
+  @JavascriptInterface
+  fun rootOwnershipResult(operationId: String?): String {
+    checkTrustedFrame()
+    val app = ShellAppContext.get()
+      ?: return """{"ok":false,"reason":"no-shell-context"}"""
+    val expected = (operationId ?: "").trim()
+    val state = RootOwnershipJobs.state(app)
+    if (expected.isEmpty()) {
+      return JSONObject(state.toString()).put("ok", true).put("code", "ownership-state").toString()
+    }
+    if (!RootMaintenanceLease.isCanonicalOperationId(expected)) {
+      return JSONObject(state.toString()).put("ok", false).put("code", "invalid-operation-id")
+        .put("reason", "invalid-operation-id").toString()
+    }
+    val observed = state.optString("operationId")
+    if (observed != expected) {
+      // 任务还没开始或已经换代：不得把任何既有结果当成本次结果。
+      return JSONObject(state.toString()).put("ok", false).put("code", "operation-id-mismatch")
+        .put("reason", "operation-id-mismatch").put("expectedOperationId", expected).toString()
+    }
+    if (state.optBoolean("running")) {
+      return JSONObject(state.toString()).put("ok", true).put("code", "repair-running")
+        .put("reason", "repair-running").toString()
+    }
+    val settled = state.optJSONObject("result")
+      ?: return JSONObject(state.toString()).put("ok", false).put("code", "repair-result-unknown")
+        .put("reason", "repair-result-unknown")
+        .put("guidance", "本次维护没有可验证结果；不要重复派发，先看诊断日志。").toString()
+    val verified = settled.optBoolean("ok")
+    return JSONObject().put("ok", verified)
+      .put("code", settled.optString("code").ifEmpty { if (verified) "ownership-verified" else "repair-incomplete" })
+      .put("reason", settled.optString("reason").ifEmpty { settled.optString("code") })
+      .put("operationId", expected).put("result", settled).put("state", state).toString()
   }
 
   /**

@@ -9,7 +9,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 
-/** 隔离入口。尚未注册到 Application、Manifest、WebView bridge 或旧控制轮询。 */
+/** 同 UID 私有执行宿主。生命周期由壳持有，Node 只通过 socket 调用。 */
 internal class NativeControlHost private constructor(
   private val server: NativeControlSocketServer,
   val endpoint: File,
@@ -19,7 +19,7 @@ internal class NativeControlHost private constructor(
 
   companion object {
     /** 初始化和 journal 恢复会访问磁盘；调用方必须使用后台线程。 */
-    fun openIsolated(
+    fun open(
       context: Context,
       facts: NativeControlDispatcher.Facts,
       platform: NativeControlDispatcher.Platform,
@@ -41,7 +41,13 @@ internal class NativeControlHost private constructor(
         facts = facts,
         platform = platform,
       )
-      val server = NativeControlSocketServer(app, dispatcher)
+      val server = NativeControlSocketServer(app, object : NativeControlSocketServer.Handler {
+        override fun handle(request: JSONObject, cancellation: NativeControlSocketServer.Cancellation): JSONObject {
+          if (request.optString("method") == "execute")
+            com.dsharnessmobile.shell.EngineService.instance?.noteWakeActivity()
+          return dispatcher.handle(request, cancellation)
+        }
+      })
       return try {
         NativeControlHost(server, server.start(), initialized)
       } catch (failure: Throwable) {
@@ -49,6 +55,13 @@ internal class NativeControlHost private constructor(
         throw failure
       }
     }
+
+    /** 仪器测试沿用显式隔离入口；实现与壳侧宿主一致。 */
+    fun openIsolated(
+      context: Context,
+      facts: NativeControlDispatcher.Facts,
+      platform: NativeControlDispatcher.Platform,
+    ): NativeControlHost = open(context, facts, platform)
 
     private fun privateDirectory(parent: File, name: String): File {
       val directory = File(parent, name)

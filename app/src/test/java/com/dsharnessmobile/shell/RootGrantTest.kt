@@ -176,17 +176,31 @@ class RootGrantTest {
     assertTrue(RootGrant.effectiveGrant(true, RootGrant.DISCLAIMER_REVISION + 3, RootGrant.DISCLAIMER_REVISION))
   }
 
+  /**
+   * Root 诊断通道是独立面：选定身份后就那一条，**没有**「不可用就升级到 root」或跨通道重放。
+   *
+   * 旧实现靠 `ShellOps.canFallbackBeforeDispatch` 在 Shizuku 与 su 之间挑路径，ShellOps 退役后
+   * 这条判据没有生产引用。这里改为钉住替代它的两条事实：①身份在派发前选定且只有一次派发；
+   * ②gate 拒绝与身份不符都按「没执行」结算，不触发任何回退（不削弱 uid 0/2000 的分离）。
+   */
   @Test
-  fun `fallback accepts only known pre-dispatch unavailability`() {
-    for (code in listOf("root-grant-required", "consent-required", "shell-transport-failed",
-      "shizuku-unknown", "shizuku-exec-failed", "shizuku-configuration-required",
-      "shizuku-identity-failed", "root-maintenance-busy", "repair-result-unknown", "", "exit=1")) {
-      assertEquals(code, false, ShellOps.canFallbackBeforeDispatch(code))
-    }
-    for (code in listOf("shizuku-absent", "shizuku-not-running", "shizuku-denied", "shizuku-prev11",
-      "shizuku-user-service-not-bound", "shizuku-user-service-too-old")) {
-      assertTrue(code, ShellOps.canFallbackBeforeDispatch(code))
-    }
+  fun `root diagnostics pick one identity and never promote or replay`() {
+    val file = listOf(
+      File("src/main/java/com/dsharnessmobile/shell/nativecontrol/NativePrivilegeExecution.kt"),
+      File("app/src/main/java/com/dsharnessmobile/shell/nativecontrol/NativePrivilegeExecution.kt"),
+    ).firstOrNull { it.isFile } ?: throw AssertionError("找不到 NativePrivilegeExecution.kt")
+    val diagnostics = file.readText()
+    // 单一身份选择：root 只走 su，shell 只走 Shizuku；没有第二条路径、没有循环重试。
+    assertTrue(diagnostics.contains("if (root && RootAccess.isGranted(context) && RootAccess.suPath() != null)"))
+    assertTrue(diagnostics.contains("ShizukuTransport.runNativeDiagnostic(context, command, if (root) 0 else 2000, gate)"))
+    assertFalse("不得按错误码回退到另一条通道", diagnostics.contains("canFallbackBeforeDispatch"))
+    assertFalse(diagnostics.contains("ShellOps."))
+    assertFalse(diagnostics.contains("while ("))
+    assertTrue("选定身份后必须再复核实际身份",
+      source("ShizukuTransport.kt").contains("put(\"code\", \"shizuku-identity-changed\")"))
+    // 授权拒绝是确定没执行：不重试、也不升级身份。
+    assertTrue(diagnostics.contains("!permitted.get() -> \"no\""))
+    assertTrue(diagnostics.contains("RootAccess.suAcknowledgement(result)"))
   }
 
   @Test
@@ -301,7 +315,11 @@ class RootGrantTest {
 
   @Test
   fun v4ConfigurationAcknowledgementBindsExactAppIdentityBeforeReady() {
-    assertTrue(source("ShizukuUserService.kt").contains("const val PROTOCOL_VERSION = 4"))
+    // 协议号随新增事务前进（4 = configure 面，5 = 原生输入面）；断言钉住「至少覆盖 v4 语义」，
+    // 而不是钉住某个具体数字，避免每次加事务都要改这条防回归。
+    val version = Regex("const val PROTOCOL_VERSION = (\\d+)")
+      .find(source("ShizukuUserService.kt"))?.groupValues?.get(1)?.toIntOrNull()
+    assertTrue("服务端协议版本必须 >= 4（v4 的 configure/repair 语义不可回退）", version != null && version >= 4)
     val configure = body("ShizukuTransport.kt", "private fun configureIfNeeded(")
     assertBefore(configure, "remote.protocolVersion() < ShizukuUserServiceBridge.PROTOCOL_VERSION", "remote.configure(uid, root)")
     assertBefore(configure, "remote.configure(uid, root)", "val ack = remote.configuration()")
@@ -336,7 +354,10 @@ class RootGrantTest {
     assertTrue(grant.contains("= effectiveGrant("))
     assertTrue(grant.contains("KEY_GRANTED") && grant.contains("consentRevision(") && grant.contains("DISCLAIMER_REVISION"))
     val state = body("RootGrant.kt", "fun state(")
-    assertTrue(state.contains(""".put("granted", isGranted(context))"""))
+    // E1：读面不再重复求值——先算一次 granted，再放进 JSON；语义仍是「已授权且同意有效」。
+    assertTrue(state.contains("val granted = effectiveGrant(storedSwitch(context), revision, DISCLAIMER_REVISION)"))
+    assertTrue(state.contains(""".put("granted", granted)"""))
+    assertFalse("读面不得再逐字段重复求值", state.contains(""".put("granted", isGranted(context))"""))
     assertTrue(body("ShizukuTransport.kt", "internal fun rootGateRefusal(").contains("RootGrant.isGranted(context)"))
     val actual = body("ShizukuTransport.kt", "private fun actualIdentityRefusal(")
     assertTrue(actual.contains("dispatchIdentity(context, remote).second"))

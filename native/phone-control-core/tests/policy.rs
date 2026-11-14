@@ -486,12 +486,13 @@ fn uid_zero_and_shell_uid_are_not_interchangeable() {
     assert!(state.plan("shExec", TargetRequest::PrivilegedShell).is_err());
     assert!(!state.root_only_available());
 
-    state.set_root_facts(RootFacts { authorization: Tri::Yes, consent_valid: Tri::No });
+    state.set_root_facts(RootFacts { authorization: Tri::Yes, consent_valid: Tri::No, app_su: Tri::Unknown });
     assert!(state.plan("shExec", TargetRequest::PrivilegedShell).is_err());
 
     state.set_root_facts(RootFacts::granted());
     assert!(state.root_only_available());
-    assert_eq!(state.plan("shExec", TargetRequest::PrivilegedShell).unwrap().backend, Backend::Root);
+    assert!(state.plan("shExec", TargetRequest::PrivilegedShell).is_err());
+    assert_eq!(state.plan("rootExec", TargetRequest::PrivilegedShell).unwrap().backend, Backend::Root);
 }
 
 #[test]
@@ -525,7 +526,7 @@ fn root_authorization_change_invalidates_plan() {
     state.set_a11y_facts(A11yFacts::ready(&["screenshot"], &[(0, false)]));
     state.set_shizuku_facts(shizuku_ready(ServerUid::Root0, &["shExec"], &[]));
     state.set_root_facts(RootFacts::granted());
-    let plan = state.plan("shExec", TargetRequest::PrivilegedShell).unwrap();
+    let plan = state.plan("rootExec", TargetRequest::PrivilegedShell).unwrap();
     assert_eq!(plan.backend, Backend::Root);
     state.set_root_facts(RootFacts::default());
     assert_eq!(state.revalidate(&plan).unwrap_err().code(), "authorization-changed");
@@ -577,14 +578,15 @@ fn dynamic_shizuku_specialties_need_facts() {
         server_uid: ServerUid::Shell2000,
         supported_ops: OpSet::Unknown,
         display_support: DisplaySupport::Unknown,
+        display_operations: None,
     });
     assert_eq!(state.plan("shExec", TargetRequest::PrivilegedShell).unwrap_err().code(), "facts-unknown");
 }
 
 #[test]
-fn state_and_wait_are_local_and_not_screen_scoped() {
+fn unimplemented_wait_is_not_advertised_as_executable() {
     let mut state = PolicyState::new(1);
-    assert!(state.plan("wait", TargetRequest::ControlMemory).is_ok());
+    assert_eq!(state.plan("wait", TargetRequest::ControlMemory).unwrap_err().code(), "operation-unsupported");
     state.set_a11y_facts(A11yFacts::default());
     assert!(state.plan("state", TargetRequest::ControlMemory).is_err());
     state.set_a11y_facts(a11y_ready(&["state"], &[]));

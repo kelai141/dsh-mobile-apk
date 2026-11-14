@@ -57,6 +57,99 @@ fn controller() -> Controller<MemoryJournal> {
 }
 
 #[test]
+fn native_shell_admission_separates_root_and_checks_live_scope_and_termux() {
+    let mut core = controller();
+    let mut input = facts("virtual-only", 0, "no");
+    input["facts"]["shizuku"] = json!({"installed":"yes","running":"yes","granted":"yes",
+        "bound":"yes","functionalReady":"yes","serverUid":{"kind":"shell2000"},
+        "supportedOps":{"state":"known","ops":["shExec"]}});
+    input["facts"]["root"] = json!({"authorization":"yes","consentValid":"yes","appSu":"yes"});
+    input["facts"]["termuxReady"] = json!("yes");
+    assert_eq!(call(&mut core, input.clone())["ok"], true);
+    let request = |op: &str, id: &str, command: &str| json!({"protocolVersion":1,"kind":"prepare",
+        "callId":id,"operation":op,"epoch":"900","args":{"command":command}});
+    let inspected = call(&mut core, request("shExec", "query-ime", "settings get secure default_input_method"));
+    assert_eq!(inspected["code"], "prepared", "{inspected}");
+    assert_eq!(inspected["plan"]["backend"], "shizuku");
+    let screen_denied = call(&mut core, request("shExec", "private-window", "dumpsys window windows"));
+    assert_eq!(screen_denied["code"], "screen-out-of-scope", "{screen_denied}");
+    let ordinary_write = call(&mut core, request("shExec", "no-promotion", "settings put global wifi_on 0"));
+    assert_eq!(ordinary_write["code"], "shell-command-denied", "{ordinary_write}");
+    let root = call(&mut core, request("rootExec", "independent-root", "printf 'root 中文'"));
+    assert_eq!(root["plan"]["backend"], "root", "{root}");
+    let termux = call(&mut core, request("termuxExec", "app-shell", "printf hello"));
+    assert_eq!(termux["plan"]["backend"], "local", "{termux}");
+    input["facts"]["root"]["consentValid"] = json!("no");
+    input["facts"]["termuxReady"] = json!("no");
+    assert_eq!(call(&mut core, input.clone())["ok"], true);
+    for id in ["independent-root", "app-shell"] {
+        let denied = call(&mut core, json!({"protocolVersion":1,"kind":"commit","callId":id}));
+        assert_eq!(denied["executed"], "no", "{denied}");
+        assert_eq!(denied["code"], "authorization-changed", "{denied}");
+    }
+    // An ordinary Shizuku call cannot use a server which has changed to uid 0.
+    input["facts"]["shizuku"]["serverUid"] = json!({"kind":"root0"});
+    assert_eq!(call(&mut core, input)["ok"], true);
+    let denied = call(&mut core, request("shExec", "root-is-not-shell", "id"));
+    assert_eq!(denied["ok"], false, "{denied}");
+}
+
+#[test]
+fn explicit_native_diagnostics_are_bounded_and_do_not_retain_payloads() {
+    let mut core = controller();
+    publish_default(&mut core);
+    for number in 0..80 {
+        let refused = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","epoch":"900",
+            "callId":format!("audit-{number}"),"operation":"rootExec","args":{"command":"secret-command-body 中文"}}));
+        assert_eq!(refused["ok"], false, "{refused}");
+    }
+    let diagnostics = call(&mut core, json!({"protocolVersion":1,"kind":"diagnostics"}));
+    assert_eq!(diagnostics["recent"].as_array().unwrap().len(), 64);
+    assert!(diagnostics["exchanges"].as_u64().unwrap() >= 81);
+    assert!(!diagnostics.to_string().contains("secret-command-body"));
+    assert!(!diagnostics.to_string().contains("中文"));
+    assert!(diagnostics["recent"].as_array().unwrap().iter().all(|event| event["ok"] == false));
+    let capabilities = call(&mut core, json!({"protocolVersion":1,"kind":"capabilities"}));
+    assert!(capabilities.get("recent").is_none());
+    let fast: Value = serde_json::from_str(&core.exchange_nonblocking("{\"protocolVersion\":1,\"kind\":\"diagnostics\"}")).unwrap();
+    assert_eq!(fast["ok"], true);
+}
+
+#[test]
+fn swipe_endpoints_are_points_and_keys_cannot_expand_to_shell_commands() {
+    let mut core = controller();
+    let mut input = facts("virtual-only", 0, "yes");
+    input["facts"]["a11y"]["supportedOps"]["ops"] = json!(["swipe"]);
+    input["facts"]["shizuku"] = json!({"installed":"yes","running":"yes","granted":"yes",
+        "bound":"yes","functionalReady":"yes","serverUid":{"kind":"shell2000"},
+        "supportedOps":{"state":"known","ops":["keyEvent"]},
+        "displaySupport":{"state":"known","values":{"41":true}}});
+    assert_eq!(call(&mut core, input)["ok"], true);
+    let swipe = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","operation":"swipe",
+        "callId":"reverse-swipe","epoch":"900","screenId":"virtual-1",
+        "args":{"x1":900,"y1":1500,"x2":5,"y2":40,"durationMs":500}}));
+    assert_eq!(swipe["code"], "prepared", "{swipe}");
+    assert_eq!(swipe["plan"]["backend"], "a11y");
+    for (index, args) in [json!({"x1":3,"y1":4,"x2":1080,"y2":5}),
+        json!({"x1":3,"y1":4,"x2":3,"y2":4}),
+        json!({"x1":3,"y1":4,"x2":5,"y2":6,"durationMs":2001})].into_iter().enumerate() {
+        let denied = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","operation":"swipe",
+            "callId":format!("bad-swipe-{index}"),"epoch":"900","screenId":"virtual-1","args":args}));
+        assert_eq!(denied["executed"], "no", "{denied}");
+        assert_eq!(denied["ok"], false, "{denied}");
+    }
+    let key = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","operation":"keyEvent",
+        "callId":"virtual-enter","epoch":"900","screenId":"virtual-1","args":{"key":"enter"}}));
+    assert_eq!(key["plan"]["backend"], "shizuku", "{key}");
+    for args in [json!({"key":"home"}), json!({"key":"enter; reboot"}), json!({"key":"enter","text":"mixed"})] {
+        let denied = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","operation":"keyEvent",
+            "callId":"invalid-key","epoch":"900","screenId":"virtual-1","args":args}));
+        assert_eq!(denied["ok"], false, "{denied}");
+        assert_eq!(denied["executed"], "no", "{denied}");
+    }
+}
+
+#[test]
 fn epoch_uses_nonzero_entropy_and_rejects_zero_or_error() {
     let first = dsh_phone_control_core::controller::new_epoch().unwrap();
     let second = dsh_phone_control_core::controller::new_epoch().unwrap();
@@ -128,13 +221,122 @@ fn publish_default<J: Journal>(controller: &mut Controller<J>) -> Value {
 }
 
 #[test]
-fn global_action_has_a_typed_request_and_never_targets_a_virtual_display() {
+fn shared_browser_keeps_its_dom_arguments_without_android_display_authority() {
+    let mut core = controller();
+    assert_eq!(call(&mut core, facts("virtual-only", 0, "no"))["ok"], true);
+    let prepared = call(&mut core, json!({"protocolVersion":1,"kind":"prepare",
+        "operation":"browserInput","callId":"browser-dom","epoch":"900",
+        "args":{"session":"trusted-session","action":"click","x":450.5,"y":80.25}}));
+    assert_eq!(prepared["code"], "prepared", "{prepared}");
+    assert_eq!(prepared["plan"]["backend"], "browserHost");
+    assert_eq!(prepared["plan"]["args"]["x"], 450.5);
+    assert!(prepared["plan"].get("displayId").is_none(), "{prepared}");
+    let denied = call(&mut core, json!({"protocolVersion":1,"kind":"prepare",
+        "operation":"browserInput","callId":"browser-screen","epoch":"900",
+        "screenId":"real","args":{"action":"click","x":1,"y":1}}));
+    assert_eq!(denied["ok"], false, "{denied}");
+    let malformed = call(&mut core, json!({"protocolVersion":1,"kind":"prepare",
+        "operation":"browserJs","callId":"browser-malformed","epoch":"900","args":[]}));
+    assert_eq!(malformed["ok"], false, "{malformed}");
+}
+
+#[test]
+fn virtual_tools_follow_native_permission_and_validate_their_own_geometry() {
+    let mut core = controller();
+    let mut input = facts("virtual-only", 0, "no");
+    input["facts"]["shizuku"] = json!({
+        "installed":"yes","running":"yes","granted":"yes","bound":"yes","functionalReady":"yes",
+        "serverUid":{"kind":"shell2000"},"supportedOps":{"state":"known","ops":["vdCreate","vdDestroy","vdLaunchApp","vdInfo"]},
+        "displaySupport":{"state":"known","values":{"41":true}}
+    });
+    assert_eq!(call(&mut core, input.clone())["ok"], true);
+    let caps = call(&mut core, json!({"protocolVersion":1,"kind":"capabilities"}));
+    assert!(caps["operations"].as_array().unwrap().contains(&json!("vdCreate")), "{caps}");
+    for args in [json!({"width":0,"height":900}), json!({"width":900}),
+        json!({"width":900,"height":1600,"densityDpi":999}), json!({"argv":["sh"]})] {
+        let bad = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","epoch":"900",
+            "callId":"bad-virtual","screenId":"virtual-1","operation":"vdCreate","args":args}));
+        assert_eq!(bad["ok"], false, "{bad}");
+    }
+    let valid = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","epoch":"900",
+        "callId":"virtual-create","screenId":"virtual-1","operation":"vdCreate",
+        "args":{"width":900,"height":1600,"densityDpi":240,"session":"trusted"}}));
+    assert_eq!(valid["code"], "prepared", "{valid}");
+    input["facts"]["shizuku"]["granted"] = json!("no");
+    assert_eq!(call(&mut core, input.clone())["ok"], true);
+    let caps = call(&mut core, json!({"protocolVersion":1,"kind":"capabilities"}));
+    assert!(!caps["operations"].as_array().unwrap().contains(&json!("vdCreate")), "{caps}");
+    let denied = call(&mut core, json!({"protocolVersion":1,"kind":"commit","callId":"virtual-create"}));
+    assert_eq!(denied["executed"], "no", "{denied}");
+}
+
+#[test]
+fn focused_unicode_text_uses_the_observed_native_channel_without_an_ime() {
+    let mut core = controller();
+    let mut input = facts("real-only", 0, "no");
+    input["facts"]["screens"]["real"] = json!({"displayId":0,"width":1080,"height":2400,"rotation":0});
+    input["facts"]["shizuku"] = json!({
+        "installed":"yes","running":"yes","granted":"yes","bound":"yes","functionalReady":"yes",
+        "serverUid":{"kind":"shell2000"},"supportedOps":{"state":"known","ops":["setText"]},
+        "displaySupport":{"state":"known","values":{"0":true}}
+    });
+    assert_eq!(call(&mut core, input.clone())["ok"], true);
+    let request = json!({"protocolVersion":PROTOCOL_VERSION,"kind":"prepare","operation":"setText",
+        "callId":"shell-text","epoch":"900","screenId":"real","args":{"text":"中文 🙂"}});
+    let prepared = call(&mut core, request.clone());
+    assert_eq!(prepared["code"], "prepared", "{prepared}");
+    assert_eq!(prepared["plan"]["backend"], "shizuku");
+    assert_eq!(prepared["plan"]["args"], json!({"text":"中文 🙂","clear":true}));
+    let commit = call(&mut core, json!({"protocolVersion":1,"kind":"commit","callId":"shell-text"}));
+    assert_eq!(commit["dispatch"], "permitted", "{commit}");
+    let settled = call(&mut core, json!({"protocolVersion":1,"kind":"settle","callId":"shell-text",
+        "receipt":{"ok":true,"code":"shizuku-text-confirmed","executed":"yes","screenId":"real"}}));
+    assert_eq!(settled["ok"], true, "{settled}");
+    assert_eq!(call(&mut core, request)["replayed"], true);
+
+    input["facts"]["scope"] = json!("virtual-only");
+    assert_eq!(call(&mut core, input.clone())["ok"], true);
+    let denied = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","operation":"setText",
+        "callId":"scope-denied-text","epoch":"900","screenId":"real","args":{"text":"x"}}));
+    assert_eq!(denied["executed"], "no", "{denied}");
+    assert_eq!(denied["ok"], false);
+    input["facts"]["scope"] = json!("all");
+    input["facts"]["shizuku"]["granted"] = json!("no");
+    assert_eq!(call(&mut core, input.clone())["ok"], true);
+    let denied = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","operation":"setText",
+        "callId":"permission-denied-text","epoch":"900","screenId":"real","args":{"text":"x"}}));
+    assert_eq!(denied["executed"], "no", "{denied}");
+    assert!(denied.get("plan").is_none(), "{denied}");
+}
+
+#[test]
+fn focused_text_validates_text_without_loosening_node_reference_validation() {
+    let mut core = controller();
+    let mut input = facts("all", 0, "yes");
+    input["facts"]["a11y"]["supportedOps"]["ops"] = json!(["setText"]);
+    assert_eq!(call(&mut core, input)["ok"], true);
+    for args in [json!({"text":false}), json!({"text":"x","clear":"yes"}),
+        json!({"text":"x","ref":""}), json!({"text":"x","x":1}),
+        json!({"text":"中".repeat(2731)})] {
+        let denied = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","operation":"setText",
+            "callId":"bad-focused-text","epoch":"900","screenId":"virtual-1","args":args}));
+        assert_eq!(denied["ok"], false, "{denied}");
+        assert!(denied.get("plan").is_none(), "{denied}");
+    }
+    let prepared = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","operation":"setText",
+        "callId":"a11y-focused-text","epoch":"900","screenId":"virtual-1","args":{"text":"","clear":true}}));
+    assert_eq!(prepared["code"], "prepared", "{prepared}");
+    assert_eq!(prepared["plan"]["backend"], "a11y");
+}
+
+#[test]
+fn global_actions_keep_real_a11y_and_virtual_back_needs_a_scoped_shizuku_channel() {
     let mut core = controller();
     let mut input = facts("all", 0, "yes");
     input["facts"]["screens"]["real"] = json!({"displayId":0,"width":1080,"height":2400,"rotation":0});
     input["facts"]["a11y"]["supportedOps"]["ops"] = json!(["global"]);
     input["facts"]["a11y"]["displaySupport"]["values"]["0"] = json!(true);
-    assert_eq!(call(&mut core, input)["ok"], true);
+    assert_eq!(call(&mut core, input.clone())["ok"], true);
     for args in [json!({}), json!({"action":"not-an-action"}), json!({"action":"back","x":5}), json!({"action":3})] {
         let refused = call(&mut core, json!({"protocolVersion":PROTOCOL_VERSION,"kind":"prepare",
             "operation":"global","callId":"bad-global","epoch":"900","screenId":"real","args":args}));
@@ -143,13 +345,25 @@ fn global_action_has_a_typed_request_and_never_targets_a_virtual_display() {
     }
     let wrong = call(&mut core, json!({"protocolVersion":PROTOCOL_VERSION,"kind":"prepare",
         "operation":"global","callId":"virtual-global","epoch":"900","screenId":"virtual-1","args":{"action":"back"}}));
-    assert_eq!(wrong["code"], "target-unsupported", "{wrong}");
+    assert_eq!(wrong["code"], "facts-unknown", "{wrong}");
     assert_eq!(wrong["executed"], "no");
     let prepared = call(&mut core, json!({"protocolVersion":PROTOCOL_VERSION,"kind":"prepare",
         "operation":"global","callId":"real-global","epoch":"900","screenId":"real","args":{"action":"back"}}));
     assert_eq!(prepared["code"], "prepared", "{prepared}");
     assert_eq!(prepared["plan"]["args"], json!({"action":"back"}));
     assert_eq!(prepared["plan"]["backend"], "a11y");
+    input["facts"]["shizuku"] = json!({"installed":"yes","running":"yes","granted":"yes",
+        "bound":"yes","functionalReady":"yes","serverUid":{"kind":"shell2000"},
+        "supportedOps":{"state":"known","ops":["global"]},
+        "displaySupport":{"state":"known","values":{"41":true}}});
+    assert_eq!(call(&mut core, input)["ok"], true);
+    let back = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","operation":"global",
+        "callId":"virtual-scoped-back","epoch":"900","screenId":"virtual-1","args":{"action":"back"}}));
+    assert_eq!(back["plan"]["backend"], "shizuku", "{back}");
+    let home = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","operation":"global",
+        "callId":"virtual-not-home","epoch":"900","screenId":"virtual-1","args":{"action":"home"}}));
+    assert_eq!(home["code"], "target-unsupported", "{home}");
+    assert_eq!(home["executed"], "no");
 }
 
 fn prepare<J: Journal>(controller: &mut Controller<J>, call_id: &str) -> Value {
@@ -425,6 +639,38 @@ fn fallback_requires_prepared_and_keeps_target() {
         json!({"protocolVersion": PROTOCOL_VERSION, "kind": "fallback", "callId": "call-3", "reason": "service-offline"}),
     );
     assert_eq!(after_dispatch["code"], "fallback-not-allowed");
+}
+
+#[test]
+fn production_fallback_requires_fresh_a11y_loss_and_no_prior_guard() {
+    fn channels(online: &str) -> Value {
+        let mut value = facts("all", 0, online);
+        value["facts"]["shizuku"] = json!({"installed":"yes","running":"yes","granted":"yes","bound":"yes",
+            "functionalReady":"yes","serverUid":{"kind":"shell2000"},
+            "supportedOps":{"state":"known","ops":["click","setText"]},
+            "displayOperations":{"41":["click"]}});
+        value
+    }
+    let mut core = controller();
+    let command = |kind: &str, id: &str| json!({"protocolVersion":1,"kind":kind,"callId":id});
+    call(&mut core, channels("yes"));
+    prepare(&mut core, "not-granted");
+    prepare_with_point(&mut core, "was-granted", "virtual-1", "900", 35, 45);
+    for id in ["not-granted", "was-granted"] {
+        assert_eq!(call(&mut core, command("commit", id))["dispatch"], "permitted");
+    }
+    assert_eq!(call(&mut core, command("validateDispatch", "was-granted"))["valid"], true);
+    assert_eq!(call(&mut core, command("fallbackUnavailableA11y", "not-granted"))["code"], "fallback-not-proven");
+    call(&mut core, channels("no"));
+    assert_eq!(call(&mut core, command("fallbackUnavailableA11y", "was-granted"))["code"], "fallback-not-allowed");
+    let switched = call(&mut core, command("fallbackUnavailableA11y", "not-granted"));
+    assert_eq!(switched["dispatch"], "permitted", "{switched}");
+    assert_eq!(switched["plan"]["displayId"], 41);
+    assert_eq!(switched["plan"]["backend"], "shizuku");
+    assert_eq!(call(&mut core, command("validateDispatch", "not-granted"))["valid"], true);
+    let unavailable = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","epoch":"900",
+        "callId":"no-text-here","operation":"setText","screenId":"virtual-1","args":{"text":"test"}}));
+    assert_eq!(unavailable["code"], "target-unsupported");
 }
 
 #[test]

@@ -59,8 +59,7 @@ class EngineService : Service() {
     // 落在这里而不是 OverlayService：通知必须**独立于悬浮球开关**生存（§6.0 风险 2）。
     NotifyStore.start(this)
     NotifyBridge.start(this)
-    // 0.14.0 承载拆离：控制队列随前台引擎服务起停——a11y 关着也能承载 browser*/vd*。
-    ControlCarrier.ensureStarted(this)
+    com.dsharnessmobile.shell.nativecontrol.NativeControlRuntime.ensureStarted(this)
     // Dev log toggle on: persistent collection (logcat + engine.log → dshdata/log/, daily).
     if (MainActivity.DevLogPrefs.isEnabled(this)) LogCollector.start(this)
   }
@@ -109,7 +108,10 @@ class EngineService : Service() {
     serviceEpoch.get()?.let { retireEpoch(it) }
     startupExecutor.shutdownNow() // Cancels caller waits, not RootOwnershipJobs' shared worker.
     val currentInstance = instance === this
-    if (currentInstance) { ControlCarrier.stop(); instance = null }
+    if (currentInstance) {
+      com.dsharnessmobile.shell.nativecontrol.NativeControlRuntime.stop()
+      instance = null
+    }
     // ST-11：偏好仍为开时不停采集器（否则开关会乐观置位「开」而实际已停）；
     // 偏好已关才停。回前台由 MainActivity.onResume 的 DevLogControl.ensureStarted 补启。
     if (currentInstance && !DevLogControl.isPrefEnabled(this)) LogCollector.stop()
@@ -176,7 +178,7 @@ class EngineService : Service() {
    *
    * 为什么必须集中在一处：租约是「此刻有没有事在做」的唯一判据，散落多处写时间戳会让
    * 判据变成不可核对的隐式约定。刷新点只有三个来源——turn 在跑（[noteWakeActivityForTick]
-   * 观察 live 流）、控制请求在途（ControlPoller 调本入口）、启动或重启窗口（ensureEngine
+   * 观察 live 流）、原生控制请求在途（NativeControlHost 调本入口）、启动或重启窗口（ensureEngine
    * 与 RESTART 分支）。
    */
   internal fun noteWakeActivity() {

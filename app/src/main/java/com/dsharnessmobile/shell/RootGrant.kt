@@ -129,6 +129,10 @@ object RootGrant {
     DISCLAIMER_REVISION,
   )
 
+  /** 廉价开关位：只读已持久化的开关，不做「是否仍有 su」与 ownership 读面。 */
+  internal fun storedSwitch(context: Context): Boolean =
+    prefs(context).getBoolean(KEY_GRANTED, false)
+
   /**
    * 勾选/取消「已阅读」。
    *
@@ -201,8 +205,12 @@ object RootGrant {
   fun state(context: Context, channelUid: Int): JSONObject {
     val revision = consentRevision(context)
     val valid = consentValidFor(revision, DISCLAIMER_REVISION)
+    // E1：这几个读面原先各自重复求值 suPath()/SharedPreferences（最多 7 次），每 2s 轮询都做一遍。
+    // 本轮收敛成一次：结论不变（仍是「已授权且同意有效」），只是不再重复付出探测成本。
+    val granted = effectiveGrant(storedSwitch(context), revision, DISCLAIMER_REVISION)
+    val rootGranted = RootAccess.isGranted(context)
     return JSONObject()
-      .put("granted", isGranted(context))
+      .put("granted", granted)
       .put("consentValid", valid)
       .put("consentRevision", revision)
       .put("currentRevision", DISCLAIMER_REVISION)
@@ -210,10 +218,10 @@ object RootGrant {
       .put("currentVersionCode", DISCLAIMER_REVISION)
       .put("channelUid", channelUid)
       .put("channelRoot", channelUid == ROOT_UID)
-      .put("canToggle", channelUid == ROOT_UID || RootAccess.isGranted(context))
+      .put("canToggle", channelUid == ROOT_UID || rootGranted)
       // 应用级 root 授权（Root 管理器）——开关放行的第三道门，UI 单独一行展示进度与引导。
-      .put("rootGranted", RootAccess.isGranted(context))
-      .put("rootState", RootAccess.state(context).optString("state"))
+      .put("rootGranted", rootGranted)
+      .put("rootState", RootAccess.state(context, includeOwnership = false).optString("state"))
       .put("ownership", RootOwnershipJobs.state(context))
       // 诚实性说明（issue 要求：做不到技术隔离时不得把不成立的隔离写成事实）：
       .put(

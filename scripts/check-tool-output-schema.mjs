@@ -89,6 +89,16 @@ const TOOL_SOURCE_PATTERN = /(?:defineTool|makeTool)\s*\(/
 /** 源码级取名的可识别形态（与 TOOL_SOURCE_PATTERN 同一组函数名，避免「认得出插件、取不出名字」的盲区）。 */
 const NAME_DECL_PATTERN = /(?:defineTool|makeTool)\(\s*\{[\s\S]{0,600}?name:\s*(?:'([^']+)'|([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?)/g
 
+/** Declarative operation/name tables are still source declarations, not a second hardcoded list. */
+function tupleToolNames(source) {
+  const names = []
+  const tables = /for\s*\(\s*const\s*\[[^\]]*\bname\b[^\]]*\]\s*of\s*\[([\s\S]*?)\]\s*as\s*const\s*\)/g
+  for (const table of source.matchAll(tables)) {
+    for (const row of table[1].matchAll(/\[\s*'[^']+'\s*,\s*'([^']+)'/g)) names.push(row[1])
+  }
+  return names
+}
+
 const SKIP_REASON = {
   NO_ENTRY: '无 src/index.*（不是插件入口）',
   NO_TOOL_SOURCE: '源码无 defineTool/makeTool（非工具插件）',
@@ -104,6 +114,7 @@ const SKIP_ALLOW = new Map([
   ['dsh-shell-termux', '终端/快照构建面：src/index.ts 只注册服务与 command 面，不定义模型面工具（无 output.schema 可校验）'],
   ['dsh-client-ui-responsive', 'WebView 侧 UI 组件与样式表（TS/TSX 渲染层），不定义模型面工具'],
   ['dsh-host-web-compat', 'WebView 兼容层，没有 src/index.*（不是插件入口）'],
+  ['plugins/dsh-android-bridge', '共享浏览器桥、路由认证与通知投影；此插件不注册模型工具'],
   ['plugins/dsh-session-delete', '会话删除插件：只注册同源 /api 路由与 UI 槽位，不定义模型面工具'],
   ['plugins/dsh-linux-bootstrap', '动态安装与恢复服务，不定义模型工具；Linux 状态工具由 android-linux-env 校验，命令工具由下载的 linux-runtime 提供'],
 ])
@@ -158,6 +169,9 @@ if (argv.includes('--self-test')) {
     eq('② 纯服务插件不被误判为工具插件', TOOL_SOURCE_PATTERN.test('export function apply(ctx) { ctx.on("x", () => {}) }') === false)
     const names = [..."const t = makeTool({ name: 'synth_hidden' })".matchAll(NAME_DECL_PATTERN)].map((m) => m[1])
     eq('② 工厂形态也能取到工具名', names.includes('synth_hidden'), JSON.stringify(names))
+    const tuple = "for (const [operation, name, description] of [['read', 'android_fixture_read', 'Read.'], ['write', 'android_fixture_write', 'Write.']] as const) {}"
+    eq('② 声明表能解析全部名字', JSON.stringify(tupleToolNames(tuple)) === JSON.stringify(['android_fixture_read', 'android_fixture_write']))
+    eq('② 非 name 声明表不误算工具', tupleToolNames(tuple.replace('name,', 'label,')).length === 0)
   }
   // ③ 跳过账目：未登记跳过 = 红；登记且跳过 = 绿；登记却不跳过 = stale 红
   {
@@ -248,7 +262,7 @@ if (pluginArg) {
 const toolsPkg = argOf('engine-tools')
 const validatorCandidates = []
 if (toolsPkg) validatorCandidates.push(toolsPkg.endsWith('.js') ? toolsPkg : join(toolsPkg, 'lib', 'index.js'))
-validatorCandidates.push(join(ROOT, 'plugins', 'dsh-android-manage', 'node_modules', '@deepseek-ai', 'dsh-tools', 'lib', 'index.js'))
+validatorCandidates.push(join(ROOT, 'plugins', 'dsh-android-phone-control', 'node_modules', '@deepseek-ai', 'dsh-tools', 'lib', 'index.js'))
 validatorCandidates.push(join(ROOT, 'node_modules', '@deepseek-ai', 'dsh-tools', 'lib', 'index.js'))
 const validatorFile = validatorCandidates.find((p) => existsSync(p))
 if (!validatorFile) {
@@ -266,7 +280,7 @@ if (!validatorFile) {
     console.log('SKIP(#1) 引擎校验器缺席（净检出无 node_modules）：' + validatorCandidates.map(rel).join('、'))
     console.log('  SKIP=1')
     console.log('  这是**环境缺口**，不是通过：本门禁本轮未做任何校验。exit 2 与「判据不成立」的 exit 1 区分。')
-    console.log('  → 补产物的做法：在 plugins/dsh-android-manage 下 npm install（把 peerDependency '
+    console.log('  → 补产物的做法：在 plugins/dsh-android-phone-control 下 npm install（把 peerDependency '
       + '@deepseek-ai/dsh-tools 装进来），或用 --engine-tools <path> 直接指到引擎的 dsh-tools。')
     console.log('  → 发布链带 --require 时该缺口直接判红（exit 1），不会静默放过。')
     process.exit(2)
@@ -518,6 +532,7 @@ async function drivePlugin(pluginDir, mode) {
     if (!nameConsts.has(m[1])) nameConsts.set(m[1], m[2])
   }
   const declared = new Set()
+  for (const name of tupleToolNames(srcAll)) declared.add(name)
   for (const m of srcAll.matchAll(NAME_DECL_PATTERN)) {
     if (m[1] !== undefined) { declared.add(m[1]); continue }
     if (m[3] !== undefined) {

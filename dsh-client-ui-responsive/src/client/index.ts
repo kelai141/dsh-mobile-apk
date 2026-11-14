@@ -105,6 +105,7 @@ import { PanelNavDrawer } from './mobile/panel-nav-drawer.ts'
 import { MobileSidebarGestures } from './mobile/sidebar-gestures.ts'
 import { SidebarDragPreview } from './mobile/sidebar-drag-preview.ts'
 import { SessionMarker, type SessionsFace } from './mobile/session-marker.ts'
+import { apply as applyVirtualScreen } from './virtual-screen/index.ts'
 import {
   BROWSER_TAB_ID, BROWSER_TAB_KIND, LEGACY_BROWSER_TAB_ID, LEGACY_BROWSER_TAB_KIND,
   BrowserTab, BrowserTabMenu, browserTabDefinition, legacyBrowserTabDefinition,
@@ -1071,6 +1072,12 @@ export function apply(ctx: ClientContext): void {
       'ui-responsive: custom provider hint copy',
     )
   })
+
+  // 虚拟屏 tab 与终端九键条（迁移自旧 dsh-android-vdisplay 的共享 UI）。
+  // 九键条必须随客户端装配挂上，不能等虚拟屏 tab 被打开——它是侧栏终端的功能，也用于
+  // 「AI 在虚拟屏上操作、用户看终端」的常规路径。旧插件的 HTTP 状态端点与 controlExec
+  // 执行面不随之迁移；这里只注册展示面，状态源是原生 androidBridge。
+  ctx.inject(['slots', 'sidebarRight'], (scope) => { applyVirtualScreen(scope) })
 }
 
 

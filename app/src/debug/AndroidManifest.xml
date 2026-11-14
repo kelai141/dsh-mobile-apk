@@ -4,6 +4,7 @@
   <application>
     <activity
       android:name=".NativeControlClickFixtureActivity"
+      android:allowEmbedded="true"
       android:exported="false"
       android:theme="@android:style/Theme.Material.NoActionBar" />
 

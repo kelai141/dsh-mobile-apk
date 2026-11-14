@@ -27,7 +27,7 @@ function registeredFileProviderCallers() {
   return names
 }
 
-function fixture(t, path, rogue = false) {
+function fixture(t, path, rogue = false, transform = null) {
   const dir = mkdtempSync(join(tmpdir(), 'manifest-xml-reference-'))
   t.after(() => {
     assert.ok(resolve(dir).startsWith(resolve(tmpdir()) + sep))
@@ -44,7 +44,6 @@ function fixture(t, path, rogue = false) {
     ...registeredFileProviderCallers()
       .filter(name => existsSync(join(root, `app/src/main/java/com/dsharnessmobile/shell/${name}.kt`)))
       .map(name => `app/src/main/java/com/dsharnessmobile/shell/${name}.kt`),
-    'app/src/main/java/com/dsharnessmobile/shell/AdbKeyboardReceiver.kt',
   ]
   for (const file of files) {
     const dest = join(dir, file)
@@ -64,9 +63,23 @@ function fixture(t, path, rogue = false) {
   ))
   if (rogue) writeFileSync(join(dir, 'app/src/main/java/com/dsharnessmobile/shell/Unexpected.kt'),
     'fun emit() = FileProvider.getUriForFile(context, authority, file)\n')
+  if (transform !== null) transform(dir)
   const result = spawnSync(process.execPath, [checker, '--root', dir], { encoding: 'utf8' })
   assert.ifError(result.error)
   return { status: result.status, output: result.stdout + result.stderr }
+}
+
+/** 改写夹具清单；断言 mutate 真的改了文本，避免注入静默空转。 */
+function mutateManifest(dir, mutate) {
+  const path = join(dir, 'app/src/main/AndroidManifest.xml')
+  const before = readFileSync(path, 'utf8')
+  const after = mutate(before)
+  assert.notEqual(after, before, 'manifest mutation must change the fixture')
+  writeFileSync(path, after)
+}
+
+function fixtureWithManifest(t, mutate) {
+  return fixture(t, '&#x2e;', false, dir => mutateManifest(dir, mutate))
 }
 
 for (const path of ['.', '&#46;', '&#x2e;', 'tmp/&#46;&#46;', '&#46;&#46;/outside']) {
@@ -81,6 +94,82 @@ test('encoded broad mapping accepts the registered caller set', t => {
   const result = fixture(t, '&#x2e;')
   assert.equal(result.status, 0, result.output)
   assert.match(result.output, /逐文件\/逐引用登记一致/)
+})
+
+test('current manifest passes with its real exported component set', t => {
+  const result = fixture(t, '&#x2e;')
+  assert.equal(result.status, 0, result.output)
+  assert.match(result.output, /exported="true" 组件集合 == 白名单/)
+  assert.match(result.output, /不注册应用内输入法/)
+})
+
+test('legacy ADBKeyboard IME service cannot return to an exported surface', t => {
+  const result = fixtureWithManifest(t, source => source.replace('</application>', [
+    '    <service',
+    '      android:name=".AdbKeyboardService"',
+    '      android:exported="true"',
+    '      android:permission="android.permission.BIND_INPUT_METHOD">',
+    '      <intent-filter>',
+    '        <action android:name="android.view.InputMethod" />',
+    '      </intent-filter>',
+    '      <meta-data android:name="android.view.im" android:resource="@xml/input_method" />',
+    '    </service>',
+    '</application>',
+  ].join('\n')))
+  assert.equal(result.status, 1, result.output)
+  assert.match(result.output, /未登记=\s*\.AdbKeyboardService/)
+  assert.match(result.output, /不注册应用内输入法/)
+})
+
+test('legacy ADBKeyboard broadcast receiver cannot return as an exported surface', t => {
+  const result = fixtureWithManifest(t, source => source.replace('</application>', [
+    '    <receiver android:name=".AdbKeyboardReceiver" android:exported="true">',
+    '      <intent-filter>',
+    '        <action android:name="ADB_INPUT_TEXT" />',
+    '        <action android:name="ADB_CLEAR_TEXT" />',
+    '      </intent-filter>',
+    '    </receiver>',
+    '</application>',
+  ].join('\n')))
+  assert.equal(result.status, 1, result.output)
+  assert.match(result.output, /未登记=\s*\.AdbKeyboardReceiver/)
+  assert.match(result.output, /无 android:permission，且源码无 isTrustedSender 调用/)
+})
+
+test('a newly exported third-party service is rejected even with a permission', t => {
+  const result = fixtureWithManifest(t, source => source.replace('</application>',
+    '    <service android:name="com.example.InjectedService" android:exported="true" '
+      + 'android:permission="android.permission.BIND_JOB_SERVICE" />\n</application>'))
+  assert.equal(result.status, 1, result.output)
+  assert.match(result.output, /未登记=\s*com\.example\.InjectedService/)
+})
+
+test('a newly exported third-party receiver without permission or source check is rejected', t => {
+  const result = fixtureWithManifest(t, source => source.replace('</application>', [
+    '    <receiver android:name="com.example.InjectedReceiver" android:exported="true">',
+    '      <intent-filter>',
+    '        <action android:name="com.example.INJECTED" />',
+    '      </intent-filter>',
+    '    </receiver>',
+    '</application>',
+  ].join('\n')))
+  assert.equal(result.status, 1, result.output)
+  assert.match(result.output, /未登记=\s*com\.example\.InjectedReceiver/)
+  assert.match(result.output, /com\.example\.InjectedReceiver（无 android:permission，且源码无 isTrustedSender 调用）/)
+})
+
+test('the accessibility service cannot lose its binding permission', t => {
+  const result = fixtureWithManifest(t, source => source.replace(
+    /\s+android:permission="android\.permission\.BIND_ACCESSIBILITY_SERVICE"/, ''))
+  assert.equal(result.status, 1, result.output)
+  assert.match(result.output, /\.DeviceControlService（无 android:permission）/)
+})
+
+test('the Shizuku provider cannot lose its binding permission', t => {
+  const result = fixtureWithManifest(t, source => source.replace(
+    /\s+android:permission="android\.permission\.INTERACT_ACROSS_USERS_FULL"/, ''))
+  assert.equal(result.status, 1, result.output)
+  assert.match(result.output, /rikka\.shizuku\.ShizukuProvider（无 android:permission）/)
 })
 
 for (const path of ['Documents/&#x2e;hidden', '&amp;#46;']) {

@@ -84,6 +84,11 @@ export interface AndroidShellBridge {
   /** 0.14.1「手机控制」：Shizuku 特权通道真实状态 JSON（installed/running/granted/bound/binding/code/guidance）。
    *  这是「装没装」的事实判定来源——不是 vdisplayStatus()（后者是虚拟屏状态）。 */
   shizukuStatus?: () => string
+  /**
+   * 只读原生控制诊断 JSON：Rust 侧有界（最多 64 条）的脱敏审计，以及 exchanges / elapsedUs 计数。
+   * 不含命令文本、页面文本或图像数据。仅在「手机控制 → 高级诊断」由用户显式展开时读取。
+   */
+  nativeControlDiagnostics?: () => string
   /** 2026-09-30：**显式请求 Shizuku 授权**（UI 线程 + 前台 Activity 发起，管理器弹授权对话框）。
    *  后台自动请求落不到用户眼前（实测：管理器「应用管理」列表里根本没有本应用、状态恒 denied）。
    *  返回写后回读的 status JSON + `requested`。 */
@@ -142,6 +147,14 @@ export interface AndroidShellBridge {
    * Returns `{ok, code:repair-started|repair-running, running, startedAt, ...}` immediately.
    * Only `rootGrantState().ownership.result` settles checked/healed/failures and complete/partial status. */
   repairRootOwnership?: () => string
+  /**
+   * 只读结算面：按调用方持有的 operationId 读本次维护结果（PRD 5.2 / AC-08）。
+   *
+   * 与 repairRootOwnership 的「提交成功」严格分开：只有结果自身 ID 与 operationId 相符时才回
+   * 本次 result；任务未开始或已换代时回 `operation-id-mismatch`，绝不把历史结果当成本次结果。
+   * 空串表示只读状态。
+   */
+  rootOwnershipResult?: (operationId?: string) => string
   /** Pre-0.13.7 implicit ACTION_VIEW on a single path (kept: the page's path clicks
    *  fall back to it when the chooser is unavailable). Returns whether it launched. */
   openNativePath?: (path: string) => boolean

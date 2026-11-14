@@ -10,7 +10,7 @@ internal class NativeA11yExecution : NativeControlDispatcher.Platform {
     val service = DeviceControlService.nativePlatformService() ?: return emptyList()
     val platform = NativeAccessibilityPlatform(service)
     return buildList {
-      if (platform.pointGesturesSupported(displayId)) addAll(listOf("click", "longClick", "scroll"))
+      if (platform.pointGesturesSupported(displayId)) addAll(listOf("click", "longClick", "scroll", "swipe"))
       if (platform.screenshotsSupported(displayId)) addAll(listOf("screenshot", "readRegion"))
       if (platform.globalActionsSupported(displayId)) add("global")
       if (platform.windowContentSupported(displayId)) addAll(listOf("snapshot", "click", "longClick", "scroll", "setText", "nodeText"))
@@ -19,7 +19,7 @@ internal class NativeA11yExecution : NativeControlDispatcher.Platform {
 
   override fun implements(plan: JSONObject): Boolean =
     plan.optString("backend") == "a11y" && plan.optString("operation") in setOf(
-      "click", "longClick", "scroll", "setText", "nodeText", "screenshot", "readRegion", "snapshot", "global",
+      "click", "longClick", "scroll", "swipe", "setText", "nodeText", "screenshot", "readRegion", "snapshot", "global",
     ) &&
       DeviceControlService.nativePlatformService() != null
 
@@ -103,9 +103,11 @@ internal class NativeA11yExecution : NativeControlDispatcher.Platform {
         else if (operation == "click") platform.clickAt(target, args.getInt("x"), args.getInt("y"), authorize)
         else platform.longClickAt(target, args.getInt("x"), args.getInt("y"), 600L, authorize)
       "setText" -> if (node != null) platform.setTextNode(target, node, args.getString("text"), args.getBoolean("clear"), verify, authorize)
-        else return rejected("node-target-required")
+        else platform.setFocusedText(target, args.getString("text"), args.getBoolean("clear"), authorize)
       "scroll" -> if (node != null) platform.scrollNode(target, node, args.getString("direction"), verify, authorize)
         else platform.scrollAt(target, args.getInt("x"), args.getInt("y"), args.getString("direction"), args.getDouble("fraction"), authorize)
+      "swipe" -> platform.swipe(target, args.getInt("x1"), args.getInt("y1"), args.getInt("x2"), args.getInt("y2"),
+        args.optLong("durationMs", 300), authorize)
       "global" -> platform.globalAction(target, args.getString("action"), authorize)
       else -> return rejected("platform-adapter-unavailable")
     }

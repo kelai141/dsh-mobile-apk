@@ -5,7 +5,7 @@ package com.dsharnessmobile.shell.nativecontrol
  *
  * initialize 只接受宿主 Context 提供的私有目录和实际应用 UID；不能转发 IPC 的同名参数。
  * exchange 是 Kotlin 内部协议，不能把它直接挂成 Node 或 WebView 的任意调用入口。
- * 当前没有生产接线；隔离测试以外的路径不引用本对象。
+ * 由 EngineService 启动的 NativeControlRuntime 持有生产宿主；Node 不持有 JNI 生命周期。
  */
 internal object NativeControlCore {
   init {

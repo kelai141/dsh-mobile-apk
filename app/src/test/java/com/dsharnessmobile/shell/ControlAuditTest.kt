@@ -108,15 +108,6 @@ class ControlAuditTest {
     assertEquals("action 原样落盘", "shPush", rec.getString("action"))
   }
 
-  // ── ⑥ ShellOps 侧：Shizuku 结果对象 → 真实结果串 ───────────────────────────
-
-  @Test
-  fun shellOpsMapsShizukuResultToFailedWhenNotOk() {
-    assertEquals("ok=true → ok", ControlAudit.RESULT_OK,
-      ShellOps.resultOf(JSONObject().put("ok", true)))
-    assertEquals("ok=false → failed（旧实现这里写成 ok）", ControlAudit.RESULT_FAILED,
-      ShellOps.resultOf(JSONObject().put("ok", false)))
-    assertEquals("缺 ok 字段 → failed（fail-closed，不得默认成功）", ControlAudit.RESULT_FAILED,
-      ShellOps.resultOf(JSONObject()))
-  }
+  // 手机执行回执的审计已迁往 Rust controller；其有界/脱敏与拒绝结果由
+  // tests/controller.rs::explicit_native_diagnostics_are_bounded_and_do_not_retain_payloads 验证。
 }

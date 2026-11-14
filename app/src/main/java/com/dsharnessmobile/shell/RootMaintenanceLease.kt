@@ -14,6 +14,8 @@ internal object RootMaintenanceLease {
   private const val KEY_OPERATION = "operation"
   private const val KEY_DISPATCHED = "dispatched"
   private const val KEY_DISPATCHED_AT = "dispatchedAt"
+  /** PRD §5.2 / AC-08：一次维护的**唯一操作 ID**，随租约落盘，回执凭它自证属于本次。 */
+  private const val KEY_OPERATION_ID = "operationId"
   private val lock = Any()
   private var initialized = false
   private var pendingEpoch: String? = null
@@ -21,8 +23,63 @@ internal object RootMaintenanceLease {
   private var operation = ""
   private var dispatched = ""
   private var dispatchedAt = 0L
+  private var operationId = ""
   private var owner: Thread? = null
   private var unknown = false
+  /** 本次 job 预分配的 ID（由调用方线程设置）；beginOperation 优先采用它。 */
+  private val jobId = ThreadLocal<String?>()
+
+  /**
+   * 在 [block] 执行期间为「本线程发起的维护」预置唯一操作 ID。
+   *
+   * 用途：调用方（RootOwnershipJobs）先知道本次 ID，再让深处的 beginOperation 采用它；
+   * 这样即使某条通道的结果自己不带 ID，调用方仍能把本次 ID 盖上去，不会把本次结果误判成历史。
+   */
+  fun <T> withOperationId(id: String, block: () -> T): T {
+    val previous = jobId.get()
+    jobId.set(id)
+    return try {
+      block()
+    } finally {
+      if (previous == null) jobId.remove() else jobId.set(previous)
+    }
+  }
+
+  /**
+   * 唯一操作 ID 的纯生成器（可注入随机源，便于 JVM 判据）。
+   *
+   * 形态：32 位小写十六进制。只允许 [0-9a-f]，与 [isCanonicalOperationId] 严格对应；
+   * 碰撞概率可忽略，且 ID 只用于「是不是同一次任务」的自证，不是认证凭据。
+   */
+  internal fun newOperationId(random: () -> Long): String {
+    // 按位截断取低 32 位。不能用 minOf(random, 0xFFFFFFFF)：随机值几乎总大于上限，
+    // 截断会退化成常量（本函数曾因此产出全 f 的 ID，被单测抓住）。
+    fun chunk(): String = (random() and 0xFFFF_FFFFL).toString(16).padStart(8, '0')
+    return chunk() + chunk() + chunk() + chunk()
+  }
+
+  /** 唯一操作 ID 的形态判据（纯函数）：长度固定、全小写十六进制、非全零占位不符。 */
+  internal fun isCanonicalOperationId(value: String?): Boolean =
+    value != null && value.length == 32 && value.all { it in '0'..'9' || it in 'a'..'f' }
+
+  /**
+   * 结算准入（纯函数）：只有**原 owner 线程 + 租约未被判为 unknown +（给了期望 ID 时）ID 相符**
+   * 才能清租约。
+   *
+   * 期望 ID 为 null 表示调用方未携带本次 ID（旧调用的兼容形态）：此时仍执行原有的
+   * owner/unknown 双重校验，**不放松**任何一条。
+   */
+  internal fun finishAllowed(
+    ownerMatches: Boolean,
+    leaseUnknown: Boolean,
+    currentId: String,
+    expectedId: String?,
+  ): Boolean {
+    if (!ownerMatches || leaseUnknown) return false
+    if (expectedId.isNullOrEmpty()) return true
+    // 带期望 ID 时，租约上的 ID 必须非空且逐字相符。
+    return currentId.isNotEmpty() && expectedId == currentId
+  }
 
   /** A missing epoch cannot authorize clearing an earlier process's pending work. */
   internal fun newBoot(saved: String?, current: String?): Boolean =
@@ -52,32 +109,61 @@ internal object RootMaintenanceLease {
     operation = prefs.getString(KEY_OPERATION, "privileged-operation").orEmpty()
     dispatched = prefs.getString(KEY_DISPATCHED, "").orEmpty()
     dispatchedAt = prefs.getLong(KEY_DISPATCHED_AT, 0L)
+    operationId = prefs.getString(KEY_OPERATION_ID, "").orEmpty()
     if (pendingEpoch != null && newBoot(pendingEpoch, bootEpoch(context)) && prefs.edit().clear().commit()) {
-      pendingEpoch = null; startedAt = 0L; operation = ""; dispatched = ""; dispatchedAt = 0L
+      pendingEpoch = null; startedAt = 0L; operation = ""; dispatched = ""; dispatchedAt = 0L; operationId = ""
     }
     unknown = pendingEpoch != null
     initialized = true
   }
 
   /** Persist before dispatch. If durability cannot be established, do not launch privileged work. */
-  fun begin(context: Context, operation: String): JSONObject? = synchronized(lock) {
+  fun begin(context: Context, operation: String): JSONObject? = beginOperation(context, operation).second
+
+  /**
+   * 同 [begin]，但同时回传**本次**唯一操作 ID（PRD 5.2 / AC-08）。
+   *
+   * ID 与租约在同一次 commit 内落盘：先持久化再派发，回执凭 ID 自证属于本次任务，
+   * 历史结果不可能冒充它。被拒绝时 second 为拒绝 JSON、first 为 null。
+   */
+  fun beginOperation(context: Context, operation: String, id: String? = null): Pair<String?, JSONObject?> =
+    synchronized(lock) {
     restore(context)
-    if (pendingEpoch != null) return@synchronized refusalLocked()
-    val epoch = bootEpoch(context) ?: return@synchronized JSONObject().put("ok", false)
-      .put("code", "root-maintenance-epoch-unavailable").put("reason", "root-maintenance-epoch-unavailable")
-      .put("guidance", "无法确认设备启动标识，本次不派发特权工作。")
+    if (pendingEpoch != null) return@synchronized (null to refusalLocked())
+    val epoch = bootEpoch(context)
+      ?: return@synchronized (null to JSONObject().put("ok", false)
+        .put("code", "root-maintenance-epoch-unavailable").put("reason", "root-maintenance-epoch-unavailable")
+        .put("guidance", "无法确认设备启动标识，本次不派发特权工作。"))
+    val random = java.security.SecureRandom()
+    val chosenId = (id ?: jobId.get() ?: newOperationId { random.nextLong() })
+      .takeIf { isCanonicalOperationId(it) }
+      ?: return@synchronized (null to JSONObject().put("ok", false).put("code", "invalid-operation-id")
+        .put("reason", "invalid-operation-id").put("guidance", "操作标识不合法，本次不派发特权工作。"))
     val started = SystemClock.elapsedRealtime().coerceAtLeast(1L)
     val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     if (!prefs.edit().putString(KEY_EPOCH, epoch).putLong(KEY_STARTED, started)
-        .putString(KEY_OPERATION, operation.take(64)).commit()) {
-      return@synchronized JSONObject().put("ok", false).put("code", "root-maintenance-lease-unavailable")
-        .put("reason", "root-maintenance-lease-unavailable").put("guidance", "特权执行租约不能持久化，本次不派发。")
+        .putString(KEY_OPERATION, operation.take(64))
+        .putString(KEY_DISPATCHED, "").putLong(KEY_DISPATCHED_AT, 0L)
+        .putString(KEY_OPERATION_ID, chosenId).commit()) {
+      return@synchronized (null to JSONObject().put("ok", false).put("code", "root-maintenance-lease-unavailable")
+        .put("reason", "root-maintenance-lease-unavailable").put("guidance", "特权执行租约不能持久化，本次不派发。"))
     }
     pendingEpoch = epoch; startedAt = started; this.operation = operation.take(64)
+    operationId = chosenId
     dispatched = ""; dispatchedAt = 0L
     owner = Thread.currentThread(); unknown = false
-    null
+    chosenId to null
   }
+
+  /** 当前租约的唯一操作 ID（无租约时为空串）。 */
+  fun operationId(context: Context?): String = synchronized(lock) {
+    if (context == null) return@synchronized operationId
+    restore(context)
+    if (pendingEpoch == null) "" else operationId
+  }
+
+  /** 当前线程预置的 job ID（未预置为 null）。仅供调用方自检与判据。 */
+  internal fun currentJobId(): String? = jobId.get()
 
   /**
    * 记录「特权工作已经真正派发出去」——这是**自动清算的唯一否决证据**（2026-10-02 复审第 2 点）：
@@ -102,14 +188,25 @@ internal object RootMaintenanceLease {
     true
   }
 
-  /** Only the original acknowledged caller may clear its lease; ordinary timeout/error is not acknowledgement. */
-  fun finish(context: Context): Boolean = synchronized(lock) {
+  /**
+   * Only the original acknowledged caller may clear its lease; ordinary timeout/error is not acknowledgement.
+   *
+   * [expectedOperationId] 给出时，租约上的 ID 必须相符才能清——这正是「历史运行不能清除本次失败」
+   * 的落地：迟到的旧任务即便线程身份对得上，也清不掉新任务的隔离。
+   */
+  fun finish(context: Context, expectedOperationId: String? = null): Boolean = synchronized(lock) {
     restore(context)
-    if (pendingEpoch == null || unknown || owner !== Thread.currentThread()) return@synchronized false
+    val allowed = pendingEpoch != null && finishAllowed(
+      ownerMatches = owner === Thread.currentThread(),
+      leaseUnknown = unknown,
+      currentId = operationId,
+      expectedId = expectedOperationId,
+    )
+    if (!allowed) return@synchronized false
     val cleared = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().commit()
     if (cleared) {
       pendingEpoch = null; startedAt = 0L; operation = ""; owner = null; unknown = false
-      dispatched = ""; dispatchedAt = 0L
+      dispatched = ""; dispatchedAt = 0L; operationId = ""
     } else unknown = true
     cleared
   }
@@ -200,7 +297,7 @@ internal object RootMaintenanceLease {
     }
     if (cleared) {
       pendingEpoch = null; startedAt = 0L; operation = ""; owner = null; unknown = false
-      dispatched = ""; dispatchedAt = 0L
+      dispatched = ""; dispatchedAt = 0L; operationId = ""
     }
     cleared
   }
@@ -224,7 +321,7 @@ internal object RootMaintenanceLease {
   private fun refusalLocked(): JSONObject = JSONObject().put("ok", false)
     .put("code", if (unknown) "repair-result-unknown" else "root-maintenance-busy")
     .put("reason", if (unknown) "repair-result-unknown" else "root-maintenance-busy")
-    .put("operation", operation).put("startedAt", startedAt)
+    .put("operation", operation).put("operationId", operationId).put("startedAt", startedAt)
     // issue #658：`startedAt` 是 elapsedRealtime，人读不了；补一个「租约已挂多久」，让引导页能讲清。
     .put("leaseAgeMs", (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)).put("staleTtlMs", STALE_LEASE_TTL_MS).put("unknown", unknown)
     .put("dispatched", dispatched.isNotEmpty()).put("dispatchedVia", dispatched).put("dispatchedAt", dispatchedAt)

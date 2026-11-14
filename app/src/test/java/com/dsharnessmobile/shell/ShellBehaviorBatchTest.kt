@@ -89,23 +89,50 @@ class ShellBehaviorBatchTest {
    * interrupt() 打断不了。重启后旧线程仍在跑当前 op ⇒ 两条特权命令并发执行，而 reqId 去重 LRU
    * 是实例级的，新实例 map 为空 ⇒ 同一条请求被执行第二次。
    */
+  /**
+   * 旧 ControlPoller 已随原生宿主退役；本条迁移为「原生宿主停机必须真的收口」。
+   *
+   * 现状：EngineService 停机走 NativeControlRuntime.stop()，由它取消观测、关闭宿主，
+   * 宿主再关闭 socket server。判据因此落在「每条链路都在、且按顺序关」上：
+   * 缺任一处，停机后监听仍在、观测线程仍在拍。
+   */
   @Test
-  fun pollerStopWaitsForTheWorkerInsteadOfOnlyFlippingTheFlag() {
-    val code = shellCode("ControlPoller.kt")
-    assertTrue("stop() 必须走有界等待（issue #1601）", code.contains("WorkerJoin.joinQuietly(worker, STOP_JOIN_MS)"))
-    assertTrue("等待必须有上界（停机不能无限挂住）", code.contains("internal const val STOP_JOIN_MS"))
-    assertTrue("超时后必须留痕，而不是假装停干净", code.contains("worker still running after"))
-    // 旧形态（只翻标志位 + interrupt 就返回）不得回归：等待必须真的发生在 stop() 体内。
-    val stopBody = code.substringAfter("fun stop() {").substringBefore("\n  }")
-    assertTrue("等待必须在 stop() 体内，而不是别处", stopBody.contains("WorkerJoin.joinQuietly"))
+  fun nativeHostStopCancelsObservationAndClosesTheServer() {
+    val runtime = codeOnly(source("src/main/java/com/dsharnessmobile/shell/nativecontrol/NativeControlRuntime.kt"))
+    val stop = runtime.substringAfter("fun stop() {").substringBefore("\n  }")
+    assertTrue("停机必须先作废代次（否则在飞任务会被当成仍有效）", stop.contains("desiredEpoch.incrementAndGet()"))
+    assertTrue("必须取消周期观测（否则停机后仍在探测能力）", stop.contains("observation?.cancel(true)"))
+    assertTrue("必须关闭宿主（否则监听仍在）", stop.contains("host?.close()"))
+    assertTrue("必须清空宿主引用（不得留着已关闭对象）", stop.contains("host = null"))
+
+    val host = codeOnly(source("src/main/java/com/dsharnessmobile/shell/nativecontrol/NativeControlHost.kt"))
+    assertTrue("宿主 close 必须落到 server.close()", host.contains("override fun close() = server.close()"))
+
+    val server = codeOnly(source("src/main/java/com/dsharnessmobile/shell/nativecontrol/NativeControlSocketServer.kt"))
+    val close = server.substringAfter("override fun close() {").substringBefore("\n  }")
+    assertTrue("关闭必须幂等（重复 close 不得再动一次）", close.contains("stopped.compareAndSet(false, true)"))
+    assertTrue("在飞请求必须被取消", close.contains("state.cancel()"))
+    assertTrue("监听与已绑定 socket 都必须关", close.contains("server?.close()") && close.contains("boundSocket?.close()"))
+    assertTrue("工作线程与超时计时器都必须收口", close.contains("workers.shutdownNow()") && close.contains("timer.shutdownNow()"))
+    // 旧形态（只翻标志位就返回，socket 监听还在）不得回归：删除关闭动作即变红。
+    assertFalse("不得退回「只翻标志位」的停机形态", close.trim().lines().size < 4)
   }
 
-  /** 载体停机时 appContext 必须一并清空，否则已死的 Context 仍会被拿去真执行 op。 */
+  /**
+   * 旧载体停机要求「清空 appContext」；原生宿主把它换成了更窄的一条：
+   * Context 由 EngineService 传入宿主，宿主只保留 applicationContext 派生的端点与目录，
+   * socket server 持有 app 引用但随 close 一起不可再用。判据因此改成
+   * 「停机后没有可复用的执行面」：代次作废 + 宿主置空 + 服务不再接受连接。
+   */
   @Test
-  fun carrierStopClearsTheApplicationContext() {
-    val code = shellCode("ControlCarrier.kt")
-    val stopBody = code.substringAfter("fun stop() {").substringBefore("\n  }")
-    assertTrue("stop() 必须清 appContext（issue #1601）", stopBody.contains("appContext = null"))
+  fun noExecutableSurfaceRemainsAfterTheHostStops() {
+    val runtime = codeOnly(source("src/main/java/com/dsharnessmobile/shell/nativecontrol/NativeControlRuntime.kt"))
+    assertTrue("代次作废是停机的第一动作", runtime.contains("desiredEpoch.incrementAndGet()"))
+    // 观测回调必须按代次自检：停机后即使有一拍在飞，也不得继续执行。
+    assertTrue("周期观测必须按代次自检", runtime.contains("if (epoch == desiredEpoch.get())"))
+    val server = codeOnly(source("src/main/java/com/dsharnessmobile/shell/nativecontrol/NativeControlSocketServer.kt"))
+    assertTrue("接受循环必须看停机标志（关掉后不得再接新连接）", server.contains("while (!stopped.get())"))
+    assertTrue("不再标记 started，避免停机后复用同一 server", server.contains("check(started.compareAndSet(false, true))"))
   }
 
   /**

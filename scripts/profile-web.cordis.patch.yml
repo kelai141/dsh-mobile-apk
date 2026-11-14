@@ -72,16 +72,15 @@
 - id: client-hmr
   disabled: true
 
-# 手机管理授权桥（0.13.0 F1.7，M3.2）：dsh-android-bridge——授权状态机/失败关闭/审计；
-# 门控限死为完全访问档位（自动审批模式不构成开放条件）。
+# 共享原生桥：保留浏览器工作台与会话通知，不再承载手机控制队列。
 - insert:
     - id: android-bridge
       name: '@dsh-android/dsh-android-bridge'
 
-# 手机管理工具面（0.13.0 F1.6，M3.2）：dsh-android-manage——观察/动作/等待闭环，全部失败关闭。
+# 手机控制仅由薄插件注册，执行与能力以壳侧 Rust 宿主为准。
 - insert:
-    - id: android-manage
-      name: '@dsh-android/dsh-android-manage'
+    - id: android-phone-control
+      name: '@dsh-android/dsh-android-phone-control'
 
 # 工具链与环境设置面板（0.13.0 F1.3/F1.5，M3.2）：dsh-android-linux-env——工具链状态/环境配方/
 # 共享目录与镜像设置视图；同时是 shell-termux 写面栅栏（workspaceRoot/sharedDirs，见上文 L20-22）
@@ -156,12 +155,6 @@
 - insert:
     - id: android-browser
       name: '@dsh-android/dsh-android-browser'
-
-# 虚拟屏（0.13.8 新插件 @dsh-android/dsh-android-vdisplay）：Shizuku 特权通道的能力状态面 + 只读状态端点
-# + vd\* op 声明（VD_OPS，见其 src/status.ts）；像素合成留在壳侧 SurfaceView。vd\* 同样不进 A11Y_OPS。
-- insert:
-    - id: android-vdisplay
-      name: '@dsh-android/dsh-android-vdisplay'
 
 # PTC 代码执行（TypeScript 代码块）：**nodeExecutable 必须显式钉死**，不得依赖 `process.execPath`。
 #

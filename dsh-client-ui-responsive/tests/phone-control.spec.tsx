@@ -27,6 +27,7 @@ import {
 } from '../src/client/dev-section/phone-control.tsx'
 import { describeCallReason } from '../src/client/user-copy.ts'
 import { DEV_SECTION_CSS } from '../src/client/dev-section/dev-section.css.ts'
+import { PHONE_CONTROL_CSS } from '../src/client/dev-section/phone-control.css.ts'
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -54,6 +55,36 @@ async function unmount(): Promise<void> {
   }
   host?.remove()
   host = undefined
+}
+
+/** Enter a secondary view through the same row a person taps. */
+async function enter(el: HTMLElement, title: string): Promise<void> {
+  const row = [...el.querySelectorAll('button.dsh-pc-row-main')]
+    .find((item) => item.textContent?.startsWith(title))
+  expect(row, '入口行「' + title + '」必须在场').toBeTruthy()
+  await act(async () => { (row as HTMLButtonElement).click() })
+}
+
+async function renderView(bridge: Record<string, unknown>, title: string): Promise<HTMLElement> {
+  const el = await render(bridge)
+  await enter(el, title)
+  return el
+}
+
+function renderRoot(bridge: Record<string, unknown>): Promise<HTMLElement> {
+  return renderView(bridge, 'Root 权限')
+}
+
+function renderShizuku(bridge: Record<string, unknown>): Promise<HTMLElement> {
+  return renderView(bridge, 'Shizuku 授权')
+}
+
+function renderVdisplay(bridge: Record<string, unknown>): Promise<HTMLElement> {
+  return renderView(bridge, '虚拟屏设置')
+}
+
+function renderA11y(bridge: Record<string, unknown>): Promise<HTMLElement> {
+  return renderView(bridge, '无障碍通道')
 }
 
 /** 壳侧 shizukuStatus() 的样本（字段名与 ShizukuTransport.status 一致）。 */
@@ -102,23 +133,62 @@ afterEach(async () => {
   else Object.defineProperty(window, 'androidBridge', originalBridgeDescriptor)
   vi.useRealTimers()
   vi.restoreAllMocks()
+  document.documentElement.lang = 'zh'
 })
 
 describe('PhoneControlSection（手机控制设置页）', () => {
+  it('首屏顺序固定：屏幕范围、无障碍、Shizuku、虚拟屏、高级、Root', async () => {
+    const el = await render({
+      getScreenScope: () => 'virtual-only',
+      getVdisplayScale: () => 0.75,
+      getVdisplayFloatEnabled: () => true,
+      shizukuStatus: () => shizukuJson(),
+      a11yStatus: () => JSON.stringify({ enabled: true }),
+      rootGrantState: () => rootGrantJson(),
+    })
+    const rows = [...el.querySelectorAll('button.dsh-pc-row-main')].map((node) => node.textContent ?? '')
+    expect(rows).toHaveLength(5)
+    expect(rows[0]).toContain('无障碍通道')
+    expect(rows[1]).toContain('Shizuku 授权')
+    expect(rows[2]).toContain('虚拟屏设置')
+    expect(rows[3]).toContain('高级设置与诊断')
+    expect(rows[4]).toContain('Root 权限')
+    // 屏幕范围是首屏第一块，横向三段顺序固定。
+    const segment = el.querySelector('.dsh-pc-segment')!
+    const options = [...segment.querySelectorAll('button')].map((node) => node.textContent)
+    expect(options).toEqual(['仅虚拟屏幕', '仅真实屏幕', '全部开放'])
+    expect(el.querySelector('.dsh-screen-control-card')!.querySelector('.dsh-pc-screen')).toBeTruthy()
+  })
+
+  it('首屏是平背景细分隔行，不再把动作铺成按钮墙或嵌套大卡片', async () => {
+    const el = await render({
+      getScreenScope: () => 'virtual-only',
+      getVdisplayScale: () => 0.75,
+      getVdisplayFloatEnabled: () => true,
+      shizukuStatus: () => shizukuJson(),
+      a11yStatus: () => JSON.stringify({ enabled: true }),
+      rootGrantState: () => rootGrantJson(),
+    })
+    expect(el.querySelectorAll('[data-plugin="dev-phone-control"] section')).toHaveLength(0)
+    expect(el.querySelectorAll('button[role="radio"]')).toHaveLength(3)
+    expect(el.querySelectorAll('button.dsh-dev-btn')).toHaveLength(0)
+    expect(el.querySelectorAll('.dsh-pc-row')).toHaveLength(5)
+  })
+
   it('开放屏幕范围：壳值优先，切换后写壳桥并回读', async () => {
     const state: { scope: Scope } = { scope: 'virtual-only' }
     const setScreenScope = vi.fn((scope: Scope) => { state.scope = scope })
     const getScreenScope = vi.fn(() => state.scope)
     const el = await render({ getScreenScope, setScreenScope })
-    const select = el.querySelector('select[aria-label="开放屏幕范围"]') as HTMLSelectElement
-    expect(select, '开放屏幕范围选择器必须在场').toBeTruthy()
-    expect(select.value).toBe('virtual-only')
-    await act(async () => {
-      select.value = 'all'
-      select.dispatchEvent(new Event('change', { bubbles: true }))
-    })
+    const segment = el.querySelector('[role="radiogroup"][aria-label="屏幕访问范围"]')!
+    expect(segment).toBeTruthy()
+    expect(segment.querySelector('[aria-checked="true"]')!.textContent).toBe('仅虚拟屏幕')
+    expect(el.textContent).toContain('仅虚拟屏幕对模型开放')
+    await act(async () => { (buttonByText(el, '全部开放') as HTMLButtonElement).click() })
     expect(setScreenScope).toHaveBeenCalledWith('all')
     expect(getScreenScope).toHaveBeenCalled()
+    expect(segment.querySelector('[aria-checked="true"]')!.textContent).toBe('全部开放')
+    expect(el.textContent).toContain('虚拟屏幕与真实屏幕都可被模型读取和控制')
   })
 
   /**
@@ -133,18 +203,20 @@ describe('PhoneControlSection（手机控制设置页）', () => {
    */
   it('桥缺席时三面如实报不可读：置灰 + 说明行，且不得把占位值当事实写回壳侧', async () => {
     const el = await render({})
-    const scopeSelect = el.querySelector('select[aria-label="开放屏幕范围"]') as HTMLSelectElement
-    const scaleSelect = el.querySelector('select[aria-label="虚拟屏分辨率档位"]') as HTMLSelectElement
-    expect(scopeSelect.disabled, '屏幕范围不可读时必须置灰').toBe(true)
-    expect(scaleSelect.disabled, '档位不可读时必须置灰').toBe(true)
-    expect(toggleOf(el, '虚拟屏浮窗（退后台自动显示）').disabled, '浮窗开关不可读时必须置灰').toBe(true)
+    const radios = [...el.querySelectorAll<HTMLButtonElement>('button[role="radio"]')]
+    expect(radios).toHaveLength(3)
+    expect(radios.every((item) => item.disabled), '屏幕范围不可读时必须置灰').toBe(true)
     expect(el.querySelector('[data-code="screen-scope-unreadable"]'), '必须有一行说明为什么不可读').toBeTruthy()
-    expect(el.querySelector('[data-code="vdisplay-scale-unreadable"]')).toBeTruthy()
-    expect(el.querySelector('[data-code="vdisplay-float-unreadable"]')).toBeTruthy()
-    expect(el.textContent).toContain('状态不可读')
-    // 置灰的控件点不动：不得产生任何壳侧写调用（旧实现在这里静默 no-op 且值弹回）。
-    await act(async () => { scopeSelect.value = 'all'; scopeSelect.dispatchEvent(new Event('change', { bubbles: true })) })
-    expect(scopeSelect.value, '不可读时不得把占位值改成用户点的那一项（那是假事实）').toBe('virtual-only')
+    expect(el.textContent).toContain('检测中')
+    expect(el.textContent).not.toContain('仅虚拟屏幕对模型开放')
+
+    const vdisplay = await renderVdisplay({})
+    const scaleSelect = vdisplay.querySelector('select[aria-label="虚拟屏分辨率档位"]') as HTMLSelectElement
+    expect(scaleSelect.disabled, '档位不可读时必须置灰').toBe(true)
+    expect(toggleOf(vdisplay, '虚拟屏浮窗（退后台自动显示）').disabled, '浮窗开关不可读时必须置灰').toBe(true)
+    expect(vdisplay.querySelector('[data-code="vdisplay-scale-unreadable"]')).toBeTruthy()
+    expect(vdisplay.querySelector('[data-code="vdisplay-float-unreadable"]')).toBeTruthy()
+    expect(vdisplay.textContent).toContain('状态不可读')
   })
 
   /** 负控对照：桥在时同一批控件必须可读可写（否则上一条可以靠「永远置灰」蒙混过关）。 */
@@ -158,19 +230,23 @@ describe('PhoneControlSection（手机控制设置页）', () => {
       getVdisplayFloatEnabled: () => false,
       setVdisplayFloatEnabled: () => {},
     })
-    const scopeSelect = el.querySelector('select[aria-label="开放屏幕范围"]') as HTMLSelectElement
-    expect(scopeSelect.disabled).toBe(false)
-    expect(scopeSelect.value).toBe('all')
-    expect((el.querySelector('select[aria-label="虚拟屏分辨率档位"]') as HTMLSelectElement).disabled).toBe(false)
-    expect(toggleOf(el, '虚拟屏浮窗（退后台自动显示）').disabled).toBe(false)
+    const scope = el.querySelector('button[role="radio"][aria-checked="true"]') as HTMLButtonElement
+    expect(scope.disabled).toBe(false)
+    expect(scope.textContent).toBe('全部开放')
     expect(el.querySelector('[data-code="screen-scope-unreadable"]')).toBeNull()
+    const vdisplay = await renderVdisplay({
+      getVdisplayScale: () => 1,
+      getVdisplayFloatEnabled: () => false,
+    })
+    expect((vdisplay.querySelector('select[aria-label="虚拟屏分辨率档位"]') as HTMLSelectElement).disabled).toBe(false)
+    expect(toggleOf(vdisplay, '虚拟屏浮窗（退后台自动显示）').disabled).toBe(false)
   })
 
   it('虚拟屏档位：读壳值并写壳桥（0.5 / 0.75 / 1）', async () => {
     let scale = 0.5
     const getVdisplayScale = vi.fn(() => scale)
     const setVdisplayScale = vi.fn((value: number) => { scale = value })
-    const el = await render({ getVdisplayScale, setVdisplayScale })
+    const el = await renderVdisplay({ getVdisplayScale, setVdisplayScale })
     const select = el.querySelector('select[aria-label="虚拟屏分辨率档位"]') as HTMLSelectElement
     expect(select.value).toBe('0.5')
     await act(async () => {
@@ -185,7 +261,7 @@ describe('PhoneControlSection（手机控制设置页）', () => {
     let enabled = true
     const getVdisplayFloatEnabled = vi.fn(() => enabled)
     const setVdisplayFloatEnabled = vi.fn((next: boolean) => { enabled = next })
-    const el = await render({ getVdisplayFloatEnabled, setVdisplayFloatEnabled })
+    const el = await renderVdisplay({ getVdisplayFloatEnabled, setVdisplayFloatEnabled })
     const toggle = toggleOf(el, '虚拟屏浮窗（退后台自动显示）')
     expect(toggle.checked).toBe(true)
     await act(async () => { toggle.click() })
@@ -196,7 +272,7 @@ describe('PhoneControlSection（手机控制设置页）', () => {
   // P5-6：与开发者选项里的「悬浮球」去混淆——两处都叫「浮」，必须各说各是什么，
   // 且其中一处要点名另一处，否则用户在两个设置页之间对不上号。
   it('P5-6：浮窗命名必须点名「悬浮球」以示区分', async () => {
-    const el = await render({})
+    const el = await renderVdisplay({ getVdisplayFloatEnabled: () => true })
     const text = el.textContent ?? ''
     expect(text).toContain('虚拟屏浮窗')
     expect(text, '必须点名开发者选项里的「悬浮球」是另一个东西').toContain('悬浮球')
@@ -205,7 +281,7 @@ describe('PhoneControlSection（手机控制设置页）', () => {
 
   it('强制销毁：前两次点击只确认，第三次才调用壳桥', async () => {
     const forceDestroyVdisplay = vi.fn(() => JSON.stringify({ ok: true, code: 'vdisplay-destroyed' }))
-    const el = await render({ forceDestroyVdisplay })
+    const el = await renderVdisplay({ forceDestroyVdisplay })
     const button = buttonByText(el, '强制销毁虚拟屏')
     await act(async () => { button.click() })
     expect(forceDestroyVdisplay).not.toHaveBeenCalled()
@@ -221,7 +297,7 @@ describe('PhoneControlSection（手机控制设置页）', () => {
   // P5-5：破坏性按钮必须与同页普通按钮**看得出区别**，且进入确认态后必须能退出。
   // 反证：把 className 的 danger 分支删掉、或删掉「取消」按钮，本组用例即判红。
   it('P5-5：确认态必须带危险样式，未进入确认态不得带', async () => {
-    const el = await render({ forceDestroyVdisplay: () => JSON.stringify({ ok: true }) })
+    const el = await renderVdisplay({ forceDestroyVdisplay: () => JSON.stringify({ ok: true }) })
     const button = buttonByText(el, '强制销毁虚拟屏')
     expect(button.className, '未确认时是普通按钮').not.toContain('dsh-dev-danger')
     expect(button.getAttribute('data-armed')).toBe('false')
@@ -233,7 +309,7 @@ describe('PhoneControlSection（手机控制设置页）', () => {
 
   it('P5-5：确认态必须给取消途径，取消后不得调用壳桥', async () => {
     const forceDestroyVdisplay = vi.fn(() => JSON.stringify({ ok: true }))
-    const el = await render({ forceDestroyVdisplay })
+    const el = await renderVdisplay({ forceDestroyVdisplay })
     const button = buttonByText(el, '强制销毁虚拟屏')
     await act(async () => { button.click() })
     const cancel = buttonByText(el, '取消')
@@ -254,26 +330,18 @@ describe('PhoneControlSection（手机控制设置页）', () => {
     const vdisplayStatus = vi.fn(() => JSON.stringify({
       ok: true, state: 'active', code: 'vdisplay-active', guidance: '虚拟屏幕 1 已激活（Android displayId=1）。', displayId: 1,
     }))
-    const el = await render({ shizukuStatus, vdisplayStatus })
+    const el = await renderShizuku({ shizukuStatus, vdisplayStatus })
     expect(shizukuStatus).toHaveBeenCalled()
     expect(el.textContent).toContain('通道就绪')
-    // 虚拟屏状态归页头那枚胶囊（data-state 是状态源），Shizuku 行不得出现虚拟屏的状态码。
-    const chip = el.querySelector('.dsh-screen-control-state') as HTMLElement
-    expect(chip.dataset.state).toBe('active')
-    expect(chip.textContent).toBe('已激活')
     expect(detailLine(el, 'Shizuku 特权通道'), 'Shizuku 行不得出现虚拟屏的状态码').not.toContain('vdisplay-active')
-    // displayId 是诊断信息：进 data 属性，不再由页面自己拼一行「Android displayId = N」上屏
-    // （0.14.1 UI 审查：内部标识不上用户面）。壳侧 guidance 里自带的 displayId 属另一处文案，
-    // 未在本次改动范围内。
-    expect((el.querySelector('.dsh-screen-control-card') as HTMLElement).dataset.displayId).toBe('1')
+    expect((el.querySelector('[data-plugin="dev-phone-control"]') as HTMLElement).dataset.displayId).toBe('1')
     expect(el.textContent).not.toContain('Android displayId =')
   })
 
   it('虚拟屏 guidance 与 Shizuku guidance 相同时只显示一次（设备实测到过逐字重复）', async () => {
     const same = '未检测到 Shizuku；虚拟屏需要用户安装、启动并授权 Shizuku。'
-    const el = await render({
+    const el = await renderShizuku({
       shizukuStatus: () => shizukuJson({ installed: false, running: false, granted: false, bound: false, guidance: same }),
-      vdisplayStatus: () => JSON.stringify({ ok: false, state: 'blocked', code: 'shizuku-absent', guidance: same }),
     })
     const hits = el.textContent!.split(same).length - 1
     expect(hits, '同一句话不得在页面上出现两次').toBe(1)
@@ -283,24 +351,27 @@ describe('PhoneControlSection（手机控制设置页）', () => {
     const vdisplayStatus = vi.fn(() => JSON.stringify({
       ok: true, state: 'ready', code: 'vdisplay-ready', guidance: 'Shizuku 已授权且 shell UserService 已就绪；可创建虚拟屏幕 1。',
     }))
-    const el = await render({ vdisplayStatus })
+    const el = await renderShizuku({ vdisplayStatus })
     expect(detailLine(el, 'Shizuku 特权通道')).toContain('状态不可读')
     expect(el.textContent).not.toContain('通道就绪')
-    expect(buttonByText(el, '打开 Shizuku').disabled).toBe(true)
+    expect(queryButtonByText(el, '打开 Shizuku')).toBeUndefined()
+    expect(queryButtonByText(el, '下载 Shizuku')).toBeUndefined()
+    expect(queryButtonByText(el, '请求 Shizuku 授权')).toBeUndefined()
   })
 
   // ── Shizuku 区块：两个入口（用户定例：左下载右跳转，未装不可跳）──
 
   it('未安装时「打开 Shizuku」不可点；已安装时可点并拉起 Shizuku', async () => {
-    const absent = await render({
+    const absent = await renderShizuku({
       shizukuStatus: () => shizukuJson({ installed: false, running: false, granted: false, bound: false, code: 'shizuku-absent' }),
     })
     expect(absent.textContent).toContain('未安装')
-    expect(buttonByText(absent, '打开 Shizuku').disabled).toBe(true)
+    expect(queryButtonByText(absent, '打开 Shizuku')).toBeUndefined()
+    expect(buttonByText(absent, '下载 Shizuku').disabled).toBe(false)
     await unmount()
 
     const openShizukuManager = vi.fn(() => JSON.stringify({ ok: true }))
-    const installed = await render({
+    const installed = await renderShizuku({
       shizukuStatus: () => shizukuJson({ running: false, granted: false, bound: false, code: 'shizuku-not-running' }),
       openShizukuManager,
     })
@@ -313,7 +384,10 @@ describe('PhoneControlSection（手机控制设置页）', () => {
 
   it('「下载 Shizuku」走外链通道 key=shizuku-download（两入口共用一条通道）', async () => {
     const openExternalLink = vi.fn(() => JSON.stringify({ ok: true }))
-    const el = await render({ shizukuStatus: () => shizukuJson(), openExternalLink })
+    const el = await renderShizuku({
+      shizukuStatus: () => shizukuJson({ installed: false, running: false, granted: false, bound: false }),
+      openExternalLink,
+    })
     await act(async () => { buttonByText(el, '下载 Shizuku').click() })
     expect(openExternalLink).toHaveBeenCalledWith('shizuku-download')
     expect(el.textContent).toContain('已打开 Shizuku 发布页')
@@ -323,7 +397,7 @@ describe('PhoneControlSection（手机控制设置页）', () => {
 
   it('「重置链接」与「刷新状态」同一行，并且真的调壳桥 resetShizukuConnection', async () => {
     const resetShizukuConnection = vi.fn(() => shizukuJson({ bound: false, binding: false, code: 'shizuku-user-service-reset' }))
-    const el = await render({ shizukuStatus: () => shizukuJson(), resetShizukuConnection })
+    const el = await renderShizuku({ shizukuStatus: () => shizukuJson(), resetShizukuConnection })
     const reset = buttonByText(el, '重置链接')
     const refresh = buttonByText(el, '刷新状态')
     // 同一行：两者父节点相同（「与刷新状态并列，都是非破坏性」）。
@@ -331,15 +405,14 @@ describe('PhoneControlSection（手机控制设置页）', () => {
     await act(async () => { reset.click() })
     expect(resetShizukuConnection).toHaveBeenCalledTimes(1)
     // 即时回执必须说清「做了什么 + 现在什么态 + 谁来收敛」（三态诚实，不过度承诺）。
-    expect(el.textContent).toContain('已重置 Shizuku 连接')
-    expect(el.textContent).toContain('正在重新建立通道')
-    expect(el.textContent).toContain('每 2 秒自动重扫')
+    // 成功回执用壳侧可读事实收口，不写死「正在重建」这类无法验证的承诺。
+    expect(el.textContent).toContain('通道就绪')
   })
 
   it('重置成功立即回读一次状态（不靠等下一拍轮询）', async () => {
     const resetShizukuConnection = vi.fn(() => shizukuJson({ bound: false, code: 'shizuku-user-service-reset' }))
     const shizukuStatus = vi.fn(() => shizukuJson())
-    const el = await render({ shizukuStatus, resetShizukuConnection })
+    const el = await renderShizuku({ shizukuStatus, resetShizukuConnection })
     const before = shizukuStatus.mock.calls.length
     await act(async () => { buttonByText(el, '重置链接').click() })
     expect(shizukuStatus.mock.calls.length).toBeGreaterThan(before)
@@ -347,23 +420,22 @@ describe('PhoneControlSection（手机控制设置页）', () => {
 
   it('重置失败如实报原因与下一步，不静默也不把机器码印进正文（P3-1/P3-6）', async () => {
     const resetShizukuConnection = vi.fn(() => JSON.stringify({ ok: false, reason: 'not-installed' }))
-    const el = await render({ shizukuStatus: () => shizukuJson(), resetShizukuConnection })
+    const el = await renderShizuku({ shizukuStatus: () => shizukuJson(), resetShizukuConnection })
     await act(async () => { buttonByText(el, '重置链接').click() })
     expect(el.textContent).toContain('重置 Shizuku 连接失败')
-    expect(el.textContent).toContain('下载 Shizuku')
     expect(el.textContent).not.toContain('not-installed')
   })
 
   it('反证：壳桥抛错时必须给人话，不得冒泡也不得静默', async () => {
     const resetShizukuConnection = vi.fn(() => { throw new Error('bridge down') })
-    const el = await render({ shizukuStatus: () => shizukuJson(), resetShizukuConnection })
+    const el = await renderShizuku({ shizukuStatus: () => shizukuJson(), resetShizukuConnection })
     await act(async () => { buttonByText(el, '重置链接').click() })
     // 抛错 => raw 为 undefined => settleLinkCall 走失败支（原因未登记 -> 兜底人话）。
     expect(el.textContent).toContain('重置 Shizuku 连接失败')
   })
 
   it('反证：旧壳没有 resetShizukuConnection 时按钮必须在场且点了给人话（不得点了没反应）', async () => {
-    const el = await render({ shizukuStatus: () => shizukuJson() })
+    const el = await renderShizuku({ shizukuStatus: () => shizukuJson() })
     const reset = buttonByText(el, '重置链接')
     await act(async () => { reset.click() })
     expect(el.textContent).toContain('重置 Shizuku 连接失败')
@@ -377,7 +449,7 @@ describe('PhoneControlSection（手机控制设置页）', () => {
       'E/AndroidRuntime: Process: com.dsharnessmobile.shell:dsh-vdisplay, PID: 2',
       'E/AndroidRuntime: at android.app.LoadedApk.makeApplicationInner(LoadedApk.java:1500)',
     ].join('\n')
-    const el = await render({
+    const el = await renderShizuku({
       shizukuStatus: () => shizukuJson({
         bound: false,
         binding: false,
@@ -397,14 +469,14 @@ describe('PhoneControlSection（手机控制设置页）', () => {
   })
 
   it('通道正常时不显示诊断日志块（避免无噪声页面多出一节）', async () => {
-    const el = await render({ shizukuStatus: () => shizukuJson() })
+    const el = await renderShizuku({ shizukuStatus: () => shizukuJson() })
     expect(el.querySelector('details.dsh-dev-diag')).toBeNull()
   })
 
   it('反证：重置不得新开定时器（新增常驻轮询与 T1 的 CPU 前科同族）', async () => {
     const setIntervalSpy = vi.spyOn(globalThis, 'setInterval')
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
-    const el = await render({
+    const el = await renderShizuku({
       shizukuStatus: () => shizukuJson(),
       resetShizukuConnection: vi.fn(() => shizukuJson({ bound: false })),
     })
@@ -416,7 +488,7 @@ describe('PhoneControlSection（手机控制设置页）', () => {
   })
 
   it('反证：重置成功也不能写成「一定能修好」这类过度承诺', async () => {
-    const el = await render({
+    const el = await renderShizuku({
       shizukuStatus: () => shizukuJson(),
       resetShizukuConnection: vi.fn(() => shizukuJson({ bound: false })),
     })
@@ -428,7 +500,7 @@ describe('PhoneControlSection（手机控制设置页）', () => {
   })
   it('「点击查看教程」是外链 key=shizuku-tutorial，且样式为蓝字下划线', async () => {
     const openExternalLink = vi.fn(() => JSON.stringify({ ok: true }))
-    const el = await render({ shizukuStatus: () => shizukuJson(), openExternalLink })
+    const el = await renderShizuku({ shizukuStatus: () => shizukuJson(), openExternalLink })
     const link = buttonByText(el, '点击查看教程')
     expect(link.className).toContain('dsh-dev-link')
     await act(async () => { link.click() })
@@ -437,13 +509,16 @@ describe('PhoneControlSection（手机控制设置页）', () => {
     // 样式契约：用户定例「标蓝 + 下划线」，CSS 在 dev-section.css.ts 里——断其在场。
     expect(DEV_SECTION_CSS).toMatch(/\.dsh-dev-link\s*\{[^}]*text-decoration:\s*underline/)
     expect(DEV_SECTION_CSS).toMatch(/\.dsh-dev-link\s*\{[^}]*color:\s*#4d6bfe/i)
-    // 两个并列按钮必须等宽平分（用户定例：并列半行宽）。
-    expect(DEV_SECTION_CSS).toMatch(/\.dsh-dev-split\s*>\s*\.dsh-dev-btn\s*\{[^}]*flex:\s*1 1 0/)
+    // 三个范围的 selector 必须等分一行（用户定例：横向三段）。
+    expect(PHONE_CONTROL_CSS).toMatch(/\.dsh-pc-segment\s*\{[^}]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/)
   })
 
   it('外链失败给人话与下一步，不把机器码抛给用户', async () => {
     const openExternalLink = vi.fn(() => JSON.stringify({ ok: false, reason: 'no-handler' }))
-    const el = await render({ shizukuStatus: () => shizukuJson(), openExternalLink })
+    const el = await renderShizuku({
+      shizukuStatus: () => shizukuJson({ installed: false, running: false, granted: false, bound: false }),
+      openExternalLink,
+    })
     await act(async () => { buttonByText(el, '下载 Shizuku').click() })
     expect(el.textContent).toContain('设备上没有能打开它的应用')
     expect(el.textContent, '机器码不得上屏').not.toContain('no-handler')
@@ -460,8 +535,8 @@ describe('PhoneControlSection（手机控制设置页）', () => {
       hint: '未开启：到 系统设置 → 无障碍 → 已下载的服务 里开启「DSH 设备控制」',
     }))
     const unlockRestrictedSettings = vi.fn(() => JSON.stringify({ ok: true, message: '已解锁受限设置（Shizuku 特权 shell）' }))
-    const el = await render({ a11yStatus, unlockRestrictedSettings })
-    expect(el.textContent).toContain('未开启（推荐开启）')
+    const el = await renderA11y({ a11yStatus, unlockRestrictedSettings })
+    expect(el.textContent).toContain('需解锁受限设置')
     expect(el.textContent).toContain('受限设置')
     const unlock = buttonByText(el, '解锁受限设置')
     await act(async () => { unlock.click() })
@@ -471,16 +546,121 @@ describe('PhoneControlSection（手机控制设置页）', () => {
 
   it('无障碍已开启时不显示解锁按钮（不给用户一个不必要的特权动作）', async () => {
     const a11yStatus = vi.fn(() => JSON.stringify({ enabled: true, restrictedSettingsApplies: true, hint: '无障碍服务已开启' }))
-    const el = await render({ a11yStatus })
-    expect(el.textContent).toContain('已开启（语义读取/点击/输入）')
+    const el = await renderA11y({ a11yStatus })
+    expect(el.textContent).toContain('语义读取、点击与输入已可用')
     expect([...el.querySelectorAll('button')].some((item) => item.textContent === '解锁受限设置')).toBe(false)
   })
 
   it('无障碍状态读不到时如实报「状态不可读」，不冒充「未开启」', async () => {
-    const el = await render({})
-    const detail = detailLine(el, '无障碍通道')
-    expect(detail).toContain('状态不可读')
-    expect(detail).not.toContain('未开启')
+    const el = await renderA11y({})
+    expect(el.textContent).toContain('状态不可读')
+    expect(el.textContent).not.toContain('未开启：到 系统设置')
+  })
+  it('主/次设置页根容器都带 data-native-control-protected，模型 DOM 动作改不了用户专属权限', async () => {
+    // 壳侧 NativeAppWebViewExecution 用 el.closest('[data-native-control-protected]') 拒绝动作；
+    // 标记一旦漏在某一页，该页的权限控件就能被模型点掉，这是安全边界而不是样式细节。
+    const bridge = {
+      getScreenScope: () => 'virtual-only',
+      getVdisplayScale: () => 0.75,
+      getVdisplayFloatEnabled: () => true,
+      shizukuStatus: () => shizukuJson(),
+      a11yStatus: () => JSON.stringify({ enabled: true }),
+      rootGrantState: () => rootGrantJson(),
+    }
+    const home = await render(bridge)
+    const homeRoot = home.querySelector('[data-plugin="dev-phone-control"]')
+    expect(homeRoot, '首屏根容器必须在场').toBeTruthy()
+    expect(homeRoot!.hasAttribute('data-native-control-protected')).toBe(true)
+    // 每个次页（无障碍/Shizuku/虚拟屏/高级/Root）的根容器同样要带标记。
+    for (const title of ['无障碍通道', 'Shizuku 授权', '虚拟屏设置', '高级设置与诊断', 'Root 权限']) {
+      const el = await renderView(bridge, title)
+      const rootNode = el.querySelector('[data-plugin="dev-phone-control"]')
+      expect(rootNode, title + ' 的根容器必须在场').toBeTruthy()
+      expect(rootNode!.hasAttribute('data-native-control-protected'), title + ' 缺保护标记').toBe(true)
+      await unmount()
+    }
+  })
++  it('原生控制审计只在高级诊断展开时读一次，首屏不读', async () => {
+    const nativeControlDiagnostics = vi.fn(() => JSON.stringify({ ok: true, exchanges: 3, elapsedUs: 1200, audit: [] }))
+    const bridge = {
+      getScreenScope: () => 'virtual-only',
+      getVdisplayScale: () => 0.75,
+      getVdisplayFloatEnabled: () => true,
+      shizukuStatus: () => shizukuJson(),
+      a11yStatus: () => JSON.stringify({ enabled: true }),
+      rootGrantState: () => rootGrantJson(),
+      nativeControlDiagnostics,
+    }
+    const home = await render(bridge)
+    expect(nativeControlDiagnostics).not.toHaveBeenCalled()
+    expect(home.textContent).not.toContain('原生控制审计')
+    const advanced = await renderView(bridge, '高级设置与诊断')
+    expect(nativeControlDiagnostics).not.toHaveBeenCalled()
+    const summary = [...advanced.querySelectorAll('summary')]
+      .find((node) => node.textContent?.includes('原生控制审计'))
+    expect(summary, '高级诊断里必须有原生审计的展开入口').toBeTruthy()
+    const details = summary!.parentElement as HTMLDetailsElement
+    await act(async () => { details.open = true; details.dispatchEvent(new Event('toggle')) })
+    expect(nativeControlDiagnostics).toHaveBeenCalledTimes(1)
+    expect(details.querySelector('pre')?.textContent).toContain('"exchanges":3')
+  })
+
+  it('原生诊断不可读时明说不可读，不渲染空白审计', async () => {
+    const bridge = {
+      getScreenScope: () => 'virtual-only',
+      getVdisplayScale: () => 0.75,
+      getVdisplayFloatEnabled: () => true,
+      shizukuStatus: () => shizukuJson(),
+      a11yStatus: () => JSON.stringify({ enabled: true }),
+      rootGrantState: () => rootGrantJson(),
+      nativeControlDiagnostics: () => { throw new Error('bridge gone') },
+    }
+    const advanced = await renderView(bridge, '高级设置与诊断')
+    const summary = [...advanced.querySelectorAll('summary')]
+      .find((node) => node.textContent?.includes('原生控制审计'))!
+    const details = summary.parentElement as HTMLDetailsElement
+    await act(async () => { details.open = true; details.dispatchEvent(new Event('toggle')) })
+    expect(details.querySelector('pre')?.textContent).toContain('不可读')
+  })
++  it('属主维护按当前 operationId 领结果：不匹配时不把历史结果当本次', async () => {
+    const rootOwnershipResult = vi.fn((id?: string) => id === 'op-current'
+      ? JSON.stringify({
+        ok: true, code: 'ownership-verified', operationId: 'op-current',
+        result: { ok: true, code: 'ownership-verified', scanned: 3, changed: 1 },
+        state: { running: false, startedAt: 20, completedAt: 30, operationId: 'op-current' },
+      })
+      : JSON.stringify({ ok: false, code: 'operation-id-mismatch', reason: 'operation-id-mismatch' }))
+    const bridge = {
+      getScreenScope: () => 'virtual-only',
+      getVdisplayScale: () => 0.75,
+      getVdisplayFloatEnabled: () => true,
+      shizukuStatus: () => shizukuJson(),
+      a11yStatus: () => JSON.stringify({ enabled: true }),
+      rootGrantState: () => rootGrantJson({
+        ownership: { running: true, startedAt: 20, completedAt: 0, operationId: 'op-current', operation: 'ownership-repair' },
+      }),
+      rootOwnershipResult,
+    }
+    await renderView(bridge, 'Root 权限')
+    expect(rootOwnershipResult).toHaveBeenCalled()
+    expect(rootOwnershipResult.mock.calls.every(([id]) => id === 'op-current'), '轮询必须按当前 ID 读').toBe(true)
+  })
+
+  it('operationId 不符时渲染自己的状态，不冒充本次结果', async () => {
+    const bridge = {
+      getScreenScope: () => 'virtual-only',
+      getVdisplayScale: () => 0.75,
+      getVdisplayFloatEnabled: () => true,
+      shizukuStatus: () => shizukuJson(),
+      a11yStatus: () => JSON.stringify({ enabled: true }),
+      rootGrantState: () => rootGrantJson({
+        ownership: { running: true, startedAt: 20, completedAt: 0, operationId: 'op-current', operation: 'ownership-repair' },
+      }),
+      rootOwnershipResult: () => JSON.stringify({ ok: false, code: 'operation-id-mismatch', reason: 'operation-id-mismatch' }),
+    }
+    const el = await renderView(bridge, 'Root 权限')
+    expect(el.textContent).toContain('进行中')
+    expect(el.textContent).not.toContain('维护完成')
   })
 })
 
@@ -615,7 +795,7 @@ describe('AI root 权限开关（issue #262 方案 A）', () => {
   const consentInput = (el: HTMLElement) => toggleOf(el, '已阅读免责声明')
 
   it('两条 root 路径均不可用：AI 开关置灰，但同意和免责声明仍可读可撤销', async () => {
-    const el = await render({
+    const el = await renderRoot({
       shizukuStatus: () => shizukuJson(),
       rootGrantState: () => rootGrantJson({ channelUid: -1, channelRoot: false, canToggle: false }),
     })
@@ -629,7 +809,7 @@ describe('AI root 权限开关（issue #262 方案 A）', () => {
   })
 
   it('Shizuku 以 ADB 启动（uid 2000）：置灰 + 引导「以 root 启动」（不是未 root 红字）', async () => {
-    const el = await render({
+    const el = await renderRoot({
       shizukuStatus: () => shizukuJson(),
       rootGrantState: () => rootGrantJson({ channelUid: 2000, channelRoot: false, canToggle: false }),
     })
@@ -641,7 +821,7 @@ describe('AI root 权限开关（issue #262 方案 A）', () => {
   })
 
   it('root 通道 + 未确认：开关在场但不可开启（issue：未勾选时不可开启）', async () => {
-    const el = await render({
+    const el = await renderRoot({
       shizukuStatus: () => shizukuJson(),
       rootGrantState: () => rootGrantJson({ consentValid: false }),
     })
@@ -657,7 +837,7 @@ describe('AI root 权限开关（issue #262 方案 A）', () => {
       state.granted = on
       return rootGrantJson({ granted: on, consentValid: state.consent })
     })
-    const el = await render({
+    const el = await renderRoot({
       shizukuStatus: () => shizukuJson(),
       rootGrantState: () => rootGrantJson({
         granted: state.granted,
@@ -674,7 +854,7 @@ describe('AI root 权限开关（issue #262 方案 A）', () => {
   })
 
   it('已授权态：开关显示为已开启', async () => {
-    const el = await render({
+    const el = await renderRoot({
       shizukuStatus: () => shizukuJson(),
       rootGrantState: () => rootGrantJson({ granted: true, consentValid: true }),
     })
@@ -691,7 +871,7 @@ describe('AI root 权限开关（issue #262 方案 A）', () => {
       return rootGrantState()
     })
     const setRootGranted = vi.fn()
-    const el = await render({ rootGrantState, setRootConsent, setRootGranted })
+    const el = await renderRoot({ rootGrantState, setRootConsent, setRootGranted })
     await act(async () => { consentInput(el).click() })
     expect(setRootConsent).toHaveBeenLastCalledWith(true)
     expect(consentInput(el).checked).toBe(true)
@@ -718,7 +898,7 @@ describe('AI root 权限开关（issue #262 方案 A）', () => {
       if (!on) state.granted = false
       return rootGrantState()
     })
-    const el = await render({ rootGrantState, setRootGranted, setRootConsent })
+    const el = await renderRoot({ rootGrantState, setRootGranted, setRootConsent })
     expect(grantedInput(el).disabled).toBe(false)
     expect(consentInput(el).disabled).toBe(false)
     await act(async () => { grantedInput(el).click() })
@@ -734,7 +914,7 @@ describe('AI root 权限开关（issue #262 方案 A）', () => {
     const rootGrantState = () => rootGrantJson({ channelUid, channelRoot: false,
       rootGranted: true, rootState: 'granted', consentValid: state.consent })
     const setRootConsent = vi.fn((on: boolean) => { state.consent = on; return rootGrantState() })
-    const el = await render({ rootGrantState, setRootConsent })
+    const el = await renderRoot({ rootGrantState, setRootConsent })
     expect(grantedInput(el).disabled).toBe(true)
     expect(consentInput(el).disabled).toBe(false)
     expect(el.textContent).toContain('应用 su root')
@@ -780,7 +960,7 @@ describe('AI root 权限开关（issue #262 方案 A）', () => {
 
   it('免责声明链接点开走本地文档通道', async () => {
     const openRootDisclaimer = vi.fn(() => JSON.stringify({ ok: true }))
-    const el = await render({
+    const el = await renderRoot({
       shizukuStatus: () => shizukuJson(),
       rootGrantState: () => rootGrantJson(),
       openRootDisclaimer,
@@ -791,7 +971,7 @@ describe('AI root 权限开关（issue #262 方案 A）', () => {
   })
 
   it('状态不可读：开关置灰且不冒充任何状态（fail-closed 呈现）', async () => {
-    const el = await render({
+    const el = await renderRoot({
       shizukuStatus: () => shizukuJson(),
       // 壳桥缺席 → readRootGrant 回落 ROOT_GRANT_UNREADABLE
     })
@@ -868,7 +1048,7 @@ describe('应用级 Root 授权面（2026-09-30 主人定例）', () => {
   })
 
   it('页面渲染：应用授权检测与折叠维护入口在场，不承诺管理器自动弹窗', async () => {
-    const el = await render({
+    const el = await renderRoot({
       shizukuStatus: () => shizukuJson(),
       rootGrantState: () => rootGrantJson({ rootGranted: false, rootState: 'unknown' }),
       rootAccessState: () => rootAccessJson(),
@@ -878,14 +1058,13 @@ describe('应用级 Root 授权面（2026-09-30 主人定例）', () => {
     expect(el.textContent).toContain('KernelSU')
     expect(buttonByText(el, '检测 root 授权')).toBeTruthy()
     expect(buttonByText(el, '修复文件属主')).toBeTruthy()
-    // 2026-09-30 主人指正：**不做「打开 Root 管理器」入口**（各家管理器包名/入口不一，打开不保证成功）
     expect(queryButtonByText(el, '打开 Root 管理器')).toBeUndefined()
-    expect(el.textContent).toContain('多数管理器不会自动弹授权框')
+    expect(el.textContent).toContain('尚未检测')
   })
 
   it('检测授权走桥；无 su 时按钮禁用', async () => {
     const requestRootAccess = vi.fn(() => JSON.stringify({ ok: true, code: 'request-started' }))
-    const el = await render({
+    const el = await renderRoot({
       shizukuStatus: () => shizukuJson(),
       rootGrantState: () => rootGrantJson(),
       rootAccessState: () => rootAccessJson({ state: 'denied' }),
@@ -894,7 +1073,7 @@ describe('应用级 Root 授权面（2026-09-30 主人定例）', () => {
     await act(async () => { buttonByText(el, '检测 root 授权').click() })
     expect(requestRootAccess).toHaveBeenCalled()
 
-    const el2 = await render({
+    const el2 = await renderRoot({
       shizukuStatus: () => shizukuJson(),
       rootGrantState: () => rootGrantJson(),
       rootAccessState: () => rootAccessJson({
@@ -921,7 +1100,7 @@ describe('应用级 Root 授权面（2026-09-30 主人定例）', () => {
    */
   it('no-su 且已开启：开关必须可点（收回授权不依赖 su）', async () => {
     const rootGrantOff = vi.fn()
-    const el = await render({
+    const el = await renderRoot({
       shizukuStatus: () => shizukuJson(),
       rootGrantState: () => rootGrantJson({ granted: true, consentValid: true, channelRoot: true, rootGranted: true }),
       rootAccessState: () => rootAccessJson({ state: 'no-su', suExists: false }),
@@ -940,7 +1119,7 @@ describe('应用级 Root 授权面（2026-09-30 主人定例）', () => {
   })
 
   it('no-su 且未开启：开关仍必须置灰（重试永远不会成功）', async () => {
-    const el = await render({
+    const el = await renderRoot({
       shizukuStatus: () => shizukuJson(),
       rootGrantState: () => rootGrantJson({ granted: false, consentValid: true, channelRoot: true, rootGranted: true }),
       rootAccessState: () => rootAccessJson({ state: 'no-su', suExists: false }),
@@ -951,7 +1130,7 @@ describe('应用级 Root 授权面（2026-09-30 主人定例）', () => {
   })
 
   it('Root 设置分为应用授权、AI 免责开关、折叠维护三组，互不混淆', async () => {
-    const el = await render({ rootGrantState: () => rootGrantJson(), rootAccessState: () => rootAccessJson() })
+    const el = await renderRoot({ rootGrantState: () => rootGrantJson(), rootAccessState: () => rootAccessJson() })
     const card = el.querySelector('section[aria-label="Root 权限设置"]')!
     const groups = [...card.children].filter((node) => node.matches('.dsh-root-step, details.dsh-root-maintenance'))
     expect(groups).toHaveLength(3)
@@ -1012,7 +1191,7 @@ describe('Root 桥回执形状与失败呈现', () => {
   })
 
   it('坏 root 状态在页面上不可读，两开关均不可点，文档入口仍保留', async () => {
-    const el = await render({ rootGrantState: () => '[{"granted":true}]', rootAccessState: () => 'null' })
+    const el = await renderRoot({ rootGrantState: () => '[{"granted":true}]', rootAccessState: () => 'null' })
     expect(detailLine(el, '2. AI root 权限')).toContain('状态不可读')
     expect(toggleOf(el, '授权 AI 使用 root').disabled).toBe(true)
     expect(toggleOf(el, '已阅读免责声明').disabled).toBe(true)
@@ -1026,7 +1205,7 @@ describe('Root 桥回执形状与失败呈现', () => {
     { label: '未知拒绝码', raw: '{"ok":false,"reason":"future-native-private-code"}' },
     { label: '拒收', raw: '{"ok":false,"reason":"consent-required"}' },
   ])('同意写入 $label 不谎报成功也不泄漏机器码', async ({ raw }) => {
-    const el = await render({ rootGrantState: () => rootGrantJson(), setRootConsent: () => raw })
+    const el = await renderRoot({ rootGrantState: () => rootGrantJson(), setRootConsent: () => raw })
     await act(async () => { toggleOf(el, '已阅读免责声明').click() })
     const receipt = el.querySelector('.dsh-root-step [role="status"]')!
     expect(receipt.className).toContain('dsh-dev-error')
@@ -1042,7 +1221,7 @@ describe('Root 桥回执形状与失败呈现', () => {
     let consentValid = true
     let rootGranted = false
     const setRootGranted = vi.fn(() => rootGrantJson({ ok: false, code: 'request-started', requesting: true }))
-    const el = await render({
+    const el = await renderRoot({
       rootGrantState: () => rootGrantJson({ consentValid, rootGranted }),
       rootAccessState: () => rootAccessJson({ state: rootGranted ? 'granted' : 'requesting', granted: rootGranted, requesting: !rootGranted }),
       setRootGranted,
@@ -1065,7 +1244,7 @@ describe('Root 桥回执形状与失败呈现', () => {
     let rootGranted = false
     const setRootGranted = vi.fn()
     const requestRootAccess = vi.fn(() => JSON.stringify({ ok: true, code: 'request-started' }))
-    const el = await render({
+    const el = await renderRoot({
       rootGrantState: () => rootGrantJson({ channelRoot: false, channelUid: -1, rootGranted, consentValid: true }),
       rootAccessState: () => rootAccessJson({ state: rootGranted ? 'granted' : 'unknown', granted: rootGranted }),
       requestRootAccess, setRootGranted,
@@ -1092,7 +1271,7 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
     })
     const setRootGranted = vi.fn()
     const setRootConsent = vi.fn()
-    const el = await render({ rootGrantState, repairRootOwnership, setRootGranted, setRootConsent })
+    const el = await renderRoot({ rootGrantState, repairRootOwnership, setRootGranted, setRootConsent })
     const before = rootGrantState.mock.calls.length
     await act(async () => { buttonByText(el, '修复文件属主').click() })
     expect(rootGrantState.mock.calls.length).toBeGreaterThan(before)
@@ -1111,7 +1290,7 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
   })
 
   it('已有后台维护由 rootGrant 读面恢复，不依赖本页点击或 rootAccess.ownership', async () => {
-    const el = await render({
+    const el = await renderRoot({
       rootGrantState: () => rootGrantJson({ ownership: { running: true, startedAt: 10, completedAt: 0, overdue: true } }),
       rootAccessState: () => rootAccessJson({ ownership: { running: false, startedAt: 10, completedAt: 20, result: completedRepair } }),
     })
@@ -1126,7 +1305,7 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
     const repairRootOwnership = vi.fn(() => JSON.stringify({
       ok: true, code: 'repair-started', running: false, startedAt: 10, completedAt: 20, result: completedRepair,
     }))
-    const el = await render({ rootGrantState: () => rootGrantJson(), repairRootOwnership })
+    const el = await renderRoot({ rootGrantState: () => rootGrantJson(), repairRootOwnership })
     await act(async () => { buttonByText(el, '修复文件属主').click() })
     expect(el.textContent).toContain('文件属主维护完成（检查 42 项 / 修复 3 项 / 失败 0 项）')
     expect(el.textContent).not.toContain('启动文件属主维护失败')
@@ -1141,7 +1320,7 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
     const rootGrantState = vi.fn(() => rootGrantJson({ ownership }))
     // 第一次点击被壳侧拒绝（例如 root 未授权）→ 红字
     const repairRootOwnership = vi.fn(() => JSON.stringify({ ok: false, code: 'denied', reason: 'root-missing' }))
-    const el = await render({ rootGrantState, repairRootOwnership, setRootGranted: vi.fn(), setRootConsent: vi.fn() })
+    const el = await renderRoot({ rootGrantState, repairRootOwnership, setRootGranted: vi.fn(), setRootConsent: vi.fn() })
     await act(async () => { buttonByText(el, '修复文件属主').click() })
     expect(el.textContent).toContain('启动文件属主维护失败')
     // 旧记录原样再来一次（没有推进）：红字必须留着。
@@ -1166,7 +1345,7 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
     let ownership: Record<string, unknown> = { startedAt: 10 }
     const rootGrantState = vi.fn(() => rootGrantJson({ ownership }))
     const repairRootOwnership = vi.fn(() => JSON.stringify({ ok: false, code: 'denied', reason: 'root-missing' }))
-    const el = await render({ rootGrantState, repairRootOwnership, setRootGranted: vi.fn(), setRootConsent: vi.fn() })
+    const el = await renderRoot({ rootGrantState, repairRootOwnership, setRootGranted: vi.fn(), setRootConsent: vi.fn() })
     expect(readRootGrant().ownership?.readable).toBe(false)
     await act(async () => { buttonByText(el, '修复文件属主').click() })
     expect(el.textContent).toContain('启动文件属主维护失败')
@@ -1186,7 +1365,7 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
     let ownership: Record<string, unknown> = { startedAt: 10 }
     const rootGrantState = vi.fn(() => rootGrantJson({ ownership }))
     const repairRootOwnership = vi.fn(() => JSON.stringify({ ok: false, code: 'denied', reason: 'root-missing' }))
-    const el = await render({ rootGrantState, repairRootOwnership, setRootGranted: vi.fn(), setRootConsent: vi.fn() })
+    const el = await renderRoot({ rootGrantState, repairRootOwnership, setRootGranted: vi.fn(), setRootConsent: vi.fn() })
     await act(async () => { buttonByText(el, '修复文件属主').click() })
     expect(el.textContent).toContain('启动文件属主维护失败')
     // 轮询读到活的 running（不是历史 completed）：这是「真的有一次新 run」的活证据。
@@ -1199,7 +1378,7 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
   it('repair-running 回执沿用同一个单飞作业，不宣称已修复', async () => {
     const pending = { running: true, startedAt: 10, completedAt: 0, overdue: false }
     const repairRootOwnership = vi.fn(() => JSON.stringify({ ok: true, code: 'repair-running', ...pending }))
-    const el = await render({ rootGrantState: () => rootGrantJson(), repairRootOwnership })
+    const el = await renderRoot({ rootGrantState: () => rootGrantJson(), repairRootOwnership })
     await act(async () => { buttonByText(el, '修复文件属主').click() })
     expect(buttonByText(el, '属主维护进行中').disabled).toBe(true)
     expect(el.textContent).toContain('结果会自动刷新')
@@ -1219,7 +1398,7 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
     { label: '停止但无结算', raw: '{"ok":true,"code":"repair-started","running":false,"startedAt":10,"completedAt":20}' },
   ])('$label 不能当作完成维护', async ({ raw }) => {
     const repairRootOwnership = vi.fn(() => raw)
-    const el = await render({ rootGrantState: () => rootGrantJson(), repairRootOwnership })
+    const el = await renderRoot({ rootGrantState: () => rootGrantJson(), repairRootOwnership })
     await act(async () => { buttonByText(el, '修复文件属主').click() })
     const receipt = el.querySelector('.dsh-root-maintenance [role="status"]')!
     expect(receipt.className).toContain('dsh-dev-error')
@@ -1244,7 +1423,7 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
     { label: '未知跳过原因', result: { ...completedRepair, ok: false, skipped: 'future-native-skip' } },
     { label: '未知失败', result: { ok: false, code: 'private-unregistered-native-error' } },
   ])('$label 在 root 读回后如实呈现未完成', async ({ result }) => {
-    const el = await render({ rootGrantState: () => rootGrantJson({
+    const el = await renderRoot({ rootGrantState: () => rootGrantJson({
       ownership: { running: false, startedAt: 10, completedAt: 20, result },
     }) })
     const receipt = el.querySelector('.dsh-root-maintenance [role="status"]')!
@@ -1312,5 +1491,85 @@ describe('root 授权终态（issue #1377）', () => {
   it('等待有上界：pending 超时常量存在且有限', () => {
     expect(Number.isFinite(ROOT_GRANT_PENDING_TIMEOUT_MS)).toBe(true)
     expect(ROOT_GRANT_PENDING_TIMEOUT_MS).toBeGreaterThan(0)
+  })
+})
+
+describe('手机控制页即时语言与首屏收敛', () => {
+  const readyBridge = () => ({
+    getScreenScope: () => 'virtual-only',
+    getVdisplayScale: () => 0.75,
+    getVdisplayFloatEnabled: () => true,
+    shizukuStatus: () => shizukuJson(),
+    a11yStatus: () => JSON.stringify({ enabled: true }),
+    rootGrantState: () => rootGrantJson(),
+    rootAccessState: () => rootAccessJson(),
+  })
+
+  it('切换 <html lang> 后无需重挂载即换成英文，再切回中文', async () => {
+    document.documentElement.lang = 'zh'
+    const el = await render(readyBridge())
+    expect(el.textContent).toContain('屏幕访问范围')
+    // MutationObserver 回调不在 React 事件批里；让 effect 的观察在同一瞬间生效。
+    await act(async () => {
+      document.documentElement.lang = 'en'
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(el.textContent).toContain('Screen access')
+    expect(el.textContent).toContain('Accessibility channel')
+    expect(el.textContent).not.toContain('屏幕访问范围')
+    await act(async () => {
+      document.documentElement.lang = 'zh'
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(el.textContent).toContain('屏幕访问范围')
+  })
+
+  it('首屏不铺按钮墙：只有三段 selector 与五行导航，动作都收进次级视图', async () => {
+    const el = await render(readyBridge())
+    const buttons = [...el.querySelectorAll('button')]
+    expect(buttons).toHaveLength(8)
+    expect(el.querySelectorAll('.dsh-pc-segment button')).toHaveLength(3)
+    expect(el.querySelectorAll('.dsh-pc-row-main')).toHaveLength(5)
+    expect(el.querySelectorAll('details')).toHaveLength(0)
+    expect(el.textContent).not.toContain('解锁受限设置')
+    expect(el.textContent).not.toContain('修复文件属主')
+    expect(el.textContent).not.toContain('请求 Shizuku 授权')
+    // 每段范围说明只有一句。
+    expect(el.querySelectorAll('.dsh-pc-scope-line')).toHaveLength(1)
+  })
+
+  it('Root 行在首屏最后，未 Root 时只给一行本机不可用与授权详情入口', async () => {
+    const el = await render({
+      ...readyBridge(),
+      rootGrantState: () => rootGrantJson({ channelUid: -1, channelRoot: false, rootGranted: false }),
+      rootAccessState: () => rootAccessJson({ state: 'no-su', suExists: false }),
+    })
+    const rows = [...el.querySelectorAll('button.dsh-pc-row-main')]
+    expect(rows[rows.length - 1]!.textContent).toContain('Root 权限')
+    expect(rows[rows.length - 1]!.textContent).toContain('本机不可用')
+    expect(el.textContent).not.toContain('无法在未 root 的设备上赋予该权限')
+    await enter(el, 'Root 权限')
+    expect(el.textContent).toContain('无法在未 root 的设备上赋予该权限')
+  })
+
+  it('Shizuku 依据 installed/running/granted 只给一个显式入口，绝不自动请求', async () => {
+    const requestShizukuPermission = vi.fn(() => JSON.stringify({ ok: true }))
+    const states = [
+      { over: { installed: false, running: false, granted: false, bound: false }, label: '下载 Shizuku' },
+      { over: { installed: true, running: false, granted: false, bound: false }, label: '打开 Shizuku' },
+      { over: { installed: true, running: true, granted: false, bound: false }, label: '请求 Shizuku 授权' },
+    ] as const
+    for (const state of states) {
+      const el = await renderShizuku({
+        shizukuStatus: () => shizukuJson(state.over),
+        requestShizukuPermission,
+      })
+      const actions = [...el.querySelectorAll('button')]
+        .map((node) => node.textContent)
+        .filter((text) => ['下载 Shizuku', '打开 Shizuku', '请求 Shizuku 授权'].includes(text ?? ''))
+      expect(actions).toEqual([state.label])
+      expect(requestShizukuPermission).not.toHaveBeenCalled()
+      await unmount()
+    }
   })
 })

@@ -40,7 +40,7 @@ import { createLinuxLifecycle, onEngineShutdown } from './linux-lifecycle.js'
 import { LINUX_TOOL_GUIDANCE, registerLinuxToolContract } from './linux-tool-contract.js'
 
 export const name = 'dsh-android-linux-env'
-export const inject = ['tools', 'webServer', 'androidPrivilege'] as const
+export const inject = ['tools', 'webServer', 'sandboxPolicy', 'sessions'] as const
 
 /** 会话档位实时解析（ST-16，F-ENV-06/09/10）。 */
 interface SandboxPolicyFace {
@@ -113,19 +113,20 @@ export function liveFacts(ctx: Context, session?: unknown) {
     sharedDirs: (e.DSH_SHARED_DIRS ?? '').split(':').filter(Boolean),
     sharedDirsSource: 'env',
     termuxVersion: e.TERMUX_VERSION ?? '',
-    // adbTier 权威判定在 bridge 服务（本处只读呈现，见 dsh-android-bridge currentStatus）。
-    adbTier: 'T0' as const,
+    // The old synchronous bridge tier is retired. Only the async native facts
+    // reader may publish a tier; this sync recipe never guesses one.
+    adbTier: 'unknown' as const,
   }
 }
 
 /**
  * 工具链状态（预装清单探测：本地文件系统 + 版本抽查；ST-16：事实按调用实时读）。
- * @param adbTier - bridge 服务的权威档位（缺席时回落本插件的部署视图）。
  * @param ctx - 插件上下文。
  * @param session - 会话（可选）。
+ * @param bridge - native shared bridge status reader.
  * @returns 状态载荷。
  */
-function toolchainStatus(adbTier: string | undefined, ctx: Context, session?: unknown): Record<string, unknown> {
+async function toolchainStatus(ctx: Context, session: unknown, bridge: TierReader | undefined): Promise<Record<string, unknown>> {
   const prefix = liveFacts(ctx, session).prefix
   // ST-17：消费单一表（PROBE_BINARIES / REQUIRED_TOOLCHAIN / TOOLCHAIN_REPRESENTATIVE）。
   const present: Record<string, boolean> = {}
@@ -150,18 +151,57 @@ function toolchainStatus(adbTier: string | undefined, ctx: Context, session?: un
     toolchainState,
     dpkgPackages: pkgCount,
     dpkgInitialized: pkgCount > 0,
-    // 与 dsh-android-bridge 同一判定权威（审校 C6：此前 linux-env 读 env 恒 T0，
-    // 与 bridge 不同源造成显示不一致——现经 androidPrivilege.status() 同源）。
-    adbTier: adbTier ?? deployedAdbTier(),
+    // Read asynchronous native capabilities. No fallback tier is invented: an
+    // unavailable or denied read stays `unknown` with an explicit source.
+    adbTier: await readTier(session, bridge),
   }
 }
 
-/** 部署默认档位视图（仅在 bridge 服务缺席时兜底；不再把 env 快照当权威）。 */
-function deployedAdbTier(): string {
-  const e = process.env
-  return e.DSH_WRITE_MODE === 'danger-full-access' && e.DSH_ADB_ALLOW === '1' && e.DSH_ADB_PAIRED === '1' && e.DSH_ADB_WIRELESS === '1'
-    ? 'T1'
-    : 'T0'
+/** Async native tier reader provided by the shared bridge. */
+interface TierReader {
+  statusAsync?(auth?: { session?: unknown }, signal?: AbortSignal): Promise<{
+    tier?: unknown
+    tierSource?: unknown
+    capabilitiesRead?: unknown
+  }>
+      controlExec?(op: string, args: Record<string, unknown>, timeoutMs?: number, auth?: { session?: unknown }): Promise<unknown>
+  status?(): { tier?: unknown; tierSource?: unknown; capabilitiesRead?: unknown; needsAsyncMigration?: unknown }
+}
+
+/**
+ * Request the native tier for this session. This deliberately has no env or
+ * deploy-default fallback: unknown capability must remain unknown.
+ */
+async function readTier(session: unknown, bridge: TierReader | undefined): Promise<'T0' | 'T1' | 'unknown'> {
+  if (bridge?.statusAsync === undefined) return bridge?.controlExec === undefined ? 'unknown' : await readLegacyTier(session, bridge)
+  try {
+    const value = await bridge.statusAsync({ session })
+    if (value.capabilitiesRead !== true) return 'unknown'
+    return value.tier === 'T0' || value.tier === 'T1' ? value.tier : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
+ * Compatibility probe for a legacy host that exposes only `controlExec`.
+ * The op is the shared browserCaps read; its result is accepted only when it
+ * is a successful envelope, so a transport error cannot be read as T0.
+ */
+async function readLegacyTier(session: unknown, bridge: TierReader): Promise<'T0' | 'T1' | 'unknown'> {
+  try {
+    const reply = await bridge.controlExec?.('browserCaps', {}, 1500, { session }) as
+      { ok?: unknown; data?: unknown } | null | undefined
+    if (reply === null || reply === undefined || typeof reply !== 'object' || reply.ok !== true) return 'unknown'
+    const data = reply.data
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) return 'unknown'
+    // Legacy browserCaps carries the browser tier facts, not a phone channel
+    // tier. Keep it unknown unless the host explicitly publishes a tier value.
+    const tier = (data as { tier?: unknown }).tier
+    return tier === 'T0' || tier === 'T1' ? tier : 'unknown'
+  } catch {
+    return 'unknown'
+  }
 }
 
 /**
@@ -212,7 +252,7 @@ function recipeExport(ctx: Context, session?: unknown): Record<string, unknown> 
   }
 }
 
-function tools(ctx: Context, svc: { status(): { tier: string } } | undefined) {
+function tools(ctx: Context, bridge: () => TierReader | undefined) {
   const statusTool = defineTool({
     name: 'android_toolchain_status',
     description: '工具链状态：Termux/Bionic Bash 清单、dpkg、ADB 档位；不含 Debian/glibc Linux。',
@@ -233,13 +273,13 @@ function tools(ctx: Context, svc: { status(): { tier: string } } | undefined) {
         },
       },
       render: (_args, v: Record<string, unknown>) => [
-        // 0.13.8 #172：adbTier 是部署默认档位视图（非通道能力门）——文案如实标注，防模型误读为未授权
-        { type: 'text',         text: `Termux/Bionic 工具链 ${String(v.prefix)}：${String(v.toolchainState ?? 'unknown')}（缺失 ${((v.missing as string[] | undefined) ?? []).join(', ') || '无'}）/ dpkg ${String(v.dpkgPackages)} 包 / ADB 档位视图 ${String(v.adbTier)}（部署默认，非通道门；通道就绪以 android_privilege_status 为准）\n` + JSON.stringify(v.tools ?? {}) },
+        // The tier comes from live native capabilities; unknown is never shown as T0.
+        { type: 'text',         text: `Termux/Bionic 工具链 ${String(v.prefix)}：${String(v.toolchainState ?? 'unknown')}（缺失 ${((v.missing as string[] | undefined) ?? []).join(', ') || '无'}）/ dpkg ${String(v.dpkgPackages)} 包 / 原生档位 ${String(v.adbTier)}（能力未知即 unknown，不按部署默认推断）\n` + JSON.stringify(v.tools ?? {}) },
       ],
     },
-    // ST-16：每次调用实时 resolve 会话档位（exec.agent.session），不吃启动快照
+    // ST-16: resolve the session on every call; the native tier is read async.
     execute: async (_args: Record<string, never>, exec: { agent?: { session?: unknown } }) =>
-      toolchainStatus(svc?.status().tier, ctx, exec?.agent?.session) as never,
+      await toolchainStatus(ctx, exec?.agent?.session, bridge()) as never,
   })
 
   const recipeTool = defineTool({
@@ -376,8 +416,9 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
   })
   const imagePolicy = () => ({ imageExpirySupported: serviceOf<{ imageExpirySupported?: boolean }>(ctx, 'attachments')?.imageExpirySupported === true })
   const cleanupPlan = () => planCleanup(process.env, imagePolicy())
-  // 授权档位权威 = bridge 服务（androidPrivilege，patch 顺序 bridge 先于本插件）
-  const svc = (ctx as unknown as { androidPrivilege?: { status(): { tier: string } } }).androidPrivilege
+  // Native tier reader is late-bound: the bridge may load after this plugin.
+  const bridgeOf = (): TierReader | undefined => serviceOf<TierReader>(ctx, 'nativeSharedBridge')
+    ?? serviceOf<TierReader>(ctx, 'androidPrivilege')
   // 实验性内部 Linux 插件（bootstrap + runtime）：包随机放在内置（hard）插件目录，但**默认不启用**
   // ——存在不等于启用。宿主只提供激活/卸载与只读在场查询；是否启用、何时安装一律由外部 bootstrap
   // 服务与用户显式确认决定，本插件不下载、不解包、不替用户启用。
@@ -402,7 +443,7 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
       })
     })
   }
-  for (const t of tools(ctx, svc)) ctx.tools.register(t)
+  for (const t of tools(ctx, bridgeOf)) ctx.tools.register(t)
   // register() 在运行期返回 disposer（上游 webserver 契约；file-open 同一形态）。声明为
   // `() => void` 才能走 ctx.effect——热重载/卸载必须回收路由，不留重复 handler。
   const wsvc = (ctx as unknown as { webServer?: { register(r: unknown): () => void } }).webServer
@@ -423,10 +464,11 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         return readLinuxManifest(join(files, 'linux-environment'))
       },
     })
-    for (const [path, builder] of [
-      ['/api/android/env/status', () => toolchainStatus(svc?.status().tier, ctx)],
-      ['/api/android/env/recipe', () => recipeExport(ctx)],
-    ] as const) {
+    const builders = [
+      ['/api/android/env/status', async () => await toolchainStatus(ctx, undefined, bridgeOf())],
+      ['/api/android/env/recipe', async () => recipeExport(ctx)],
+    ] as const
+    for (const [path, builder] of builders) {
       // issue #1207：注册必须走 ctx.effect——`register()` 运行期返回 disposer，裸调用会把
       // disposer 丢掉，插件卸载/热重载后路由仍存活并从已销毁的 ctx 提供服务。
       ctx.effect(() => wsvc.register({
@@ -450,7 +492,7 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
           // issue #1207：处理器必须自带 try/catch——builder 抛错（例如工作区被删后 cwd ENOENT）
           // 会让整个 handler reject，res 永不 end，客户端挂住。
           try {
-            const body = JSON.stringify(builder())
+            const body = JSON.stringify(await builder())
             res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
             res.end(body)
           } catch (failure) {
@@ -519,6 +561,7 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
       filesDir,
       appVersion,
       ...(typeof _config.releaseUrl === 'string' ? { releaseUrl: _config.releaseUrl } : {}),
+      ...(typeof process.env.DSH_NATIVE_LIB_DIR === 'string' ? { nativeLibDir: process.env.DSH_NATIVE_LIB_DIR } : {}),
     })
     void mountLinuxBootstrap(ctx, { config: bootstrapConfig }).catch(error => {
       lifecycle.fail(error)

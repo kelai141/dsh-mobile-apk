@@ -17,8 +17,11 @@ class NativeControlDispatcherTest {
     var sdkCalls = 0
     var skipGate = false
     var throwAfterGate = false
+    var failA11yBeforeGate = false
+    var fallbackAvailable = false
     var secondGate: Boolean? = null
     val plan = JSONObject("""{"backend":"a11y","operation":"click","screenId":"real","displayId":0,"width":720,"height":1600,"epoch":"18446744073709551615","generation":"7"}""")
+    private fun withArgs(value: JSONObject) = JSONObject(value.toString()).put("args", JSONObject().put("x", 20).put("y", 30))
     val core = NativeControlDispatcher.Core { req ->
       val kind = req.getString("kind")
       calls.add(kind)
@@ -27,7 +30,10 @@ class NativeControlDispatcherTest {
         "prepare" -> if (replay) JSONObject("""{"ok":true,"code":"clicked","executed":"yes","replayed":true}""")
           else JSONObject().put("ok", true).put("code", "prepared").put("plan", plan)
         "commit" -> JSONObject().put("callId", req.getString("callId")).put("dispatch", "permitted")
-          .put("plan", JSONObject(plan.toString()).put("args", JSONObject().put("x", 20).put("y", 30)))
+          .put("plan", withArgs(plan))
+        "fallbackUnavailableA11y" -> if (fallbackAvailable) JSONObject().put("ok", true)
+          .put("callId", req.getString("callId")).put("dispatch", "permitted")
+          .put("plan", withArgs(plan).put("backend", "shizuku")) else JSONObject().put("ok", false)
         // ok=false is intentional: only valid+dispatch carry execution authority.
         "validateDispatch" -> JSONObject().put("ok", false).put("valid", valid)
           .put("dispatch", if (valid) "permitted" else "forbidden")
@@ -41,6 +47,8 @@ class NativeControlDispatcherTest {
       override fun implements(plan: JSONObject) = supported
       override fun execute(callId: String, plan: JSONObject, args: JSONObject, refreshFacts: () -> Boolean,
         authorize: () -> Boolean): CompletableFuture<JSONObject> {
+        if (failA11yBeforeGate && plan.getString("backend") == "a11y") return CompletableFuture.completedFuture(
+          JSONObject().put("ok", false).put("executed", "no").put("code", "a11y-offline"))
         if (!skipGate && !authorize()) return CompletableFuture.completedFuture(JSONObject("""{"ok":false,"code":"authorize-denied","executed":"no"}"""))
         sdkCalls++
         if (throwAfterGate) throw IllegalStateException("lost callback")
@@ -87,8 +95,16 @@ class NativeControlDispatcherTest {
   @Test fun missingAdapterWithdrawsBeforeCommit() {
     val f = Fixture().apply { supported = false }
     assertEquals("platform-adapter-unavailable", f.run().getString("code"))
-    assertEquals(listOf("publishFacts", "prepare", "cancel"), f.calls)
+    assertEquals(listOf("publishFacts", "prepare", "publishFacts", "fallbackUnavailableA11y", "cancel"), f.calls)
     assertEquals(0, f.sdkCalls)
+  }
+
+  @Test fun unexecutedA11yCanSwitchWithinTheSameCommittedCall() {
+    val f = Fixture().apply { failA11yBeforeGate = true; fallbackAvailable = true }
+    assertEquals("yes", f.run().getString("executed"))
+    assertEquals(1, f.calls.count { it == "commit" })
+    assertEquals(1, f.calls.count { it == "fallbackUnavailableA11y" })
+    assertEquals(1, f.sdkCalls)
   }
 
   @Test fun adapterCannotClaimSuccessWithoutFinalAuthorization() {

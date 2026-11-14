@@ -236,8 +236,9 @@ export function createLinuxBootstrapConfig(options: {
   filesDir: string
   appVersion: string
   releaseUrl?: string
+  nativeLibDir?: string
 }): Record<string, unknown> {
-  const { filesDir, appVersion, releaseUrl = LINUX_RELEASE_URL } = options
+  const { filesDir, appVersion, releaseUrl = LINUX_RELEASE_URL, nativeLibDir } = options
   const dataDir = linuxEnvironmentRoot(filesDir)
   const linuxAssetIO = createHostAssetIO({ filesDir })
   return {
@@ -245,7 +246,13 @@ export function createLinuxBootstrapConfig(options: {
     releaseUrl,
     linuxAssetIO,
     fetchImpl: createLinuxReleaseFetch({ filesDir }),
-    runtimePluginConfig: linuxAssetIO,
+    // The runtime manager needs ApplicationInfo.nativeLibraryDir: an app
+    // process on targetSdk >= 29 may only execute apk_data_file, so the glibc
+    // loader ships there instead of in the rootfs.
+    runtimePluginConfig: {
+      ...linuxAssetIO,
+      ...(nativeLibDir === undefined || nativeLibDir === '' ? {} : { nativeLibDir }),
+    },
     appVersionProvider: () => appVersion,
     stagingDirectory: join(dataDir, 'plugins', 'runtime'),
   }

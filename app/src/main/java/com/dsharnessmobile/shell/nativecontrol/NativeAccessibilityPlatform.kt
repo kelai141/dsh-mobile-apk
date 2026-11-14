@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 边界（与 Rust phone-control-core 的约定）：
  * - backend 选择、目标屏幕、范围与授权都由 Rust 决定；本类不保存第二套权限或业务路由。
  * - 不调用 DeviceControlService.handle、ControlCarrier 或旧 Node/ref 解析，也不分配模型 ref。
- * - 树与帧保持原始形态：真实 child 下标、原始像素、原始行跨距。裁剪、缩放、OCR 留给 Rust。
+ * - 树与帧保持原始形态：真实 child 下标、原始像素、原始行跨距。Rust 负责裁剪与缩放；不运行 OCR。
  * - 每个实际 Android 调用前执行上层 finalAuthorize（Rust validateDispatch 的只读快检查）；
  *   返回 false 时结果为 executed=no，且不触碰 SDK。
  * - 派发前的拒绝（executed=no）与派发后的取消/异常/超时（executed=unknown）分开报告；
@@ -307,6 +307,18 @@ internal class NativeAccessibilityPlatform(
   }
 
   /** 坐标滚动：以 (x,y) 为中心的滑动，distanceFraction 是轴长的比例。 */
+  fun swipe(target: RawTarget, x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long,
+    finalAuthorize: () -> Boolean): CompletableFuture<ActionOutcome> {
+    coordinateRejection(target, x1, y1)?.let { return completedAction(it) }
+    coordinateRejection(target, x2, y2)?.let { return completedAction(it) }
+    if (durationMs !in 50L..2_000L || (x1 == x2 && y1 == y2))
+      return completedAction(ActionOutcome.no("invalid-swipe"))
+    return dispatchStroke(target, finalAuthorize, durationMs) {
+      Path().apply { moveTo(x1.toFloat(), y1.toFloat()); lineTo(x2.toFloat(), y2.toFloat()) }
+    }
+  }
+
+  /** 坐标滚动：以 (x,y) 为中心的滑动，distanceFraction 是轴长的比例。 */
   fun scrollAt(
     target: RawTarget,
     x: Int,
@@ -370,7 +382,7 @@ internal class NativeAccessibilityPlatform(
       if (!node.isEditable) return@nodeAction ActionOutcome.no("node-not-editable")
       val raw = captureNode(node, nodeTarget.path)
       if (!safeVerify(verifyNode, raw)) return@nodeAction ActionOutcome.no("verify-failed")
-      val value = if (clear) text else (node.text?.toString() ?: "") + text
+      val value = if (clear) text else actualText(node) + text
       if (value.length > MAX_TEXT_CHARS) return@nodeAction ActionOutcome.no("text-too-large")
       val bundle = Bundle().apply {
         putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
@@ -386,6 +398,56 @@ internal class NativeAccessibilityPlatform(
         ActionOutcome.unknown("node-action-exception", describe(t))
       }
     }
+  }
+
+  /** 向指定显示器内的当前聚焦编辑器写入；不改变焦点或输入法。 */
+  fun setFocusedText(
+    target: RawTarget,
+    text: String,
+    clear: Boolean,
+    finalAuthorize: () -> Boolean,
+  ): CompletableFuture<ActionOutcome> {
+    target.rejection()?.let { return completedAction(ActionOutcome.no(it)) }
+    guardContent(target.displayId)?.let { return completedAction(ActionOutcome.no(it)) }
+    if (text.toByteArray(Charsets.UTF_8).size > 8192) return completedAction(ActionOutcome.no("invalid-text"))
+    val future = CompletableFuture<ActionOutcome>()
+    if (!main.post {
+      var dispatched = false
+      var root: AccessibilityNodeInfo? = null
+      var node: AccessibilityNodeInfo? = null
+      try {
+        when (val selected = selectRoot(target, null)) {
+          is RootResult.Rejected -> { future.complete(ActionOutcome.no(selected.code)); return@post }
+          is RootResult.Ok -> root = selected.root
+        }
+        node = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        val editor = node
+        if (editor == null || !editor.isEditable || !editor.isFocused || editor.isPassword || !editor.isVisibleToUser) {
+          future.complete(ActionOutcome.no("focused-editor-unavailable")); return@post
+        }
+        val value = if (clear) text else actualText(editor) + text
+        if (value.toByteArray(Charsets.UTF_8).size > 8192) {
+          future.complete(ActionOutcome.no("invalid-text")); return@post
+        }
+        val args = Bundle().apply {
+          putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
+        }
+        if (!safeAuthorize(finalAuthorize)) {
+          future.complete(ActionOutcome.no("authorize-denied")); return@post
+        }
+        dispatched = true
+        val accepted = editor.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        future.complete(if (accepted) ActionOutcome.yes("focused-set-text-accepted")
+          else ActionOutcome.unknown("focused-set-text-unconfirmed"))
+      } catch (_: Exception) {
+        future.complete(if (dispatched) ActionOutcome.unknown("focused-set-text-unconfirmed")
+          else ActionOutcome.no("focused-editor-unavailable"))
+      } finally {
+        node?.let { recycle(it) }
+        root?.let { recycle(it) }
+      }
+    }) future.complete(ActionOutcome.no("main-thread-unavailable"))
+    return future
   }
 
   /** 节点滚动。只接受可滚动节点，不回退到整屏手势。 */
@@ -773,7 +835,7 @@ internal class NativeAccessibilityPlatform(
       className = node.className?.toString() ?: "",
       packageName = node.packageName?.toString() ?: "",
       viewId = node.viewIdResourceName ?: "",
-      text = node.text?.toString() ?: "",
+      text = actualText(node),
       contentDescription = node.contentDescription?.toString() ?: "",
       bounds = RawBounds(rect.left, rect.top, rect.right, rect.bottom),
       clickable = node.isClickable,
@@ -788,6 +850,9 @@ internal class NativeAccessibilityPlatform(
       windowId = node.windowId,
     )
   }
+
+  private fun actualText(node: AccessibilityNodeInfo): String =
+    if (node.isEditable && node.isShowingHintText) "" else node.text?.toString().orEmpty()
 
   // ── 节点动作 ───────────────────────────────────────────────────────────
 

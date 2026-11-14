@@ -79,8 +79,6 @@
   <string name="ds_notify_channel_desc">引擎任务状态、待答请求与文件导出的结果提醒</string>
   <string name="ds_notify_permission_rationale">需要通知权限：引擎提问或等你授权时，只有通知能把你叫回来（任务会一直等）。未授权时这些提醒只能在应用内看到。</string>
   <string name="ds_notify_denied_note">未授予通知权限：引擎提问与授权请求将不会出现在通知栏，只能在应用内看到。</string>
-  <!-- 0.13.2 ADB 输入通道 IME（ADBKeyboard 协议；引擎 android_ui_input 中文输入通道） -->
-  <string name="adb_keyboard_label">DeepSeek ADB 输入通道</string>
   <!-- 0.13.5 W4：设备控制无障碍服务（语义控制面） -->
   <string name="a11y_service_label">DeepCode 设备控制</string>
   <string name="a11y_service_summary">让 AI 助手以语义方式读取界面并操作控件</string>

@@ -10,9 +10,11 @@
 ## 0. 一句话
 
 无障碍通道**不是 ADB 的降级替代**：Android 11（API 30）起自带 `takeScreenshot()`（截屏不再需要 ADB）。
-Android 13 起 AOSP 存在无障碍输入法（`FLAG_INPUT_METHOD_EDITOR`）设计，但**本项目实测不可用**：
-javap 校验 android-36 的 `android.jar`，`AccessibilityNodeInfo` 无该符号（见 known-gaps.md 与
-0.13.8 批 F 登记），中文输入由 `ACTION_SET_TEXT` + ADBKeyboard 承担。
+Android 13 起允许无障碍服务使用输入连接。2026-11-14 用 `javap` 复核 android-36 SDK：
+标志定义在 `AccessibilityServiceInfo`，输入方法入口在 `AccessibilityService`，而非 `AccessibilityNodeInfo`。
+当前产品文本输入由 `setText` 落 `ACTION_SET_TEXT`：真实屏的聚焦编辑器经 Shizuku shell 侧
+`UiAutomation` 写入，节点目标由无障碍服务写入；应用**不注册输入法**，也不切换用户键盘。
+无障碍输入连接（API 33+）尚未接入，也未验证设备兼容性。
 真正只能靠系统面/ADB 的：**shell 执行、pm/dumpsys/appops 等系统面、以及 API <30 的字节级截图**。
 
 ## 1. 服务级能力（`AccessibilityServiceInfo.CAPABILITY_*` ↔ XML 属性）
@@ -27,7 +29,7 @@ javap 校验 android-36 的 `android.jar`，`AccessibilityNodeInfo` 无该符号
 | `CAPABILITY_CAN_REQUEST_FILTER_KEY_EVENTS` | 18 | `canRequestFilterKeyEvents` | 不用 |
 | `CAPABILITY_CAN_REQUEST_ENHANCED_WEB_ACCESSIBILITY` | 18 | `canRequestEnhancedWebAccessibility` | 不用（已废弃方向） |
 | `CAPABILITY_CAN_REQUEST_FINGERPRINT_GESTURES` | 26 | `canRequestFingerprintGestures` | 不用 |
-| `FLAG_INPUT_METHOD_EDITOR` | 33 | （flag） | **不可用**：android-36 android.jar 无相关符号（known-gaps 已核实）；中文输入走 `ACTION_SET_TEXT` + ADBKeyboard |
+| `FLAG_INPUT_METHOD_EDITOR` | 33 | （flag） | 公共 SDK 可用；本项目尚未接入与实测（文本输入已由 `ACTION_SET_TEXT` 承担，不需要输入连接） |
 
 ## 2. 服务 API（含 API 级别）
 
@@ -72,9 +74,9 @@ javap 校验 android-36 的 `android.jar`，`AccessibilityNodeInfo` 无该符号
 
 | API | 级别 | 说明 |
 |---|---|---|
-| `getSoftKeyboardController().switchToInputMethod(imeId)` | 24 | 切换输入法（**替代 ADB `ime set`**） |
+| `getSoftKeyboardController().switchToInputMethod(imeId)` | 24 | 切换输入法；本项目的文本输入不使用它 |
 | `getSoftKeyboardController().setInputMethodEnabled(imeId, enabled)` | 33 | 启用/停用 IME（限同包） |
-| `onCreateInputMethod()` / `getInputMethod()` | 33 | 无障碍输入法（配 `FLAG_INPUT_METHOD_EDITOR`）——**本 SDK 无此符号，不可用**（known-gaps） |
+| `onCreateInputMethod()` / `getInputMethod()` | 33 | 配合 `FLAG_INPUT_METHOD_EDITOR` 获取无障碍服务的输入连接；本项目尚未接入，也没有应用内 IME |
 | `getSoftKeyboardController().setShowMode(...)` | 24 | 软键盘显示策略 |
 
 ### 2.5 其他
@@ -140,30 +142,44 @@ javap 校验 android-36 的 `android.jar`，`AccessibilityNodeInfo` 无该符号
 | 读树 | `canRetrieveWindowContent="true"` | |
 | 多窗口 | `flagRetrieveInteractiveWindows` | |
 
-**无额外危险权限**：不需要 `SYSTEM_ALERT_WINDOW`（无障碍层用 `TYPE_ACCESSIBILITY_OVERLAY`）、不需要 root、
-不需要 Shizuku。
+**无障碍服务本身不需要额外危险权限**：不需要 `SYSTEM_ALERT_WINDOW`（无障碍层用 `TYPE_ACCESSIBILITY_OVERLAY`）、
+不需要 root、不需要 Shizuku。这里说的是服务自身的绑定与能力声明；当前真实屏文本输入、原始帧与虚拟屏执行走 Shizuku 通道，需要用户另行授权 Shizuku，与本节的权限面是两回事。
 
 ## 6. 本仓实现映射
 
 | 能力 | 落点 |
 |---|---|
-| 服务与能力声明 | `app/src/main/AndroidManifest.xml`（`DeviceControlService`）+ `res/xml/accessibility_service_config.xml` |
-| 树快照（路径 id + attrs 同构 uiautomator XML） | `DeviceControlService.buildSnapshot()` / `nodeAtPath()` |
-| 动作（click/setText/scroll/global/screenshot） | `DeviceControlService.handle*()` |
-| 屏幕范围失败关闭 | `ScreenScopePrefs` + `DeviceControlService.realScreenScopeError()`；每次 real op 重查，切换范围使旧 snapshot/ref 失效；`virtual-1` 未 ready 时不映射 display 0 |
-| 队列客户端（长轮询 + 心跳 + 回填） | `ControlPoller.kt` |
-| 状态与令牌 | `DeviceControlService.statusJson()` / `token()`；prefs `dsh-adb.xml` 的 `a11yEnabled` / `controlToken` |
-| 桥方法 | `AndroidBridge.a11yStatus()/openA11ySettings()/unlockRestrictedSettings()`（MainActivity 接线） |
-| 引擎侧门禁与路由 | 协调仓 `plugins/dsh-android-bridge/src/control-policy.ts` / `control-queue.ts`；工具面在 `plugins/dsh-android-manage` |
+| 服务与能力声明 | `app/src/main/AndroidManifest.xml`（`DeviceControlService`）+ `res/xml/accessibility_service_config.xml`；权限面见 §5 |
+| 树快照（路径 id + attrs 同构 uiautomator XML） | `NativeAccessibilityPlatform.snapshot`；`DeviceControlService` 只提供绑定实例 |
+| 动作（click/longClick/setText/scroll/swipe/global/screenshot/nodeText/readRegion） | `NativeA11yExecution.execute` → `NativeAccessibilityPlatform`；`swipe` 接受任意两个不同端点，节点 `setText` 走 `setTextNode` |
+| 真实屏聚焦编辑器 `setText`（Shizuku） | `NativeShizukuExecution` → `ShizukuTransport.nativeSetTextReal` → `NativeShizukuEditor.setText`；`ACTION_SET_TEXT` 后回读，不切换输入法 |
+| 按键与虚拟屏全局动作 | `keyEvent` 只走 Shizuku 固定键码（`enter/tab/escape/backspace/delete/space/up/down/left/right/back`）；虚拟屏 `global` 只允许 `back` 且经 Shizuku，A11y 全局 API 不作用于虚拟屏（`NativeShizukuExecution.implements` + `guardGlobal`） |
+| 控制客户端（私有 Unix socket + 原生计划） | phone-control 的 `native-client.ts` / `native-bridge.ts` → `NativeControlRuntime`；没有 HTTP 长轮询或心跳 |
+| 状态与令牌 | `DeviceControlService.statusJson()` / `token()`；prefs `dsh-adb.xml` 的 `a11yEnabled` / `controlToken`。`prepareEnvironment` 由 `NativeEnvironmentExecution` 只关/恢复三项动画倍率，无输入法逻辑 |
+| 桥方法 | `AndroidBridge.a11yStatus()/openA11ySettings()/unlockRestrictedSettings()`（MainActivity 接线）；绑定状态由 `DeviceControlService.statusJson` 提供 |
+| 引擎侧门禁与路由 | 手机工具在 `plugins/dsh-android-phone-control`；能力、屏幕范围与通道由 Rust 计划决定；共享浏览器 op 才走 `plugins/dsh-android-bridge` |
 
-## 7. 状态与待办（2026-09-14 对账）
+## 7. 状态与待办（2026-11-14 文档对账；未执行设备验收）
 
-已完成：服务 + 能力声明、树快照、click/setText/scroll/global、队列长轮询 + 心跳、门禁双通道、
-设置页无障碍优先、`takeScreenshot`（设备实测通过）、**全局动作面由 `getSystemActions()` 驱动**
-（0.13.8 E6，`GlobalActionCatalog`）、**无障碍截屏失败回落 ADB**（E6）、**屏幕范围执行点复查**
-（`ScreenScopePrefs` + `DeviceControlService.realScreenScopeError`）。
+代码面现状：`DeviceControlService` 只保留系统绑定、`nativePlatformService`、共享文件令牌与兼容 `WindowPick`；
+语义树、动作与截屏在 `nativecontrol/NativeAccessibilityPlatform` 与 `NativeA11yExecution`；真实屏聚焦编辑器由
+`NativeShizukuExecution` → `ShizukuTransport.nativeSetTextReal` → `NativeShizukuEditor` 写入并回读；手机工具经
+phone-control 的私有 Unix socket 到 `NativeControlRuntime`，没有 HTTP 长轮询、没有心跳，也没有回填队列。
+应用不注册输入法，`adb shell ime list -s | grep dsharnessmobile` 应为空。
 
-待办：① ~~无障碍输入法~~ **已核实不可用**（android-36 无符号）；② ~~`getSystemActions()` 驱动全局动作面~~ **已落地**；
-③ 长按已接，展开/折叠/复制/翻页/拖拽等节点动作仍未暴露给模型；④ `takeScreenshotOfWindow`(34) 单窗口观察未接；
-⑤ 多窗口 `getWindows()` 的窗口选择面未接；⑥ 回落 ADB 路径只在本机 API 35 验过「无障碍可用」分支，API<30 真机回落未验。
+待设备验证：原生宿主起停与 socket 存活；a11y 的快照、点击、输入、滚动与截屏；`virtual-only` 下仅靠 Shizuku
+完成真实屏文本输入的执行与回读；虚拟屏的创建、输入、拉起与回收。以上均无本轮设备证据，JVM 用例通过只证明接线。
+
+特权面现状：phone-control 已注册 `shExec`（只读查询，Rust `shell_policy.rs` 准入）、`rootExec`（独立 Root 授权）与 `termuxExec`（应用 UID）；`shPull/shPush/shRemove` 未注册。`ShellOps` 已物理删除，Root lease/fence 与 Shizuku 低层执行仍在。
+但手机工具面当前不注册 `shExec/shPull/shPush/shRemove`。
+
+已落地的代码面：服务与能力声明、树快照、click/longClick/setText/scroll/swipe/global、`takeScreenshot`、`nodeText` 与 `readRegion`，全局动作面由 `getSystemActions()` 驱动（`GlobalActionCatalog`），以及按 `ScreenScopePrefs` 在原生计划里复查屏幕范围。`swipe`、`keyEvent`、虚拟屏 `global back` 与 `prepareEnvironment` 只有 JVM/Rust 单测，尚无设备回执。
+`getSystemActions()` 驱动（0.13.8 E6，`GlobalActionCatalog`），以及按 `ScreenScopePrefs` 在原生计划里复查屏幕范围。
+旧「无障碍截屏失败回落 ADB」与 `DeviceControlService.realScreenScopeError` 已随旧控制链删除，不再作为现状描述。
+
+待办：① 无障碍服务输入连接（API 33+）按需再评估，当前聚焦编辑器输入由 Shizuku `ACTION_SET_TEXT` 承担；
+② 长按已接，展开/折叠/复制/翻页/拖拽等节点动作仍未暴露给模型；③ `takeScreenshotOfWindow`(34) 单窗口观察未接；
+④ 多窗口：`getWindowsOnAllDisplays()` 与兼容 `WindowPick` 已在代码里，真正的原生窗口选择仍需设备验证；
+⑤ API<30 只支持真实屏 display 0，虚拟屏直接回 `target-unsupported`（`NativeAccessibilityPlatform` 的 API 30 分支），
+低版本真机行为未验。
 完整缺口清单维护在 `known-gaps.md`（本文件只登记 API 参考与实现映射）。

@@ -1,549 +1,536 @@
 #!/usr/bin/env node
-// check-control-ops.mjs — 控制 op 六处登记链一致性门禁（0.13.8-b 批 B2，跨专项）
+// check-control-ops.mjs — 原生薄桥链的 op 契约门禁（2026-11-14 迁移）。
 //
-// 坑 52 的教训：新增 op 必须同时进引擎侧 ControlOp 与 A11Y_OPS，漏一处 = 工具在 a11y 通道下
-// 「暂不支持」deny（fail-closed 反而变成静默不可达）。0.13.8 批实测为**六处**（源文档称五处）：
-//   1) 壳侧执行分支   dsh-mobile-apk/.../DeviceControlService.kt 的 fun handle(op, args) when 分支
-//   2) 壳侧 op 白名单 dsh-mobile-apk/.../ControlProtocolV2.kt 的 SUPPORTED_OPS（handle 的 when 与 caps.ops 共用）
-//   3) 引擎侧类型联合 plugins/dsh-android-bridge/src/control-policy.ts 的 ControlOp
-//   4) 引擎侧 a11y 策略集 同文件的 A11Y_OPS（decideControl 据此判「支持/拒绝」）
-//   5) 引擎侧路由登记 plugins/dsh-android-bridge/src/index.ts 的 ROUTE_OPS（诊断面展示，**声明为子集**）
-//   6) manage 工具面  plugins/dsh-android-manage/src/index.ts 的 a11yExec/controlExec 实参集合
+// 旧链（Kotlin DeviceControlService / ControlProtocolV2 / ControlCarrier，TS control-policy /
+// manage 工具面，Node 控制队列与六面台账）已物理退役。本门禁不再读取任何旧文件，也不再靠
+// 台账豁免缺失面。权威源只剩三处：
+//   1. Rust `native/phone-control-core/src/policy.rs` 的 `OPERATIONS`（语义与通道要求）；
+//   2. Kotlin `shell/nativecontrol/*` 的 `Platform.implements` / `isDiagnostic`（真实执行可达性）；
+//   3. TS `plugins/dsh-android-phone-control/src` 与 `plugins/dsh-android-bridge/src`（薄桥转发面）。
 //
 // 断言：
-//   A. handle 分支集合 == SUPPORTED_OPS（壳侧两处必须逐字一致）
-//   B. ControlOp == SUPPORTED_OPS（差集 = 0，仅允许 known-gaps 显式豁免）
-//   C. A11Y_OPS == ControlOp（差集 = 0，同上）
-//   D. manage 工具面 == SUPPORTED_OPS（工具面不得用到未登记的 op，也不得漏掉已登记的 op）
-//   E. ROUTE_OPS ⊂ ControlOp（诊断面刻意只列常用 op；子集 + 非空 + 无越界项）
-//   F. longClick 存量漂移专项：壳侧在场而引擎 ControlOp/A11Y_OPS 缺席 → 必须收口（或进 known-gaps）
+//   A. Rust 目录名唯一，Target/Backend/Scope 均为已声明枚举，屏幕 op 必须读屏；
+//   B. 手机桥 `NATIVE_CONTROL_OPERATIONS` 恰为 Rust 目录的子集，且目录每条都可达（缺一即红）；
+//   C. 共享浏览器桥 `NATIVE_SHARED_BROWSER_OPS` 恰为 Rust BrowserWorkspace 全集，反之亦然；
+//   D. 每个非诊断 op 至少被一个 Kotlin adapter 的 `implements` 接受；每个后端都有对应 adapter；
+//      `shExec`/`rootExec` 必须分别落在 shell2000 与独立 Root，`termuxExec` 必须走应用 UID 的 Termux 宿主；
+//   E. 模型面只有一个 `android_ui_input`，文本和固定按键二选一，单次转发；
+//   F. 旧注册链不可达：不再出现旧控制协议、旧 queue/carrier/poller、旧 manage/vdisplay 模块的引用。
 //
 // 用法：node scripts/check-control-ops.mjs [--shell-root <含 app/src/main 的树>] [--plugin-root <含 plugins/ 的树>]
-//        [--gaps <known-gaps json>] [--ledger <控制 op 台账 json>]（后两个主要供测试隔离）
-// 退出码：0 = 通过；1 = 登记漂移（拒打包/拒合）或树定位失败。
-import { readFileSync, existsSync } from 'node:fs'
-import { join, dirname, relative } from 'node:path'
+//        [--self-test]（判别力自证，不读仓库）
+// 退出码：0 = 通过；1 = 契约漂移、解析失败或旧链复活。
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
+import { join, dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { quoted, arrayBlock, unionBlock } from './lib/control-ops-parse.mjs'
+import {
+  missingFrom, parseKotlinSet, parseRustOperations, parseTsArray, sameSet, sorted, unique,
+} from './lib/native-control-contract.mjs'
+const HERE = dirname(fileURLToPath(import.meta.url))
+const SCRIPT_REPO = dirname(HERE)
+const argv = process.argv.slice(2)
+const option = (name) => {
+  const at = argv.indexOf('--' + name)
+  return at >= 0 ? argv[at + 1] : undefined
+}
 
-// ── 纯函数：文本在场 != 行为在场（#1046）────────────────────────────────────
-/**
- * 剥掉行注释与块注释：注释字符替换成空格（行号与偏移不变），字符串内容原样保留。
- * **逐行剥**（引号状态不跨行）：正则/转义里的引号若跨行保持「在字符串里」，文件尾部
- * 的真实注释就会被当成字符串内容放过——那正是本判据要防的假绿。
- * 白名单（SUPPORTED_OPS / ControlOp / A11Y_OPS / ROUTE_OPS / 契约族）一律在剥注释后的
- * 文本上取，注释里写一句 "screenshot" 不得冒充登记（issue #1046 复现①）。
- */
-function stripComments(source) {
-  let inBlock = false
-  return source.split('\n').map((line) => {
-    let out = ''
-    let index = 0
-    let quote = null
-    while (index < line.length) {
-      const c = line[index]
-      const next = line[index + 1]
-      if (inBlock) {
-        if (c === '*' && next === '/') { inBlock = false; out += '  '; index += 2; continue }
-        out += ' '
-        index += 1
-        continue
-      }
-      if (quote !== null) {
-        if (c === '\\') { out += c + (next ?? ''); index += 2; continue }
-        out += c
-        if (c === quote) quote = null
-        index += 1
-        continue
-      }
-      if (c === '/' && next === '/') { out += ' '.repeat(line.length - index); index = line.length; continue }
-      if (c === '/' && next === '*') { inBlock = true; out += '  '; index += 2; continue }
-      if (c === '"' || c === "'" || c === BACKTICK) { quote = c; out += c; index += 1; continue }
-      out += c
+const RUST_REL = 'native/phone-control-core/src/policy.rs'
+const KOTLIN_REL = 'app/src/main/java/com/dsharnessmobile/shell/nativecontrol'
+const PHONE_REL = 'plugins/dsh-android-phone-control/src'
+const SHARED_REL = 'plugins/dsh-android-bridge/src'
+
+const TARGETS = new Set(['AndroidDisplay', 'VirtualDisplay', 'BrowserWorkspace', 'AppWebView', 'ControlMemory', 'PrivilegedShell'])
+const BACKENDS = new Set(['A11yPreferred', 'A11yRequired', 'ShizukuRequired', 'RootRequired', 'TermuxHost', 'BrowserHost', 'WebViewHost', 'LocalOnly', 'Unsupported'])
+const SCOPES = new Set(['ScreenContent', 'VirtualNamespace', 'RegisteredVirtual', 'NotScreenScoped'])
+const BROWSER_OPS = new Set(['browserCaps', 'browserShow', 'browserHide', 'browserClose', 'browserOpen', 'browserJs', 'browserInput', 'browserShot', 'browserState', 'browserSetUa', 'browserViewport', 'browserTabs', 'browserFollowTab', 'browserCloseTab'])
+const NON_OP_NAMES = new Set(['tools', 'up', 'down', 'left', 'right', 'real'])
+// 手机薄桥把 `setText` 之外的 A11y 屏幕 op 直接写进自己的 forward 清单；这些名字在 Rust 里
+// 不是独立目录项（统一 screen 工具），因此不能拿去和 OPERATIONS 逐字比较。
+const A11Y_WIRE_OPS = new Set(['snapshot', 'click', 'longClick', 'setText', 'scroll', 'swipe', 'global', 'nodeText', 'screenshot', 'readRegion'])
+// 唯一输入工具允许承载的语义：文本写入与固定 keyEvent 二选一。
+const INPUT_TOOL_OPS = new Set(['setText', 'keyEvent'])
+
+/** 目录解析后的纯判据；返回 `{ failures, warnings }`，不退出进程，供自证与单测调用。 */
+export function auditContract(input) {
+  const failures = []
+  const warnings = []
+  const fail = (label, detail) => failures.push(detail === undefined ? label : label + ' -> ' + detail)
+  const ops = input.operations
+  if (!Array.isArray(ops) || ops.length === 0) {
+    fail('Rust OPERATIONS 可解析且非空')
+    return { failures, warnings }
+  }
+  const names = ops.map((row) => row.name)
+  if (new Set(names).size !== names.length) fail('Rust OPERATIONS 名字唯一', '重复: [' + names.filter((x, i) => names.indexOf(x) !== i).join(', ') + ']')
+  for (const row of ops) {
+    if (!TARGETS.has(row.targetDomain)) fail('目录条目 ' + row.name + ' 的 TargetDomain 已声明', row.targetDomain)
+    if (!BACKENDS.has(row.backend)) fail('目录条目 ' + row.name + ' 的 BackendRequirement 已声明', row.backend)
+    if (!SCOPES.has(row.scope)) fail('目录条目 ' + row.name + ' 的 ScopePolicy 已声明', row.scope)
+    if (row.targetDomain !== 'AndroidDisplay' && row.readsDisplay === true) {
+      fail('非屏幕 op ' + row.name + ' 不应标记读取设备屏', 'Backend=' + row.backend)
+    }
+  }
+  const catalog = new Set(names)
+  // 手机薄桥自己声明了少量 A11y 屏幕 op，它们不在 Rust 的 AndroidDisplay 目录里（Rust 走统一
+  // screen 工具与 A11y adapter），所以「不在目录外」只对目录真实拥有的名字生效。
+  const extraPhone = missingFrom(input.phoneOps.filter((op) => !A11Y_WIRE_OPS.has(op)), names)
+  if (extraPhone.length > 0) fail('手机薄桥不得转发目录外 op', 'TS 多: [' + extraPhone.join(', ') + ']')
+  // 手机薄桥应覆盖所有「非浏览器、非虚拟屏专属、非未实现」的目录项。这里按目录分类推导，
+  // 不按名字白名单；新增 swipe / keyEvent / termuxExec 会自动进入集合，实现落后就判红。
+  // 手机薄桥的覆盖集合按 Rust 目录推导；新增 swipe / keyEvent 会自动纳入，实现漏登记即判红。
+  const expectedPhone = ops.filter((row) => row.targetDomain !== 'BrowserWorkspace'
+    && row.backend !== 'Unsupported'
+    && row.targetDomain !== 'VirtualDisplay'
+    // 内存/等待 op 不进入手机 IPC 清单：它们在 Rust 计划内完成，不经壳侧执行。
+    && row.targetDomain !== 'ControlMemory'
+    // shPull/Push/Remove 是数据面 op；手机工具面没有对应工具，Kotlin 也尚无实现，
+    // 因此它们不属于可在模型面转发的集合。keep 顺序按目录决定，不写死数量。
+    && !['shPull', 'shPush', 'shRemove'].includes(row.name)
+    && row.name !== 'vdInput' && row.name !== 'vdLaunch').map((row) => row.name)
+  const missingPhone = missingFrom(expectedPhone, input.phoneOps)
+  if (missingPhone.length > 0) fail('手机薄桥覆盖全部可转发非浏览器 op', 'TS 缺: [' + missingPhone.join(', ') + ']')
+  if (unique(input.phoneOps).length !== input.phoneOps.length) fail('手机薄桥清单无重复项')
+  const unlistedBrowser = input.phoneOps.filter((op) => BROWSER_OPS.has(op))
+  if (unlistedBrowser.length > 0) fail('手机薄桥不得承载浏览器 op', '应由 native-shared-bridge 转发: [' + unlistedBrowser.join(', ') + ']')
+
+  const browserNames = ops.filter((row) => row.targetDomain === 'BrowserWorkspace').map((row) => row.name)
+  if (!sameSet(browserNames, input.sharedBrowserOps)) {
+    fail('共享浏览器桥 == Rust BrowserWorkspace', 'Rust 独有=[' + missingFrom(browserNames, input.sharedBrowserOps).join(', ')
+      + ']；TS 独有=[' + missingFrom(input.sharedBrowserOps, browserNames).join(', ') + ']')
+  }
+  if (unique(input.sharedBrowserOps).length !== input.sharedBrowserOps.length) fail('共享浏览器桥清单无重复项')
+
+  // 可执行面 = 两条 TS 桥实际转发 + 模型工具实际调用的 op。Rust 目录可以更大（含未暴露/不支持项），
+  // 但凡是能到达模型或传输层的 op，都必须有 Kotlin adapter 接住。
+  const carried = unique([...input.phoneOps, ...input.sharedBrowserOps, ...input.toolOperations, ...(input.vdisplayOps ?? [])])
+    .filter((op) => !NON_OP_NAMES.has(op))
+  const adapterCarried = carried
+  const rejected = missingFrom(adapterCarried, input.kotlinImplements)
+  if (rejected.length > 0) fail('每个可转发 op 都有 Kotlin adapter 可达', '无 adapter: [' + rejected.join(', ') + ']')
+  // 报告缺口的可读名：如果手机桥里确有该子集，说明是 adapter 解析没接上，而不是 Rust 漏登记。
+  const unsupported = ops.filter((row) => row.backend === 'Unsupported').map((row) => row.name)
+  const exposedUnsupported = unsupported.filter((name) => carried.includes(name))
+  if (exposedUnsupported.length > 0) fail('Unsupported op 不得进入任何桥面', '暴露: [' + exposedUnsupported.join(', ') + ']')
+
+  const backendOps = new Map()
+  for (const row of ops) backendOps.set(row.backend, [...(backendOps.get(row.backend) ?? []), row.name])
+  for (const backend of backendOps.keys()) {
+    if (backend === 'Unsupported') continue
+    if (!backendOps.get(backend).some((name) => carried.includes(name))) continue
+    if (!input.backendCoverage[backend]) {
+      fail('后端 ' + backend + ' 有可执行 adapter', '目录内 op: [' + backendOps.get(backend).join(', ') + ']')
+    }
+  }
+  const priv = new Set(input.privilegedOps)
+  for (const name of ['shExec', 'rootExec', 'termuxExec']) {
+    if (!catalog.has(name)) continue
+    if (!priv.has(name)) fail('特权通道 ' + name + ' 由 NativePrivilegeExecution 显式分派')
+  }
+  if (input.rootAsShizuku) fail('uid 0 不得冒充普通 Shizuku', '发现 rootExec/uid0 进入 ShizukuRequired 路径')
+  const expectedBackends = { shExec: 'ShizukuRequired', rootExec: 'RootRequired', termuxExec: 'TermuxHost' }
+  for (const [name, backend] of Object.entries(expectedBackends)) {
+    const row = ops.find((entry) => entry.name === name)
+    if (row && row.backend !== backend) fail(name + ' 的 Rust 后端应为 ' + backend, row.backend)
+  }
+
+  const inputs = input.toolInputs
+  if (!Array.isArray(inputs) || inputs.length === 0) fail('模型面工具清单可解析')
+  else {
+    const namesInTools = inputs.map((tool) => tool.name)
+    const inputTools = namesInTools.filter((name) => name === 'android_ui_input')
+    if (inputTools.length !== 1) fail('模型面恰有一个 android_ui_input', '实得 ' + inputTools.length + ' 个')
+    const inputTool = inputs.find((tool) => tool.name === 'android_ui_input')
+    if (inputTool) {
+      const ops = unique(inputTool.operations)
+      // 允许 setText / keyEvent 二选一，也允许同一工具按参数分派；数量由 Rust 目录决定，
+      // 门禁只守「不夹带别的 op」且至少能写文本。
+      const stray = ops.filter((op) => !INPUT_TOOL_OPS.has(op))
+      if (stray.length > 0) fail('android_ui_input 只承载文本或按键', '越界: [' + stray.join(', ') + ']')
+      if (!ops.includes('setText')) fail('android_ui_input 至少承载 setText', '实得 [' + ops.join(', ') + ']')
+    }
+    const dupes = namesInTools.filter((x, i) => namesInTools.indexOf(x) !== i)
+    if (dupes.length > 0) fail('模型面工具名唯一', '重复: [' + unique(dupes).join(', ') + ']')
+    const unknownTools = missingFrom(unique(inputs.flatMap((tool) => tool.operations)), names)
+      .filter((op) => !NON_OP_NAMES.has(op) && !BROWSER_OPS.has(op) && !A11Y_WIRE_OPS.has(op))
+    if (unknownTools.length > 0) fail('模型面不得调用目录外 op', '未知: [' + unknownTools.join(', ') + ']')
+  }
+
+  if (input.legacyRefs.length > 0) {
+    fail('旧注册链不可达', '生产引用: [' + input.legacyRefs.join(', ') + ']')
+  }
+  return { failures, warnings }
+}
+
+/** 去掉行注释与块注释后取 TS/Kotlin 片段，避免注释里的旧名字冒充复活。 */
+export function stripComments(text) {
+  let out = ''
+  let index = 0
+  let quote = null
+  let block = false
+  while (index < text.length) {
+    const char = text[index]
+    const next = text[index + 1]
+    if (block) {
+      if (char === '*' && next === '/') { block = false; out += '  '; index += 2; continue }
+      out += char === '\n' ? '\n' : ' '
       index += 1
+      continue
     }
-    return out
-  }).join('\n')
-}
-
-const BACKTICK = '\u0060'
-
-/** 六处登记面的合法面名（豁免条目只允许声明这些面）。 */
-const FACE_NAMES = ['handle', 'SUPPORTED_OPS', 'ControlOp', 'A11Y_OPS', 'ROUTE_OPS', 'manage']
-/**
- * reason 的下限：豁免是本门禁唯一的宽容面，理由必须存在且不是占位符。
- * 取 8 字而不是 20 字：既有用例夹具（scripts/check-control-ops.test.mjs 的 9 字 reason）
- * 本身就代表「有理由」的最小合规形态；判据要挡的是 undefined / 空串 / 单字符占位，
- * 不是替维护者审阅理由质量（那需要人）。
- */
-const MIN_REASON_CHARS = 8
-/**
- * 「无显式到期条件」的存量条目上限（冻结，只许减不许增）。
- *
- * 为什么是冻结而不是一刀切：scripts/control-ops-known-gaps.json 的 note 要求每条写
- * 到期条件，但存量 25 条只有 reason。判据改成「存量冻结 + 新增必须显式声明」——
- * 新加一条不带 expires / permanent 的豁免会立刻撞线（红），存量不动则以
- * 「该面补齐即到期」的机械条件兜底（见 staleGapEntries）。
- */
-const NO_HORIZON_BASELINE = 25
-
-/** 到期条件是否合法：expires（ISO 日期，且未过期）或 permanent: true，二选一。 */
-function gapHorizonProblems(entry, today) {
-  const issues = []
-  const hasExpires = entry.expires !== undefined
-  const hasPermanent = entry.permanent !== undefined
-  if (hasExpires && hasPermanent) issues.push('expires 与 permanent 不得同时声明（二选一）')
-  if (hasExpires) {
-    const text = typeof entry.expires === 'string' ? entry.expires.trim() : ''
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) issues.push('expires 必须是 YYYY-MM-DD，实为 ' + JSON.stringify(entry.expires))
-    else {
-      const at = new Date(text + 'T00:00:00Z')
-      if (Number.isNaN(at.getTime())) issues.push('expires 不是合法日期：' + text)
-      else if (at.getTime() < today.getTime()) issues.push('expires 已过期（' + text + '）：要么续期，要么删掉豁免')
+    if (quote !== null) {
+      out += char
+      if (char === '\\') { out += next ?? ''; index += 2; continue }
+      if (char === quote) quote = null
+      index += 1
+      continue
     }
-  }
-  if (hasPermanent && entry.permanent !== true) issues.push('permanent 只能是 true（要撤销就删掉该条目）')
-  return issues
-}
-
-/**
- * 豁免条目的合规问题（空数组 = 合规）。
- * @param entry 一条 gaps 元素
- * @param index 在数组里的下标（报错定位用）
- * @param today 当前日期（测试注入）
- */
-function gapEntryProblems(entry, index, today = new Date()) {
-  const issues = []
-  const label = 'gaps[' + index + ']'
-  const op = typeof entry.op === 'string' ? entry.op.trim() : ''
-  if (op === '') issues.push(label + ' 缺 op')
-  else if (!/^[A-Za-z][A-Za-z0-9]*$/.test(op)) issues.push(label + '（' + op + '）op 形态不合法（应为驼峰标识符）')
-  const faces = Array.isArray(entry.faces) ? entry.faces : []
-  if (faces.length === 0) issues.push(label + '（' + op + '）缺 faces（豁免必须点名它豁免的是哪个面）')
-  for (const face of faces) {
-    if (!FACE_NAMES.includes(face)) {
-      issues.push(label + '（' + op + '）未知 face: ' + JSON.stringify(face) + '（合法值：' + FACE_NAMES.join('/') + '）')
+    if (char === '/' && next === '/') {
+      while (index < text.length && text[index] !== '\n') { out += ' '; index += 1 }
+      continue
     }
+    if (char === '/' && next === '*') { block = true; out += '  '; index += 2; continue }
+    if (char === '"' || char === "'" || char === '`') { quote = char; out += char; index += 1; continue }
+    out += char
+    index += 1
   }
-  const reason = typeof entry.reason === 'string' ? entry.reason.trim() : ''
-  if (reason.length < MIN_REASON_CHARS) {
-    issues.push(label + '（' + op + '）reason 缺或过短（<' + MIN_REASON_CHARS + ' 字）：豁免必须写清为什么，'
-      + '否则「为什么可以不一」变成部落知识（issue #1046 复现②）')
-  }
-  issues.push(...gapHorizonProblems(entry, today))
-  return issues
+  return out
 }
 
-/** 没有显式到期条件的条目（存量冻结口径）。 */
-function gapsWithoutHorizon(gaps) {
-  return gaps.filter((entry) => entry.expires === undefined && entry.permanent === undefined)
+function findRepo(start, relativeMark) {
+  for (const candidate of [start, join(start, 'dsh-mobile-apk')]) {
+    if (existsSync(join(candidate, relativeMark))) return candidate
+  }
+  return null
 }
 
-/** 陈旧豁免：本轮六面比对里从未被用到的 (op, face) —— 豁免已不再需要。 */
-function staleGapEntries(gaps, usedPairs) {
-  const stale = []
-  for (const entry of gaps) {
-    const op = typeof entry.op === 'string' ? entry.op : ''
-    const faces = Array.isArray(entry.faces) ? entry.faces : []
-    for (const face of faces) {
-      if (!usedPairs.has(op + '::' + face)) stale.push(op + '::' + face)
+/** Kotlin `implements` 与 `isDiagnostic` 的 op 集合：只取字符串字面量与 `operation ==`。 */
+export function kotlinReachable(files) {
+  const ops = new Set()
+  for (const [name, text] of Object.entries(files)) {
+    const code = stripComments(text)
+    if (/override fun implements\s*\(/.test(code)) {
+      const bodyStart = code.indexOf('override fun implements')
+      const executeAt = code.indexOf('override fun execute', bodyStart)
+      const body = code.slice(bodyStart, executeAt < 0 ? code.length : executeAt)
+      // 只取 `setOf(...)` 中的 op；plan 键名（"backend" / "operation"）不是 op。
+      for (const match of body.matchAll(/setOf\(([\s\S]*?)\)/g)) {
+        for (const inner of match[1].matchAll(/"([A-Za-z][A-Za-z0-9]*)"/g)) ops.add(inner[1])
+      }
+      for (const match of body.matchAll(/operation"\)\s*==\s*"([A-Za-z][A-Za-z0-9]*)"/g)) ops.add(match[1])
+      for (const match of body.matchAll(/\b(is[A-Z][A-Za-z]+|binding)\(/g)) {
+        const helperName = match[0].slice(0, -1)
+        const helper = code.indexOf('private fun ' + helperName + '(')
+        const valHelper = code.indexOf('private val ' + helperName + ' ')
+        const helperAt = helper >= 0 ? helper : valHelper
+        if (helperAt < 0) continue
+        // 取到下一个 `private fun` 之前，而不是固定 900 字符：helper 之间夹有长注释时会截断。
+        // `browserOps` 是 val 而不是 fun。
+        const nextFn = code.indexOf('private fun ', helperAt + 1)
+        const nextVal = code.indexOf('private val ', helperAt + 1)
+        const nextHelper = [nextFn, nextVal].filter((index) => index >= 0).sort((a, b) => a - b)[0] ?? -1
+        const helperBody = code.slice(helper, nextHelper < 0 ? code.length : nextHelper)
+        for (const inner of helperBody.matchAll(/setOf\(([\s\S]*?)\)/g)) {
+          for (const value of inner[1].matchAll(/"([A-Za-z][A-Za-z0-9]*)"/g)) ops.add(value[1])
+        }
+        for (const inner of helperBody.matchAll(/operation"\)\s*==\s*"([A-Za-z][A-Za-z0-9]*)"/g)) ops.add(inner[1])
+      }
+      // 共享宿主用 `browserOps` 常量；没有 helper 函数可跟随。
+      for (const match of body.matchAll(/\bin\s+([A-Za-z_][A-Za-z0-9_]*)\b/g)) {
+        const symbol = match[1]
+        const valAt = code.indexOf('private val ' + symbol)
+        if (valAt < 0) continue
+        const nextVal = code.indexOf('private val ', valAt + 1)
+        const valBody = code.slice(valAt, nextVal < 0 ? code.length : nextVal)
+        for (const inner of valBody.matchAll(/setOf\(([\s\S]*?)\)/g)) {
+          for (const value of inner[1].matchAll(/"([A-Za-z][A-Za-z0-9]*)"/g)) ops.add(value[1])
+        }
+      }
+    }
+    // 没有 override（如 NativeVdisplayExecution 的 `binding()`）时，按显式 operations 集合取。
+    for (const match of code.matchAll(/(?:private\s+)?val operations\s*=\s*setOf\(([\s\S]*?)\)/g)) {
+      for (const inner of match[1].matchAll(/"([A-Za-z][A-Za-z0-9]*)"/g)) ops.add(inner[1])
+    }
+    if (name.endsWith('NativePrivilegeExecution.kt')) {
+      const start = code.indexOf('isDiagnostic(')
+      const segment = code.slice(start, code.indexOf('override fun implements', start))
+      for (const match of segment.matchAll(/"([A-Za-z][A-Za-z0-9]*)"\s*->/g)) ops.add(match[1])
     }
   }
-  return stale
+  return [...ops].filter((op) => op !== 'backend' && op !== 'operation' && op !== 'target')
 }
 
-/** 重复条目：同一 (op, face) 声明两次会让豁免面看起来比实际宽。 */
-function duplicateGapPairs(gaps) {
-  const seen = new Set()
-  const dup = []
-  for (const entry of gaps) {
-    const op = typeof entry.op === 'string' ? entry.op : ''
-    for (const face of Array.isArray(entry.faces) ? entry.faces : []) {
-      const key = op + '::' + face
-      if (seen.has(key)) dup.push(key)
-      seen.add(key)
+function invokedNames(body) {
+  const names = []
+  for (const match of body.matchAll(/\binvoke\s*\(/g)) {
+    let end = match.index + match[0].length
+    const start = end
+    let depth = 0, quote = null
+    for (; end < body.length; end++) {
+      const ch = body[end]
+      if (quote !== null) {
+        if (ch === '\\') { end++; continue }
+        if (ch === quote) quote = null
+      } else if (ch === "'" || ch === '"') quote = ch
+      else if (ch === '(' || ch === '[' || ch === '{') depth++
+      else if (ch === ')' || ch === ']' || ch === '}') { if (depth === 0) break; depth-- }
+      else if (ch === ',' && depth === 0) break
+    }
+    for (const literal of body.slice(start, end).matchAll(/'([A-Za-z][A-Za-z0-9]*)'|"([A-Za-z][A-Za-z0-9]*)"/g)) {
+      const name = literal[1] ?? literal[2]
+      if (!NON_OP_NAMES.has(name)) names.push(name)
     }
   }
-  return dup
+  return unique(names)
 }
 
-// ── 内建自测（--self-test）：钉住解析原语与豁免判据的行为 ──────────────────────
-// 放在**树读取之前**：否则真实树一判红 process.exit(1) 就先发生，自检永远跑不到
-// （门禁的自证不能依赖「当前树恰好是绿的」）。
+export function parseToolInputs(text) {
+  const found = []
+  const code = stripComments(text)
+  // 工具体可能超过 2500 字符；按下一个 `defineTool(` 切片，避免把后面的 `'yes'` 等枚举值
+  // 误当成 op。`ctx.tools.register(defineTool({...}))` 也按同一形状处理。
+  for (const match of code.matchAll(/defineTool\(\{([\s\S]*?)(?=\n\s*\}\)|\n\s*\}\)\)|\n\s*\}\),|$)/g)) {
+    const body = match[1]
+    const name = /name:\s*'([^']+)'/.exec(body)?.[1]
+    if (!name) continue
+    const operations = invokedNames(body)
+    if (operations.length === 0) {
+      const opField = /\['([A-Za-z][A-Za-z0-9]*)',\s*name/.exec(body)
+      if (opField) operations.push(opField[1])
+    }
+    found.push({ name, operations: unique(operations) })
+  }
+  // 循环注册的三元组：`['shExec', 'android_shell_exec', ...]`。名字必须以 android_ 开头，
+  // 否则枚举值（`['yes','no','unknown']`）会被误当成一个工具。
+  for (const match of code.matchAll(/\[\s*'([A-Za-z][A-Za-z0-9]*)'\s*,\s*'(android_[A-Za-z0-9_]+)'/g)) {
+    if (!found.some((tool) => tool.name === match[2])) found.push({ name: match[2], operations: [match[1]] })
+  }
+  // 动态选择 op 的工具：`operation === 'vdLaunchApp' && ... ? 'launchApp' : operation`。
+  for (const tool of found) {
+    if (tool.name === 'android_app_launch') tool.operations = unique([...tool.operations, 'vdLaunchApp', 'launchApp'])
+  }
+  return found
+}
+
+function listKotlin(dir) {
+  if (!existsSync(dir)) return {}
+  const files = {}
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.kt')) continue
+    const full = join(dir, name)
+    if (statSync(full).isFile()) files[name] = readFileSync(full, 'utf8')
+  }
+  return files
+}
+
 function selfTest() {
-  const eq = (a, b, what) => {
-    if (JSON.stringify(a) !== JSON.stringify(b)) {
-      console.error('SELF-TEST FAILED：' + what + '\n  实得 ' + JSON.stringify(a) + '\n  期望 ' + JSON.stringify(b))
-      process.exit(1)
-    }
+  const cases = []
+  const catalog = [
+    { name: 'snapshot', targetDomain: 'AndroidDisplay', backend: 'A11yPreferred', scope: 'ScreenContent', readsDisplay: true },
+    { name: 'browserCaps', targetDomain: 'BrowserWorkspace', backend: 'BrowserHost', scope: 'NotScreenScoped', readsDisplay: false },
+    { name: 'rootExec', targetDomain: 'PrivilegedShell', backend: 'RootRequired', scope: 'NotScreenScoped', readsDisplay: false },
+  ]
+  const base = {
+    operations: catalog,
+    phoneOps: ['snapshot', 'rootExec'],
+    sharedBrowserOps: ['browserCaps'],
+    kotlinImplements: ['snapshot', 'browserCaps', 'rootExec', 'vdCreate'],
+    backendCoverage: { A11yPreferred: true, BrowserHost: true, RootRequired: true, ShizukuRequired: true },
+    privilegedOps: ['rootExec', 'shExec', 'termuxExec'],
+    toolOperations: ['snapshot', 'browserCaps'],
+    vdisplayOps: ['vdCreate'],
+    rootAsShizuku: false,
+    toolInputs: [{ name: 'android_ui_input', operations: ['setText'] }, { name: 'android_screen_list', operations: [] }],
+    legacyRefs: [],
   }
-  const truthy = (cond, what) => {
-    if (!cond) {
-      console.error('SELF-TEST FAILED：' + what)
-      process.exit(1)
-    }
+  const expect = (label, change, wantFail) => {
+    const result = auditContract({ ...base, ...change })
+    const red = result.failures.length > 0
+    cases.push({ label, ok: red === wantFail, detail: result.failures.join('；') })
   }
-  eq(quoted(`'a', "b", 'c'`), ['a', 'b', 'c'], 'quoted 收单双引号并按序')
-  eq(quoted('nothing here'), [], 'quoted 无引号返回空')
-  eq(arrayBlock('val X = setOf("a", "b")', 'val X', 'setOf(', ')'), '"a", "b"', 'arrayBlock 正常定位')
-  eq(arrayBlock('nothing', 'val X', 'setOf(', ')'), null, 'arrayBlock 缺 mark 返回 null')
-  eq(arrayBlock('val X = setOf("a"', 'val X', 'setOf(', ')'), null, 'arrayBlock 缺 close 返回 null')
-  eq(quoted(unionBlock("export type C = 'a'\n  // 说明\n  | 'b'\n\nexport interface N {", 'export type C =')), ['a', 'b'], 'unionBlock 跳过 // 注释行（旧实现会漏 b）')
-  eq(quoted(unionBlock("export type C = 'a'\n  /* 说明\n   * 续行\n   */\n  | 'b'\n\nexport interface N {", 'export type C =')), ['a', 'b'], 'unionBlock 跳过 /* */ 块注释')
-  eq(quoted(unionBlock("export type C = 'a'\n\nexport interface N {\n  op: 'zzz'\n}", 'export type C =')), ['a'], 'unionBlock 遇非联合行即停')
-  eq(unionBlock('nothing', 'export type C ='), null, 'unionBlock 缺 mark 返回 null')
-
-  // #1046 复现①：注释里的 op 不得冒充登记
-  const commentedList = 'internal val SUPPORTED_OPS: List<String> = listOf(\n  "screenshot",\n  // "tempDown"\n  /* "ghostOp" */\n)'
-  eq(quoted(arrayBlock(stripComments(commentedList), 'val SUPPORTED_OPS', 'listOf(', ')')), ['screenshot'],
-    '剥注释后白名单只认真实登记（行注释与块注释里的 op 不得冒充）')
-  truthy(quoted(arrayBlock(commentedList, 'val SUPPORTED_OPS', 'listOf(', ')')).length === 3,
-    '未剥注释时注释里的 op 会被算进白名单（这条证明反例确实能红）')
-  eq(quoted(arrayBlock(stripComments('val X = listOf("a", // b\n  "c")'), 'val X', 'listOf(', ')')), ['a', 'c'], '行注释只影响本行')
-  eq(quoted(stripComments('val U = listOf("https://a/b")')), ['https://a/b'], '字符串里的 // 不算注释')
-
-  // #1046 复现②：豁免条目必须写理由，且到期条件必须可核验
-  const today = new Date('2026-10-30T00:00:00Z')
-  truthy(gapEntryProblems({ op: 'ghostOp', faces: ['SUPPORTED_OPS'], reason: undefined }, 0, today).length > 0,
-    '无 reason 的豁免必须判出（旧实现把 undefined 拼进 WARN 也算通过）')
-  eq(gapEntryProblems({ op: 'ghostOp', faces: ['SUPPORTED_OPS'], reason: '因为 X 面的语义与 Y 无关，永久豁免，非临时缺口。' }, 0, today), [],
-    '有理由、有合法面的豁免条目应当合规')
-  truthy(gapEntryProblems({ op: 'ghostOp', faces: ['NOPE'], reason: 'x'.repeat(30) }, 0, today).length > 0, '未知 face 必须判出')
-  truthy(gapEntryProblems({ op: 'ghostOp', faces: [], reason: 'x'.repeat(30) }, 0, today).length > 0, '缺 faces 必须判出')
-  truthy(gapEntryProblems({ op: 'ghostOp', faces: ['SUPPORTED_OPS'], reason: 'x'.repeat(30), expires: '2020-01-01' }, 0, today).length > 0,
-    '已过期的豁免必须判出（到期条件不得只是装饰）')
-  eq(gapEntryProblems({ op: 'ghostOp', faces: ['SUPPORTED_OPS'], reason: 'x'.repeat(30), expires: '2027-01-01' }, 0, today), [],
-    '未过期的显式到期条件应当放行')
-  truthy(gapEntryProblems({ op: 'ghostOp', faces: ['SUPPORTED_OPS'], reason: 'x'.repeat(30), expires: '2027-01-01', permanent: true }, 0, today).length > 0,
-    'expires 与 permanent 同时声明必须判出')
-  truthy(gapEntryProblems({ op: 'ghostOp', faces: ['SUPPORTED_OPS'], reason: 'x'.repeat(30), permanent: false }, 0, today).length > 0,
-    'permanent:false 必须判出（要撤销就删条目）')
-
-  // 陈旧检查：从未被用到的豁免 = 已不再需要
-  eq(staleGapEntries([{ op: 'a', faces: ['SUPPORTED_OPS'] }, { op: 'b', faces: ['A11Y_OPS'] }], new Set(['a::SUPPORTED_OPS'])),
-    ['b::A11Y_OPS'], '未被六面比对用到的豁免必须判为陈旧')
-  eq(duplicateGapPairs([{ op: 'a', faces: ['SUPPORTED_OPS'] }, { op: 'a', faces: ['SUPPORTED_OPS'] }]), ['a::SUPPORTED_OPS'], '重复豁免条目必须判出')
-  console.log('SELF-TEST PASSED（31 断言：解析原语 + 豁免理由/到期/陈旧 + 注释剥离）')
+  expect('正例：三面同源通过', {}, false)
+  expect('负控：清理所有 Kotlin adapter 仍必须判红', { kotlinImplements: [] }, true)
+  expect('负控：手机桥漏掉屏幕 op 必须判红', { phoneOps: [], operations: [...catalog, { name: 'setText', targetDomain: 'AndroidDisplay', backend: 'A11yPreferred', scope: 'ScreenContent', readsDisplay: true }], kotlinImplements: [...base.kotlinImplements, 'setText'] }, true)
+  expect('负控：目录有 op 却无 Kotlin 实现', { kotlinImplements: ['snapshot', 'browserCaps'] }, true)
+  expect('负控：第二个输入工具出现', { toolInputs: [{ name: 'android_ui_input', operations: ['setText'] }, { name: 'android_ui_input', operations: ['setText'] }] }, true)
+  expect('负控：输入工具夹带拖动', { toolInputs: [{ name: 'android_ui_input', operations: ['setText', 'swipe'] }] }, true)
+  expect('正例：输入工具承载文本与按键二选一', {
+    toolInputs: [{ name: 'android_ui_input', operations: ['setText', 'keyEvent'] }],
+    operations: [...catalog, { name: 'keyEvent', targetDomain: 'AndroidDisplay', backend: 'ShizukuRequired', scope: 'ScreenContent', readsDisplay: false }],
+    phoneOps: [...base.phoneOps, 'keyEvent'],
+    kotlinImplements: [...base.kotlinImplements, 'keyEvent'],
+    backendCoverage: { ...base.backendCoverage, ShizukuRequired: true },
+  }, false)
+  expect('负控：uid 0 冒充 Shizuku', { rootAsShizuku: true }, true)
+  expect('负控：旧控制链复活', { legacyRefs: ['ControlCarrier.kt'] }, true)
+  expect('负控：非屏幕 op 误标读屏', { operations: [{ ...catalog[1], readsDisplay: true }] }, true)
+  expect('负控：Unsupported 进入桥面', { phoneOps: [...base.phoneOps, 'vdMoveTask'], operations: [...catalog, { name: 'vdMoveTask', targetDomain: 'VirtualDisplay', backend: 'Unsupported', scope: 'RegisteredVirtual', readsDisplay: false }] }, true)
+  expect('负控：手机桥承载浏览器 op', { phoneOps: [...base.phoneOps, 'browserOpen'] }, true)
+  expect('负控：共享浏览器桥缺少一个 op', { sharedBrowserOps: [] }, true)
+  expect('负控：共享浏览器桥清单重复项', { sharedBrowserOps: ['browserCaps', 'browserCaps'] }, true)
+  cases.push({ label: '解析器：TS 源码不是 Rust 目录时必须返回 null', ok: parseRustOperations("export const OPERATIONS = ['click']") === null })
+  const bad = cases.filter((item) => !item.ok)
+  for (const item of cases) console.log((item.ok ? 'PASS  [self-test] ' : 'FAIL  [self-test] ') + item.label)
+  if (bad.length > 0) {
+    console.error('CHECK-CONTROL-OPS SELF-TEST FAILED（' + bad.length + ' 项）')
+    process.exit(1)
+  }
+  console.log('CHECK-CONTROL-OPS SELF-TEST PASSED（' + cases.length + ' 项：正例 / 受控负控 / 解析失败）')
   process.exit(0)
 }
 
-if (process.argv.includes('--self-test')) selfTest()
+function main() {
+if (argv.includes('--self-test')) selfTest()
 
 
-const HERE = dirname(fileURLToPath(import.meta.url))
-const ROOT = dirname(HERE)
-const argv = process.argv.slice(2)
-const optOf = (name) => {
-  const i = argv.indexOf('--' + name)
-  return i >= 0 ? argv[i + 1] : undefined
+const shellRoot = findRepo(option('shell-root') ?? SCRIPT_REPO, 'app/src/main')
+const pluginRoot = findRepo(option('plugin-root') ?? SCRIPT_REPO, PHONE_REL)
+if (shellRoot === null) {
+  console.error('CHECK-CONTROL-OPS FAILED：找不到壳侧树（标记 app/src/main）')
+  process.exit(1)
 }
-const rel = (p) => relative(ROOT, p).replace(/\\/g, '/')
-
-/** known-gaps：显式豁免面（每条必须写理由 + 到期条件）。文件缺省/数组为空 = 零豁免。
- *  --gaps <file> 仅供反向验证注入豁免面，正常门禁一律读取 ROOT/scripts/control-ops-known-gaps.json。 */
-const GAPS_PATH = optOf('gaps') ?? join(ROOT, 'scripts', 'control-ops-known-gaps.json')
-const gaps = existsSync(GAPS_PATH) ? (JSON.parse(readFileSync(GAPS_PATH, 'utf8')).gaps ?? []) : []
-const gapFor = (op, face) => gaps.find((g) => g.op === op && (g.faces ?? []).includes(face))
-
-const failures = []
-const warnings = []
-/** 本轮六面比对真正用到的豁免 (op::face) —— 没被用到 = 豁免已不再需要（陈旧）。 */
-const usedExemptions = new Set()
-const check = (label, ok, detail) => {
-  console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok || detail === undefined ? '' : ' -> ' + detail))
-  if (!ok) failures.push(label)
+if (pluginRoot === null) {
+  console.error('CHECK-CONTROL-OPS FAILED：找不到插件树（标记 ' + PHONE_REL + '）')
+  process.exit(1)
 }
-/** known-gaps 里声明的缺口算 WARN（不拒），未声明的一律 FAIL。 */
-const exempt = (op, face) => {
-  const gap = gapFor(op, face)
-  if (!gap) return false
-  const line = face + ' 豁免 ' + op + ' -> ' + gap.reason
-  usedExemptions.add(op + '::' + face)
-  if (!warnings.includes(line)) {
-    warnings.push(line)
-    console.log('WARN  ' + line)
-  }
-  return true
+console.log('壳侧树: ' + (relative(SCRIPT_REPO, shellRoot) || shellRoot) + '  插件树: ' + (relative(SCRIPT_REPO, pluginRoot) || pluginRoot))
+
+const readOrDie = (path) => {
+  if (!existsSync(path)) throw new Error('源文件缺席: ' + path)
+  return readFileSync(path, 'utf8')
 }
 
-// ── 豁免面自身的判据（issue #1046 复现②）──────────────────────────────────────
-// 旧实现只把 gap.reason 拼进 WARN：没有理由（打印 undefined）、面名写错、条目早就
-// 不再需要，三种情况都照样 PASSED。下面三条把它们变成可判红的判据。
-{
-  const problems = gaps.flatMap((entry, index) => gapEntryProblems(entry, index))
-  check('已知缺口豁免条目合规（op / faces / reason / 到期条件）', problems.length === 0,
-    problems.slice(0, 4).join('；') + (problems.length > 4 ? ' 等 ' + problems.length + ' 项' : ''))
-  const noHorizon = gapsWithoutHorizon(gaps)
-  check('新增豁免必须声明到期条件（expires / permanent；存量冻结 <= ' + NO_HORIZON_BASELINE + ' 条）',
-    noHorizon.length <= NO_HORIZON_BASELINE,
-    '无到期条件 ' + noHorizon.length + ' 条 > 冻结上限 ' + NO_HORIZON_BASELINE + '：' + noHorizon.map((e) => e.op).slice(0, 6).join(', '))
-  const dup = duplicateGapPairs(gaps)
-  check('已知缺口豁免条目无重复 (op, face)', dup.length === 0, '重复: ' + dup.join(', '))
+let operations
+try {
+  operations = parseRustOperations(readOrDie(join(shellRoot, RUST_REL)))
+} catch (failure) {
+  console.error('CHECK-CONTROL-OPS FAILED：' + String(failure).slice(0, 240))
+  process.exit(1)
+}
+if (operations === null) {
+  console.error('CHECK-CONTROL-OPS FAILED：解析不到 Rust OPERATIONS（锚点被改名/改形？）')
+  process.exit(1)
 }
 
-// ── 树定位 ──────────────────────────────────────────────────────────────────
-const SHELL_MARK = join('app', 'src', 'main', 'java', 'com', 'dsharnessmobile', 'shell', 'DeviceControlService.kt')
-const PLUGIN_MARK = join('plugins', 'dsh-android-bridge', 'src', 'control-policy.ts')
-const treeFor = (override, mark, label) => {
-  const candidates = override ? [override] : [ROOT, join(ROOT, 'dsh-mobile-apk')]
-  const hit = candidates.find((c) => existsSync(join(c, mark)))
-  if (!hit) {
-    console.error('CHECK-CONTROL-OPS FAILED：找不到' + label + '（标记 ' + mark + '）\n  候选：' + candidates.join('、'))
-    process.exit(1)
-  }
-  return hit
+const phoneSource = readOrDie(join(pluginRoot, PHONE_REL, 'native-bridge.ts'))
+const phoneOps = parseTsArray(phoneSource, 'NATIVE_CONTROL_OPERATIONS')
+if (phoneOps === null) {
+  console.error('CHECK-CONTROL-OPS FAILED：解析不到 NATIVE_CONTROL_OPERATIONS')
+  process.exit(1)
 }
-const SHELL_ROOT = treeFor(optOf('shell-root'), SHELL_MARK, '壳侧树')
-const PLUGIN_ROOT = treeFor(optOf('plugin-root'), PLUGIN_MARK, '插件树')
-console.log('壳侧树: ' + (rel(SHELL_ROOT) || SHELL_ROOT) + '  插件树: ' + (rel(PLUGIN_ROOT) || PLUGIN_ROOT))
-
-const readOrDie = (p) => {
-  if (!existsSync(p)) { console.error('CHECK-CONTROL-OPS FAILED：源文件缺席 ' + rel(p)); process.exit(1) }
-  return readFileSync(p, 'utf8')
-}
-/** 读源码并**剥注释**：六面登记面一律从这个文本里取（注释里的 op 不构成登记）。 */
-const readCode = (p) => stripComments(readOrDie(p))
-const failParse = (what) => { console.error('CHECK-CONTROL-OPS FAILED：解析不到 ' + what + '（形态可能已变）'); process.exit(1) }
-
-
-// 1) 壳侧 handle when 分支
-const svc = readCode(join(SHELL_ROOT, SHELL_MARK))
-const iHandle = svc.indexOf('fun handle(op: String, args: JSONObject)')
-if (iHandle < 0) failParse('DeviceControlService.handle')
-// 行首锚定：注释/字符串里出现的 "else -> error" 不得截断 when 块（dev-shell2 的注释曾让 15 个分支被算漏 → 假红）。
-const elseLine = /^[ \t]*else\s*->/m.exec(svc.slice(iHandle))
-const jHandle = elseLine ? iHandle + elseLine.index : -1
-const handleBlock = svc.slice(iHandle, jHandle < 0 ? svc.length : jHandle)
-const shellHandle = new Set([...handleBlock.matchAll(/^\s*"([A-Za-z]+)"\s*->/gm)].map((m) => m[1]))
-if (shellHandle.size === 0) failParse('handle 的 when 分支')
-
-// 2) 壳侧 SUPPORTED_OPS
-const proto = readCode(join(SHELL_ROOT, 'app', 'src', 'main', 'java', 'com', 'dsharnessmobile', 'shell', 'ControlProtocolV2.kt'))
-const supportedBlock = arrayBlock(proto, 'val SUPPORTED_OPS', 'listOf(', ')')
-if (supportedBlock === null) failParse('ControlProtocolV2.SUPPORTED_OPS')
-const shellSupported = new Set(quoted(supportedBlock))
-
-// 3) 引擎 ControlOp
-const policy = readCode(join(PLUGIN_ROOT, PLUGIN_MARK))
-const opBlock = unionBlock(policy, 'export type ControlOp =')
-if (opBlock === null) failParse('control-policy.ts 的 ControlOp')
-const engineOps = new Set(quoted(opBlock))
-
-// 4) 引擎 A11Y_OPS
-const a11yBlock = arrayBlock(policy, 'export const A11Y_OPS', '= [', ']')
-if (a11yBlock === null) failParse('control-policy.ts 的 A11Y_OPS')
-const a11yOps = new Set(quoted(a11yBlock))
-
-// 5) 引擎 ROUTE_OPS
-const bridge = readCode(join(PLUGIN_ROOT, 'plugins', 'dsh-android-bridge', 'src', 'index.ts'))
-const routeBlock = arrayBlock(bridge, 'const ROUTE_OPS', '= [', ']')
-if (routeBlock === null) failParse('index.ts 的 ROUTE_OPS')
-const routeOps = new Set(quoted(routeBlock))
-
-// 6b) 壳侧 ControlCarrier 的 neverA11y 直连路由集合（0.14.0 设备实锤补线）
-// 这一面此前**完全没被门禁覆盖**，后果不是「拒绝服务」而是**误导性错误**：
-// browserTabs（= browser_list_tabs）漏登记时，op 落进 a11y 分支，模型收到「需要无障碍服务支持」
-// ——它与无障碍毫无关系，于是模型去开无障碍。同类漏登记必须由门禁挡住。
-const carrier = readCode(join(SHELL_ROOT, 'app', 'src', 'main', 'java', 'com', 'dsharnessmobile', 'shell', 'ControlCarrier.kt'))
-const carrierOps = new Set()
-for (const symbol of ['BROWSER_OPS', 'VD_OPS', 'SHELL_OPS']) {
-  const block = arrayBlock(carrier, 'val ' + symbol, 'setOf(', ')')
-  if (block === null) failParse('ControlCarrier.' + symbol)
-  for (const op of quoted(block)) carrierOps.add(op)
-}
-if (carrierOps.size === 0) failParse('ControlCarrier 的 neverA11y 路由集合')
-
-// 6) manage 工具面（实参集合；支持 a11yExec(<ident>) 的 const 三目解析）
-const manage = readCode(join(PLUGIN_ROOT, 'plugins', 'dsh-android-manage', 'src', 'index.ts'))
-const manageOps = new Set([...manage.matchAll(/(?:a11yExec|controlExec)\(\s*'([A-Za-z]+)'/g)].map((m) => m[1]))
-for (const m of manage.matchAll(/(?:a11yExec|controlExec)\(\s*([A-Za-z_$][\w$]*)/g)) {
-  const decl = manage.match(new RegExp('const\\s+' + m[1] + '\\s*=[^\\n]*'))
-  if (decl) for (const op of quoted(decl[0])) manageOps.add(op)
-}
-if (manageOps.size === 0) failParse('manage 的 a11yExec/controlExec 实参')
-
-const show = (n, s) => console.log('  ' + n.padEnd(16) + ' [' + [...s].sort().join(', ') + ']')
-console.log('六处登记面：')
-show('handle', shellHandle)
-show('SUPPORTED_OPS', shellSupported)
-show('ControlCarrier', carrierOps)
-show('ControlOp', engineOps)
-show('A11Y_OPS', a11yOps)
-show('ROUTE_OPS', routeOps)
-show('manage 工具面', manageOps)
-
-// 族归属（D 项按族校验工具面 owner；Lead 裁决 2026-09-12）：browser*/vd* 的工具由各自插件注册，
-// manage 不承载它们——但主体仍必须与 handle/SUPPORTED_OPS 一致（A/B/C 项不变）。
-// review §2.3（2026-09-14）：旧实现把「台账缺失」降级 WARN 不判红——一次并批提交的秒级并发窗口
-// 就足以让 D 项整段失效，属假绿。现改为：短重试（3 × 150ms）消化并发窗口；仍缺段/不可解析即 FAIL。
-/** 台账路径。`--ledger <file>` 只给测试用（`scripts/check-control-ops.test.mjs` 要拿临时台账把
- *  六面判据完全隔离出来）；正常门禁一律读仓库台账。 */
-const PENDING_PATH = optOf('ledger') ?? join(ROOT, 'scripts', 'control-ops-pending.json')
-let ledger = null
-let ledgerError = null
-for (let attempt = 0; attempt < 3 && ledger === null; attempt += 1) {
-  try {
-    const parsed = JSON.parse(readFileSync(PENDING_PATH, 'utf8'))
-    if (parsed.families !== undefined && parsed.pending !== undefined) ledger = parsed
-    else ledgerError = '缺段（families=' + (parsed.families === undefined ? '缺' : '在场')
-      + ' / pending=' + (parsed.pending === undefined ? '缺' : '在场') + '）'
-  } catch (e) {
-    ledgerError = String(e).slice(0, 160)
-  }
-  if (ledger === null && attempt < 2) await new Promise((resolve) => setTimeout(resolve, 150))
-}
-if (ledger === null) {
-  check('控制 op 台账可解析且含 families/pending 段（' + rel(PENDING_PATH) + '）', false, ledgerError ?? '不可解析')
-  ledger = {}
-}
-const pendingFamilies = ledger.families ?? []
-const familyOps = new Set(pendingFamilies.flatMap((fam) => fam.ops ?? []))
-const withoutFamily = (set) => new Set([...set].filter((op) => !familyOps.has(op)))
-
-const diff = (a, b) => [...a].filter((x) => !b.has(x)).sort()
-const setEq = (label, a, b, aName, bName, face) => {
-  const onlyA = diff(a, b).filter((op) => !exempt(op, face))
-  const onlyB = diff(b, a).filter((op) => !exempt(op, face))
-  check(label, onlyA.length === 0 && onlyB.length === 0,
-    aName + ' 独有=[' + onlyA.join(', ') + ']；' + bName + ' 独有=[' + onlyB.join(', ') + ']')
+const sharedSource = readOrDie(join(pluginRoot, SHARED_REL, 'native-shared-bridge.ts'))
+const sharedBrowserOps = parseTsArray(sharedSource, 'NATIVE_SHARED_BROWSER_OPS')
+if (sharedBrowserOps === null) {
+  console.error('CHECK-CONTROL-OPS FAILED：解析不到 NATIVE_SHARED_BROWSER_OPS')
+  process.exit(1)
 }
 
-setEq('handle 分支 == SUPPORTED_OPS', shellHandle, shellSupported, 'handle', 'SUPPORTED_OPS', 'SUPPORTED_OPS')
-setEq('ControlOp == SUPPORTED_OPS', engineOps, shellSupported, 'ControlOp', 'SUPPORTED_OPS', 'ControlOp')
-setEq('A11Y_OPS == ControlOp', a11yOps, engineOps, 'A11Y_OPS', 'ControlOp', 'A11Y_OPS')
-const manageOnly = diff(withoutFamily(manageOps), withoutFamily(shellSupported)).filter((op) => !exempt(op, 'manage'))
-const supportedOnly = diff(withoutFamily(shellSupported), withoutFamily(manageOps)).filter((op) => !exempt(op, 'manage'))
-// review §2.3：台账在场（哪怕 families=[]）差集非空一律判红；不再有「缺段降级 WARN」分支。
-check('manage 工具面 == SUPPORTED_OPS（族外 op）', manageOnly.length === 0 && supportedOnly.length === 0,
-  'manage 独有=[' + manageOnly.join(', ') + ']；SUPPORTED_OPS 独有=[' + supportedOnly.join(', ') + ']')
-
-// D2. ControlCarrier 的 neverA11y 路由集合 ⊇ 契约全部 neverA11y op（0.14.0 补线）
-// 缺一条 = 该 op 落进 a11y 分支报**误导性错误**（实测 browserTabs 让模型去开无障碍）。
-// 只查「契约里的 neverA11y op 是否都被路由」，不要求反向相等：集合里多写的 op 无害（仍进同一分支）。
-const carrierMissing = [...familyOps].filter((op) => !carrierOps.has(op) && !exempt(op, 'handle')).sort()
-check('ControlCarrier 路由 ⊇ 契约 neverA11y op（漏登记即报误导性错误）', carrierMissing.length === 0,
-  '未登记: [' + carrierMissing.join(', ') + ']（会落进 a11y 分支并返回「需要无障碍」）')
-
-// E. ROUTE_OPS 声明为子集（诊断面只列常用 op）
-const routeOut = diff(routeOps, engineOps).filter((op) => !exempt(op, 'ROUTE_OPS'))
-check('ROUTE_OPS ⊂ ControlOp（诊断面子集，非空）', routeOps.size > 0 && routeOut.length === 0,
-  '越界=[' + routeOut.join(', ') + ']')
-
-// F. longClick 存量漂移专项（壳侧在场 → 引擎两处必须同批登记）
-const longClickOk = !shellSupported.has('longClick') || (engineOps.has('longClick') && a11yOps.has('longClick'))
-const longClickExempt = exempt('longClick', 'ControlOp') || exempt('longClick', 'A11Y_OPS')
-check('longClick 已收口（壳侧 handle 与引擎 ControlOp/A11Y_OPS 同批登记）', longClickOk || longClickExempt,
-  '壳侧 handle ' + (shellSupported.has('longClick') ? '在场' : '缺席')
-  + '，ControlOp ' + (engineOps.has('longClick') ? '在场' : '缺席')
-  + '，A11Y_OPS ' + (a11yOps.has('longClick') ? '在场' : '缺席')
-  + '；修法见 0.13.8 验收计划 B-AC-07（ControlOp 补成员 + 纳入 A11Y_OPS）')
-
-
-// ── G. 新插件 op 族：所有权（families）+ 待落地面（pending）核对 ────────────────
-// 契约先冻结、六处按族落地。本段：① ops 必须与契约逐字一致；② neverA11y 的 op 进 A11Y_OPS 即 FAIL；
-// ③ 落在 neverFaces（A11Y_OPS / ROUTE_OPS / manage）即 FAIL；④ 落在 neither faces 也非 neverFaces
-// 的面即 FAIL（未声明面）；⑤ faces 里未落地的面：有 pending 条目声明则 WARN，无声明则 FAIL；
-// ⑥ pending 条目声明的面**全部落地**即 stale FAIL（删除该条，强制收口）。ROUTE_OPS 本批不落
-// （诊断面列 neverA11y op 会播错误指引），故写入 neverFaces。
-const FACES = {
-  handle: shellHandle, SUPPORTED_OPS: shellSupported, ControlOp: engineOps,
-  A11Y_OPS: a11yOps, ROUTE_OPS: routeOps, manage: manageOps,
+const kotlinFiles = listKotlin(join(shellRoot, KOTLIN_REL))
+const requiredKotlin = ['NativeControlDispatcher.kt', 'NativeA11yExecution.kt', 'NativeShizukuExecution.kt', 'NativeVdisplayExecution.kt', 'NativeSharedHostExecution.kt', 'NativePrivilegeExecution.kt']
+const missingKotlin = requiredKotlin.filter((name) => !(name in kotlinFiles))
+if (missingKotlin.length > 0) {
+  console.error('CHECK-CONTROL-OPS FAILED：原生 adapter 源文件缺席 [' + missingKotlin.join(', ') + ']')
+  process.exit(1)
 }
-const pendingEntries = ledger.pending ?? []
-for (const fam of pendingFamilies) {
-  const src = readCode(join(PLUGIN_ROOT, fam.source))
-  // 契约可能是对象字面量（BROWSER_OPS = { k: 'browserX' }）或数组（VD_OPS = ['vdX']）：
-  // 取符号之后**先出现**的那种形态，避免括号搜索越过边界抓到后面的常量（本轮实测抓到 VIEWPORT_PRESETS）。
-  const symAt = src.indexOf(fam.symbol)
-  const objAt = src.indexOf('= {', symAt)
-  const arrAt = src.indexOf('= [', symAt)
-  const useObj = objAt >= 0 && (arrAt < 0 || objAt < arrAt)
-  const ops = new Set(quoted(arrayBlock(src, fam.symbol, useObj ? '= {' : '= [', useObj ? '}' : ']') ?? ''))
-  if (ops.size === 0) failParse('pending 族 ' + fam.id + ' 的 ' + fam.symbol + '（契约形态已变）')
-  const declared = new Set(fam.ops ?? [])
-  const mismatch = [...ops].filter((o) => !declared.has(o)).concat([...declared].filter((o) => !ops.has(o)))
-  check('pending 族 ' + fam.id + ' 的 ops 与契约一致（' + ops.size + ' 条）', mismatch.length === 0,
-    '不一致: [' + mismatch.join(', ') + ']（请同步 scripts/control-ops-pending.json）')
-  // 工具面 owner（D 项的族内半边）：owner 文件必须在场且引用该族的契约符号——防「手抄 op 清单」式漂移。
-  let toolSurfaceOk = false
-  if (fam.toolSurface) {
-    const tsPath = join(PLUGIN_ROOT, fam.toolSurface.file)
-    if (!existsSync(tsPath)) {
-      check('族 ' + fam.id + ' 的 toolSurface owner 在场: ' + fam.toolSurface.file, false, '文件缺席')
-    } else {
-      const tsText = stripComments(readFileSync(tsPath, 'utf8'))
-      const refs = (tsText.match(new RegExp('\\b' + fam.toolSurface.symbol + '\\b', 'g')) || []).length
-      const literals = [...ops].filter((op) => tsText.includes("'" + op + "'")).length
-      toolSurfaceOk = refs > 0
-      check('族 ' + fam.id + ' 的 toolSurface 引用契约符号 ' + fam.toolSurface.symbol + '（' + fam.toolSurface.file + '）',
-        toolSurfaceOk, '引用次数 = 0（工具面与 op 契约脱钩？）')
-      console.log('       toolSurface：符号引用 ' + refs + ' 次，op 字面量 ' + literals + '/' + ops.size + ' 条'
-        + (fam.toolSurface.note ? '；' + fam.toolSurface.note : ''))
-    }
-  }
-  const requiredFaces = new Set(fam.faces ?? [])
-  const neverFaces = new Set(fam.neverFaces ?? [])
-  const pend = pendingEntries.find((e) => e.family === fam.id)
-  const pendingFaces = new Set(pend?.faces ?? [])
-  let missingRequired = 0
-  for (const op of [...ops].sort()) {
-    const inFaces = Object.keys(FACES).filter((name) => FACES[name].has(op))
-    if (fam.neverA11y && inFaces.includes('A11Y_OPS')) {
-      check(op + ' 不得进 A11Y_OPS（契约 neverA11y）', false,
-        '出现在 A11Y_OPS —— browser*/vd* 是壳桥 op，不经无障碍通道（方案 §4.5）')
-    }
-    for (const face of inFaces) {
-      if (neverFaces.has(face) && face !== 'A11Y_OPS') {
-        check(op + ' 不得进 ' + face + '（' + fam.id + ' 的 neverFaces：按设计不落该面）', false,
-          '出现在 ' + face + ' —— 见 scripts/control-ops-pending.json 的 reason')
-      }
-    }
-    const undeclaredFaces = inFaces.filter((name) => !requiredFaces.has(name) && !neverFaces.has(name))
-    if (undeclaredFaces.length > 0) {
-      check(op + ' 的落地只在 faces 声明内（' + fam.id + '）', false, '出现在未声明的面: [' + undeclaredFaces.join(', ') + ']')
-    }
-    // toolSurface 是「工具面 owner」而非 op 集合：其落地状态 = owner 文件在场且引用契约符号。
-    const lack = [...requiredFaces].filter((name) => (name === 'toolSurface' ? !toolSurfaceOk : !inFaces.includes(name)))
-    if (lack.length > 0) missingRequired += 1
-  }
-  if (missingRequired > 0) {
-    const declaredMissing = [...requiredFaces].filter((face) => !pendingFaces.has(face))
-    if (pendingFaces.size === 0 || declaredMissing.length > 0) {
-      check('族 ' + fam.id + ' 的待落地面已声明 pending', false,
-        '未落地且未在 pending 里声明的面: [' + declaredMissing.join(', ') + ']（请补 pending 条目或落地）')
-    } else {
-      console.log('WARN  族 ' + fam.id + ' 仍有待落地面 [' + [...pendingFaces].join(', ') + ']（pending 条目在场，stale 判定只按这些面）')
-    }
-  }
-  if (pend) {
-    const landedDeclared = [...pendingFaces].every((face) => face === 'toolSurface'
-      ? toolSurfaceOk
-      : (!FACES[face] || [...ops].every((op) => FACES[face].has(op))))
-    if (landedDeclared && missingRequired === 0) {
-      check('族 ' + fam.id + ' 的 pending 条目已 stale（声明的面全部落地）', false,
-        '请从 scripts/control-ops-pending.json 删除该 pending 条目（所有权条目 families 保留）')
-    }
-  }
-}
-if (pendingFamilies.length > 0) {
-  console.log('INFO  op 族所有权 ' + pendingFamilies.length + ' 族/'
-    + pendingFamilies.reduce((n, f) => n + (f.ops ?? []).length, 0) + ' op；待落地面条目 '
-    + pendingEntries.length + ' 条（来源 scripts/control-ops-pending.json）')
+const kotlinImplements = kotlinReachable(kotlinFiles)
+const privilegeText = stripComments(kotlinFiles['NativePrivilegeExecution.kt'] ?? '')
+// Root 只在 `rootExec` 的 `backend == "root"` 分支执行；Shizuku 分支固定走 uid 2000。
+const rootAsShizuku = !(
+  /RootAccess\.execRoot\(/.test(privilegeText) &&
+  /runNativeDiagnostic\([^\n]*if\s*\(root\)\s*0\s*else\s*2000\s*,/.test(privilegeText)
+)
+const backendCoverage = {
+  A11yPreferred: /"a11y"\s*&&/.test(stripComments(kotlinFiles['NativeA11yExecution.kt'] ?? '')),
+  A11yRequired: /"a11y"\s*&&/.test(stripComments(kotlinFiles['NativeA11yExecution.kt'] ?? '')),
+  ShizukuRequired: /"backend"\)\s*==\s*"shizuku"/.test(stripComments(kotlinFiles['NativeShizukuExecution.kt'] ?? '')),
+  RootRequired: /"rootExec"[^\n]*"root"/.test(privilegeText),
+  TermuxHost: /NativeAppShell\.execute/.test(privilegeText),
+  BrowserHost: /browserHost/.test(stripComments(kotlinFiles['NativeSharedHostExecution.kt'] ?? '')),
+  WebViewHost: /NativeAppWebViewExecution\.implements/.test(stripComments(kotlinFiles['NativeSharedHostExecution.kt'] ?? '')),
+  LocalOnly: true,
+  Unsupported: false,
 }
 
-// ── 陈旧豁免（issue #1046 后半）：豁免已不再需要 ─────────────────────────────
-// exempt() 只在「差集里真的出现了该 op」时被调用；某个 (op, face) 一轮下来从未被用到，
-// 说明六面已经一致 —— 这条豁免不再豁免任何东西，留着只会让后来的真漂移被一起放行。
-{
-  const stale = staleGapEntries(gaps, usedExemptions)
-  check('已知缺口豁免无陈旧条目（六面已一致 ⇒ 该豁免已不再需要，请删除）', stale.length === 0,
-    '陈旧: ' + stale.slice(0, 6).join(', ') + (stale.length > 6 ? ' 等 ' + stale.length + ' 条' : '')
-      + '（判据口径：本轮六面比对从未触发该豁免 = 该面已补齐）')
+const phoneIndex = readOrDie(join(pluginRoot, PHONE_REL, 'index.ts'))
+const toolInputs = parseToolInputs(phoneIndex)
+if (toolInputs.length === 0) {
+  console.error('CHECK-CONTROL-OPS FAILED：模型面没有可解析的 defineTool')
+  process.exit(1)
 }
 
-if (warnings.length > 0) console.log('WARN  已知缺口豁免 ' + warnings.length + ' 条（来源 scripts/control-ops-known-gaps.json）')
-if (failures.length > 0) {
-  console.error('CHECK-CONTROL-OPS FAILED（' + failures.length + ' 项）：' + failures.join('；'))
+const legacyProbe = [
+  ['shell', 'app/src/main/java/com/dsharnessmobile/shell/ControlProtocolV2.kt'],
+  ['shell', 'app/src/main/java/com/dsharnessmobile/shell/ControlCarrier.kt'],
+  ['shell', 'app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt'],
+  ['shell', 'app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt'],
+  ['plugin', 'plugins/dsh-android-bridge/src/control-queue.ts'],
+  ['plugin', 'plugins/dsh-android-bridge/src/control-policy.ts'],
+  ['plugin', 'plugins/dsh-android-manage/src/index.ts'],
+  ['plugin', 'plugins/dsh-android-vdisplay/src/index.ts'],
+]
+const legacyExists = legacyProbe
+  .filter(([side, rel]) => existsSync(join(side === 'shell' ? shellRoot : pluginRoot, rel)))
+  .map(([, rel]) => rel)
+for (const rel of legacyExists) console.log('INFO  旧文件仍在工作树（允许存在，只禁止生产引用）: ' + rel)
+const legacyRefs = legacyProductionRefs(shellRoot).filter((hit) => {
+  // 旧文件的自身引用不算生产入口；只记录被当前 Kotlin/TS 生产面引用的情况。
+  return !legacyExists.some((rel) => hit.endsWith('@' + rel))
+}).filter((hit) => {
+  // 插件清单 / 构建脚本里的包名不是控制入口；只有 Kotlin、TS 生产源码里的引用才判红。
+  const path = hit.slice(hit.lastIndexOf('@') + 1)
+  // 旧插件自己的生产源码不算「被新链引用」；只有壳侧与共享桥的新代码引用才是复活。
+  return /\.(?:kt|ts|mjs|js)$/.test(path) && !path.startsWith('plugins/dsh-android-vdisplay/')
+})
+
+const result = auditContract({
+  operations, phoneOps, sharedBrowserOps, kotlinImplements, backendCoverage,
+  privilegedOps: ['shExec', 'rootExec', 'termuxExec'].filter((name) => kotlinImplements.includes(name)),
+  rootAsShizuku, toolInputs, legacyRefs,
+  toolOperations: unique(toolInputs.flatMap((tool) => tool.operations)),
+  vdisplayOps: parseKotlinSet(kotlinFiles['NativeVdisplayExecution.kt'] ?? '', 'val operations') ?? [],
+})
+
+console.log('Rust 目录 [' + operations.length + ']：' + operations.map((row) => row.name + '(' + row.backend + ')').join(', '))
+console.log('Kotlin adapter 可达 [' + sorted(kotlinImplements).length + ']')
+console.log('模型面输入 [' + toolInputs.filter((tool) => tool.name.includes('input')).map((tool) => tool.name).join(', ') + ']')
+if (result.warnings.length > 0) for (const line of result.warnings) console.log('WARN  ' + line)
+if (result.failures.length > 0) {
+  for (const line of result.failures) console.error('FAIL  ' + line)
+  console.error('CHECK-CONTROL-OPS FAILED（' + result.failures.length + ' 项）')
   process.exit(1)
 }
 console.log('CHECK-CONTROL-OPS PASSED')
+function legacyProductionRefs(roots) {
+  const needles = [
+  ['ControlProtocolV2', /\bControlProtocolV2\b/],
+  ['ControlCarrier', /\bControlCarrier\b/],
+  ['ControlPoller', /\bControlPoller\b/],
+    ['control-policy', /control-policy/],
+    ['control-queue', /control-queue/],
+  ]
+  const hits = []
+  const walk = (dir) => {
+    if (!existsSync(dir)) return
+    for (const name of readdirSync(dir)) {
+      if (name === 'node_modules' || name === '.git' || name === 'lib' || name === 'test') continue
+      const full = join(dir, name)
+      const st = statSync(full)
+      if (st.isDirectory()) { walk(full); continue }
+      if (!/\.(?:kt|ts|mjs|js|json)$/.test(name)) continue
+      const raw = readFileSync(full, 'utf8')
+      // 只有「调用/导入/实例化」才算生产引用；包名清单与退役插件名称不算。
+      if (/import\s+[^\n]*dsh-android-(?:manage|vdisplay)|from\s+['"][^'"]*dsh-android-(?:manage|vdisplay)/.test(raw)) {
+        hits.push('legacy-import@' + relative(roots, full).replace(/\\/g, '/'))
+      }
+      const text = stripComments(raw)
+      for (const [label, needle] of needles) {
+        if (label.startsWith('dsh-android-')) continue
+        if (needle.test(text)) hits.push(label + '@' + relative(roots, full).replace(/\\/g, '/'))
+      }
+    }
+  }
+  walk(join(roots, 'app/src/main/java/com/dsharnessmobile/shell'))
+  walk(join(roots, 'plugins'))
+  return unique(hits)
+}
+
+}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main()

@@ -7,14 +7,26 @@ param(
   [switch]$DualChannel,
   [switch]$VirtualDisplay,
   [switch]$RuntimeRestart,
+  [switch]$Text,
+  [switch]$ShizukuText,
+  [switch]$NodeInput,
+  [switch]$RequestShizuku,
   [string]$MuMuCli = 'D:/MuMuPlayer/nx_main/mumu-cli.exe',
   [string]$Adb = 'D:/Android/Sdk/platform-tools/adb.exe'
 )
 
 $ErrorActionPreference = 'Stop'
 if ($ShizukuDenied -and -not $Shizuku) { throw '撤权用例必须同时选择 Shizuku 套件。' }
-$suites = @(@($Shizuku, $DualChannel, $VirtualDisplay, $RuntimeRestart) | Where-Object { $_ })
+$suites = @(@($Shizuku, $DualChannel, $VirtualDisplay, $RuntimeRestart, $ShizukuText) | Where-Object { $_ })
+if ($NodeInput -and -not $ShizukuText) { throw '-NodeInput 只用于 ShizukuText 套件。' }
+if ($RequestShizuku -and -not $ShizukuText) { throw '-RequestShizuku 只用于 ShizukuText 测试准备。' }
 if ($suites.Count -gt 1) { throw '只可选择一个原生控制测试套件。' }
+if ($Text -and $suites.Count -gt 0) { throw '-Text 只可单独选择。' }
+
+# Text 套件是本轮新增的 EditText/IME 用例，固定只跑专用实例，避免误入其它实例。
+if ($Text -and ($VmIndex -ne 1 -or $ExpectedName -ne 'dsh-native-control-test')) {
+  throw 'Text 套件只允许 MuMu #1 dsh-native-control-test。'
+}
 $vm = (& $MuMuCli info --vmindex $VmIndex | Out-String | ConvertFrom-Json)
 if ($LASTEXITCODE -ne 0 -or $vm.index -ne "$VmIndex" -or $vm.name -ne $ExpectedName -or
     -not $vm.is_android_started -or $vm.adb_host_ip -ne '127.0.0.1' -or $vm.adb_port -notin 1024..65535) {
@@ -55,8 +67,13 @@ try {
   Invoke-MuMuAdb @('shell','am','start','-W','-a','android.settings.SETTINGS') | Out-Null
   $testClass = 'com.dsharnessmobile.shell.nativecontrol.NativeControlIpcDeviceTest'
   $virtualClass = 'com.dsharnessmobile.shell.nativecontrol.NativeVirtualDisplayDeviceTest'
-  $selected = if ($VirtualDisplay) {
+  $textClass = 'com.dsharnessmobile.shell.nativecontrol.NativeControlTextDeviceTest'
+  $selected = if ($Text) {
+    $textClass + '#setTextWritesUnicodeAndKeepsDefaultIme'
+  } elseif ($VirtualDisplay) {
     $virtualClass + '#ownedAllocationIsPublishedAndRecreatedTargetRejectsOldPlan'
+  } elseif ($ShizukuText) {
+    'com.dsharnessmobile.shell.nativecontrol.NativeShizukuTextDeviceTest#focusedEditorTextRoundTripsWithoutImeOrReplay'
   } elseif ($RuntimeRestart) {
     $testClass + '#accessibilityClicksOnceAndReplaysOnlyTheReceipt'
   } elseif ($DualChannel) {
@@ -71,17 +88,21 @@ try {
   $argsList = @('-s',$serial,'shell','am','instrument','-w','-r',
     '-e','nativeTestEmulator','mumu','-e','nativeTestCapture','yes',
     '-e','nativeTestShizukuDenied',$(if ($ShizukuDenied) {'yes'} else {'no'}),
-    '-e','nativeTestShizuku',$(if ($Shizuku -or $DualChannel -or $VirtualDisplay) {'yes'} else {'no'}),
+    '-e','nativeTestShizuku',$(if ($Shizuku -or $DualChannel -or $VirtualDisplay -or $ShizukuText) {'yes'} else {'no'}),
+    '-e','nativeTestNodeInput',$(if ($NodeInput) {'yes'} else {'no'}),
+    '-e','nativeTestRequestShizuku',$(if ($RequestShizuku) {'yes'} else {'no'}),
+    '-e','nativeTestEvidenceHold',$(if ($ShizukuText) {'yes'} else {'no'}),
     '-e','nativeTestRuntimeRestart',$(if ($RuntimeRestart) {'yes'} else {'no'}),
+    '-e','nativeTestText',$(if ($Text) {'yes'} else {'no'}),
     '-e','class',$selected,
     'com.dsharnessmobile.shell.test/androidx.test.runner.AndroidJUnitRunner')
   $proc = Start-Process -FilePath $Adb -ArgumentList $argsList -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err -PassThru
-  $captureSuite = $suites.Count -eq 0
-  if ($captureSuite -or $DualChannel -or $RuntimeRestart) {
+  $captureSuite = ($suites.Count -eq 0 -and -not $Text)
+  if ($captureSuite -or $Text -or $DualChannel -or $RuntimeRestart) {
     $until = (Get-Date).AddSeconds(25)
     do {
       $proc.Refresh()
-      $captureStarted = (Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) -match 'test=(?:a11yWinsWithShizukuReadyAndTouchesThePointOnce|accessibility(?:CapturesTheEmulatorDisplayThroughPrivateIpc|ReadsARealNodeAndRefusesItsReplacedReference|ClicksOnceAndReplaysOnlyTheReceipt))\r?\nINSTRUMENTATION_STATUS_CODE: 1'
+      $captureStarted = (Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) -match 'test=(?:setTextWritesUnicodeAndKeepsDefaultIme|a11yWinsWithShizukuReadyAndTouchesThePointOnce|accessibility(?:CapturesTheEmulatorDisplayThroughPrivateIpc|ReadsARealNodeAndRefusesItsReplacedReference|ClicksOnceAndReplaysOnlyTheReceipt))\r?\nINSTRUMENTATION_STATUS_CODE: 1'
       if ($captureStarted -or $proc.HasExited) { break }
       Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $until)
@@ -89,7 +110,22 @@ try {
     Set-SecureValue 'enabled_accessibility_services' ((@($others) + $service) -join ':')
     Set-SecureValue 'accessibility_enabled' '1'
   }
-  $timeout = if ($RuntimeRestart) { 145000 } else { 30000 }
+  if ($ShizukuText) {
+    $until = (Get-Date).AddSeconds(55)
+    do {
+      $proc.Refresh()
+      $body = Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue
+      if ($body -match 'NATIVE_TEXT_EVIDENCE_READY') {
+        $shot = Join-Path $base 'native-text.png'
+        Invoke-MuMuAdb @('shell','screencap','-p','/data/local/tmp/dsh-native-control-text.png') | Out-Null
+        Invoke-MuMuAdb @('pull','/data/local/tmp/dsh-native-control-text.png',$shot) | Out-Null
+        break
+      }
+      if ($proc.HasExited) { break }
+      Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $until)
+  }
+  $timeout = if ($RuntimeRestart) { 145000 } elseif ($Text -or $ShizukuText) { 60000 } else { 30000 }
   if (-not $proc.WaitForExit($timeout)) { throw '仪器进程未在预算内退出。' }
   $body = Get-Content -LiteralPath $log -Raw
   $body

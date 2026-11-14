@@ -5,6 +5,7 @@ import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import android.os.Process
+import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import org.json.JSONObject
@@ -20,7 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 本应用私有的 Unix socket 传输。它不选通道、不推断权限，不持有控制状态。
- * 当前未接生产启动路径；只有宿主完成 Rust 初始化后才可显式启动。
+ * 宿主完成 Rust 初始化后启动。
  */
 internal class NativeControlSocketServer(
   context: Context,
@@ -80,16 +81,22 @@ internal class NativeControlSocketServer(
     if (file.exists() || java.nio.file.Files.isSymbolicLink(file.toPath())) {
       val old = Os.lstat(file.absolutePath)
       if (!OsConstants.S_ISSOCK(old.st_mode) || old.st_uid != appUid) throw IOException("native-socket-path-invalid")
-      val probe = LocalSocket()
-      try {
-        probe.connect(LocalSocketAddress(file.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM))
-        throw IOException("native-server-already-running")
-      } catch (failure: IOException) {
-        if (failure.message == "native-server-already-running") throw failure
-        if (failure.message?.contains("ECONNREFUSED") != true && failure.message?.contains("ENOENT") != true) throw failure
-      } finally {
-        probe.close()
+      val refused = LocalSocket().use { probe ->
+        try {
+          probe.connect(LocalSocketAddress(file.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM))
+          false
+        } catch (failure: IOException) {
+          // LocalSocket's Android implementations can report only strerror(), with no errno cause.
+          val errno = (failure.cause as? ErrnoException)?.errno
+          if (errno == OsConstants.ECONNREFUSED || (errno == null &&
+              failure.message in setOf("Connection refused", "ECONNREFUSED", "connect failed: ECONNREFUSED (Connection refused)"))) true
+          else throw failure
+        }
       }
+      if (!refused) throw IOException("native-server-already-running")
+      val current = Os.lstat(file.absolutePath)
+      if (!OsConstants.S_ISSOCK(current.st_mode) || current.st_uid != appUid ||
+        current.st_ino != old.st_ino || current.st_dev != old.st_dev) throw IOException("native-socket-changed-during-probe")
       if (!file.delete()) throw IOException("native-stale-socket-remove-failed")
     }
     val binding = LocalSocket()
