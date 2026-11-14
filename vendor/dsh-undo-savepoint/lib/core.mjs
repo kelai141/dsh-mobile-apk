@@ -184,6 +184,69 @@ function blobDir(cfg) {
 async function readBlob(cfg, hash) {
   try { return await fs.readFile(join(blobDir(cfg), hash)); } catch { return null; }
 }
+/**
+ * 快照库「正在写」的进程内计数，按 blob 库路径分组（issue #1590）。
+ *
+ * 缺陷形态：`pruneOrphanBlobs` / `undoCompact` 把 blob 目录里不在 refs 中的文件全删，
+ * 而 `createSnapshot` 的顺序是 mkdir 占位 -> 逐文件 writeBlob -> **最后**才 writeManifest。
+ * 中间那段「blob 已写、manifest 未写」的窗口里，该快照对 `listSnapshots` 不可见，
+ * 它的 blob 全是「孤儿」—— 并行 `undo_prune`（或在 `undo_restore` 写 pre-restore 快照时来一次）
+ * 会把正在写的快照删残，之后 `applySnapshot` 只能报 `snapshot blob missing` 跳过，
+ * 安全网**静默**失效，直到真需要回滚那一刻才发现。
+ *
+ * 为什么计数放在模块级而不是 cfg 上：index.js（局内）与 tools/undo-server.mjs（局外）
+ * 各自建 cfg，但共用同一个 blob 库；按 blob 库路径共享，才能覆盖「两个入口同时活着」的形态。
+ */
+const storeWriteCounters = new Map();
+/** 取 blob 库的计数键（与 `blobDir` 同源，保证两个入口算出同一个键）。 */
+function storeKey(cfg) {
+  return blobDir(cfg);
+}
+/** 标记「本进程有一次快照写入开始」，返回幂等的结束函数。 */
+function beginStoreWrite(cfg) {
+  const key = storeKey(cfg);
+  storeWriteCounters.set(key, (storeWriteCounters.get(key) ?? 0) + 1);
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    const left = (storeWriteCounters.get(key) ?? 1) - 1;
+    if (left > 0) storeWriteCounters.set(key, left);
+    else storeWriteCounters.delete(key);
+  };
+}
+/** 本进程此刻是否有快照正在写。 */
+function storeBusy(cfg) {
+  return (storeWriteCounters.get(storeKey(cfg)) ?? 0) > 0;
+}
+/**
+ * GC 是否必须让路（issue #1590）。两条都算：
+ *   ① 本进程有 createSnapshot 在飞（blob 已写、manifest 未写）；
+ *   ② 本进程有 restore 在飞 —— 它自己的 pre-restore 快照是本轮回滚的安全网，
+ *      而且它在 applySnapshot 期间还要读 blob；此时裁剪存储没有任何好处。
+ */
+function storeGcBlocked(cfg) {
+  return storeBusy(cfg) || cfg?.undoBusy === true;
+}
+/**
+ * 孤儿 blob 的 mtime 安全窗（issue #1590 的第二道闸）。
+ *
+ * 进程内计数只能挡住同一个进程里的并发；`tools/undo-server.mjs`（局外服务器）或另一份
+ * DSH 实例写同一个库时，本进程看不到它们。所以 GC 另有时间闸：**跳过最近 N 分钟内写入的
+ * 文件**（blob 与 .tmp 都算）。正常孤儿（快照被 prune 掉后留下的 blob）远超这个窗口，
+ * 多留几分钟只多占一点磁盘；删错正在写的 blob 则会让安全网静默失效——代价不对称。
+ */
+const ORPHAN_GRACE_MS = 10 * 60 * 1000;
+/** 文件的 mtime 是否落在安全窗内（读不到 stat 时按「在窗内」处理，宁可少删）。 */
+async function withinOrphanGrace(absPath) {
+  try {
+    const st = await fs.stat(absPath);
+    return Date.now() - st.mtimeMs < ORPHAN_GRACE_MS;
+  } catch {
+    return true;
+  }
+}
+
 async function writeBlob(cfg, hash, buf) {
   const dir = blobDir(cfg);
   const target = join(dir, hash);
@@ -1496,7 +1559,22 @@ function canResolveAny(cfg, name) {
 }
 
 // ── 快照创建 / 列表 / 状态 ────────────────────────────────────────────────
+/**
+ * 建快照的唯一入口：整段「占位 -> 写 blob -> 写 manifest」期间持有 store-busy 计数，
+ * 让同进程的孤儿 blob GC 看得见「有一次写入正在进行」（issue #1590）。
+ *
+ * 为什么整段持有而不只包 writeBlob：窗口正是「blob 已写、manifest 未写」这一段——
+ * 只包住单个 writeBlob 会让两次 writeBlob 之间的空档重新敞开通。
+ */
 async function createSnapshot(cfg, kind, reason, opts = {}) {
+  const endStoreWrite = beginStoreWrite(cfg);
+  try {
+    return await createSnapshotUnlocked(cfg, kind, reason, opts);
+  } finally {
+    endStoreWrite();
+  }
+}
+async function createSnapshotUnlocked(cfg, kind, reason, opts = {}) {
   const base = kind === 'manual' ? cfg.manualDir : cfg.autoDir;
   await fs.mkdir(base, { recursive: true });
   // issue #1399：id 冲突检测必须是「原子占用」，不能「先看后建」。
@@ -2303,12 +2381,19 @@ async function pruneAuto(cfg, list) {
     });
   const excessPre = pre.slice(0, Math.max(0, pre.length - cfg.keepPre));
   for (const snap of excessPre) { await remove(snap); removed.removedPre++; }
-  removed.removedBlobs = await pruneOrphanBlobs(cfg, list);
+  // issue #1590：本进程有快照正在写时，blob GC 必须整体让路 —— 那段窗口里的 blob 对
+  // listSnapshots 不可见（manifest 还没写），按 refs 判就是「孤儿」，删掉等于把正在建的
+  // 快照删残。快照目录本身的裁剪不受影响：正在写的那份还没 manifest，本来就进不了 list。
+  removed.blobsSkippedBusy = storeGcBlocked(cfg);
+  if (!removed.blobsSkippedBusy) removed.removedBlobs = await pruneOrphanBlobs(cfg, list);
   return removed;
 }
 async function pruneOrphanBlobs(cfg, list) {
   const blob = blobDir(cfg);
   if (!(await pathExists(blob))) return 0;
+  // 双保险：这里再判一次。pruneAuto 已经让路，但 pruneOrphanBlobs 是对外导出的，
+  // 局外服务器/未来的直接调用方不该因为「调用点记得判」才安全。
+  if (storeGcBlocked(cfg)) return 0;
   const refs = new Set();
   for (const s of list) {
     for (const p of (s.plugins ?? [])) {
@@ -2319,10 +2404,11 @@ async function pruneOrphanBlobs(cfg, list) {
   let removed = 0;
   for (const entry of await fs.readdir(blob, { withFileTypes: true })) {
     if (!entry.isFile()) continue;
-    if (!refs.has(entry.name)) {
-      await fs.rm(join(blob, entry.name), { force: true });
-      removed++;
-    }
+    if (refs.has(entry.name)) continue;
+    // 时间闸：跨进程写者本进程看不见，最近 N 分钟写过的文件一律跳过（见 ORPHAN_GRACE_MS）。
+    if (await withinOrphanGrace(join(blob, entry.name))) continue;
+    await fs.rm(join(blob, entry.name), { force: true });
+    removed++;
   }
   return removed;
 }
@@ -2694,21 +2780,30 @@ async function collectReferencedBlobs(cfg) {
   }
   return refs;
 }
-/** 孤儿 blob GC（V0.4.0，P7）：删除不被任何快照/消息批次引用的 blob 与残留 .tmp。 */
+/**
+ * 孤儿 blob GC（V0.4.0，P7）：删除不被任何快照/消息批次引用的 blob 与残留 .tmp。
+ *
+ * issue #1590：这是第二条 GC 路径（第一条是 pruneAuto -> pruneOrphanBlobs），
+ * 与 createSnapshot 的「blob 已写、manifest 未写」窗口是同一个竞态，必须同样让路：
+ *   ① 本进程有写入在飞 -> 整体跳过（blobsSkippedBusy）；
+ *   ② 跨进程写者看不见 -> 每个候选再按 mtime 安全窗过滤（ORPHAN_GRACE_MS）。
+ */
 async function undoCompact(cfg) {
+  if (storeGcBlocked(cfg)) return { ok: true, removed: 0, freed: 0, blobsSkippedBusy: true };
   const refs = await collectReferencedBlobs(cfg);
   const dir = blobDir(cfg);
   if (!(await pathExists(dir))) return { ok: true, removed: 0, freed: 0 };
-  let removed = 0, freed = 0;
+  let removed = 0, freed = 0, skippedRecent = 0;
   for (const e of await fs.readdir(dir, { withFileTypes: true })) {
     if (!e.isFile()) continue;
     const isTmp = e.name.endsWith('.tmp');
     if (!isTmp && refs.has(e.name)) continue; // 被引用：保留
     const p = join(dir, e.name);
+    if (await withinOrphanGrace(p)) { skippedRecent++; continue; }
     try { freed += (await fs.stat(p)).size; } catch { /* gone */ }
     await fs.rm(p, { force: true }); removed++;
   }
-  return { ok: true, removed, freed };
+  return { ok: true, removed, freed, skippedRecent };
 }
 async function restore(cfg, mode, id, options = {}) {
   // issue #1398：并发撤销必须互斥。
