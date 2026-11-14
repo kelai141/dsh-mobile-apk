@@ -113,6 +113,30 @@ jobs:
           path: app/build/reports/tests/testDebugUnitTest/
           if-no-files-found: ignore
 
+  webpages:
+    # 下载站页面测试（webpages/tests）在 PR 期间此前**完全不跑**：
+    # pages.yml 的触发只有 push 到 main / release published / workflow_dispatch，没有 pull_request；
+    # check-script-tests.mjs 只遍历 scripts/，不含 webpages/tests；check-release-gates.mjs 里与
+    # webpages 相关的只有 MIRROR_TEMPLATES 顺序一致性，不跑测试。
+    # 于是「页面 JS 改红了」要到合并进 main、pages 工作流 build 时才第一次暴露（那一层在部署之前，
+    # 所以不会发坏站，但 PR 期间没有任何拦截）。
+    # 单独立一个 job 而不是塞进 static：static 的显示名是 branch protection 的 required check，
+    # 1742 已把它收敛为「仅净新增行机密扫描」；把业务测试加回去会让那个名字重新名不副实。
+    # 本 job 不是 required check，红不拦合并，只把信号提前。
+    name: 下载站页面测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      # 必须给 glob：node --test 在 Node 24 上不接受目录（传目录会按 CJS 解析并报
+      # Cannot find module .../webpages/tests）。引号交给 node 自己展开，不依赖 shell glob。
+      - name: 资产名 / 路由 / 发布链与 seed 摘要门禁
+        run: node --test "webpages/tests/*.test.mjs"
+
   maintenance:
     name: 维护文档一致性（提示）
     runs-on: ubuntu-latest
