@@ -311,12 +311,11 @@ internal object ShellOps {
    * 小米 14 Pro（SDK 37）实测都会真的执行变量/文件里的内容：`sh -c "$CMD"`、
    * `sh -c "$(cat /sdcard/x.sh)"`、`` sh -c `cat /sdcard/x.sh` ``、`trap "$(cat …)" EXIT`、
    * `eval "$(cat …)"` —— 与 `sh /x.sh`（脚本文件）同一性质：静态看不到执行什么 ⇒ fail-closed。
-   * 只看**段首词**：参数位置的替换不改变命令身份，不得误拦；`$'…'` / `$"…"` 是 ANSI-C 引号
-   * （静态字面量），必须排除。
+   * 只看**段首词**：参数位置的替换不改变命令身份，不得误拦；`$'…'` 会解码转义，
+   * `$"…"` 会本地化文本，未实现展开时同样不能证明命令身份（#1610）。
    */
   private fun isRuntimeCommandName(segment: String): Boolean {
     val head = firstShellWord(segment.trim()).first
-    if (head.startsWith("$'") || head.startsWith("$\"")) return false
     return head.startsWith("$") || head.startsWith("`")
   }
 
