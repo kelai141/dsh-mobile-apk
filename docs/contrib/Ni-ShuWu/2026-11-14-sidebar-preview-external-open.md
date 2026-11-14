@@ -32,3 +32,12 @@
 - 英文浅色：实际显示 `Open in external app`，前景 `rgb(15, 17, 21)`、背景 `rgb(255, 255, 255)`、圆角 `999px`，命中测试为真；`cdp-english-light.json` 与 `ui-english-light-landscape.png`。
 - 数据与范围：覆盖升级后仍恢复原会话和工作区文件；只写入独立样本目录 `preview-external-20261114`。没有执行卸载、清应用数据、Git reset、ADB 重置或偏好清空。语言/主题恢复原 `zh` / `system`，旋转恢复 `0`。
 - 以上为开发 APK 的代码层、CDP 层、ADB 用户层证据；发布前仍需最终双 ABI 来源链及发布候选验收。
+
+## 公开证据
+
+按用户要求，验证摘要与关键截图同 PR 提交。使用受控样本，文字证据按字段白名单导出；省略设备序列号、会话 ID、令牌、本机绝对路径和原始 Activity 日志。截图只包含受控验收会话和样本文件；没有通知浮层。
+
+- [脱敏验证摘要](assets/2026-11-14-preview-external/validation.json)
+- [竖屏实际界面](assets/2026-11-14-preview-external/portrait.png)
+- [横屏实际界面](assets/2026-11-14-preview-external/landscape.png)
+- [英文浅色实际界面](assets/2026-11-14-preview-external/english-light.png)

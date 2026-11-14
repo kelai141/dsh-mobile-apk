@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "0a688b21607ecb44bb4dbc49aaae19109a011532",
+  "deviceAlias": "android-arm64-test-device",
+  "appVersion": "0.14.11-preview-external",
+  "scope": "development APK, preserved data, no post-install hot-push",
+  "redaction": "Device serial, session IDs, tokens, absolute host paths, and raw activity logs omitted. Screenshots show controlled synthetic fixtures.",
+  "build": "PASS",
+  "clientTests": {
+    "targetedIncludingNew": 72,
+    "new": 9,
+    "existing": 1352
+  },
+  "kotlinTests": 34,
+  "controlledNegativeMime": "Removing FLAC MIME in memory produced the expected test failure",
+  "checks": {
+    "codeMap": "193 existing baseline failures; no added failures",
+    "bridgeSymmetry": "PASS",
+    "stateRegistry": "PASS"
+  },
+  "portrait": {
+    "text": "在外部应用打开",
+    "hint": "该格式文件暂时无法预览",
+    "width": 430,
+    "height": 941,
+    "rect": {
+      "x": 143.92855834960938,
+      "y": 504.1964111328125,
+      "width": 142.725830078125,
+      "height": 43.99684524536133,
+      "top": 504.1964111328125,
+      "right": 286.6543884277344,
+      "bottom": 548.1932563781738,
+      "left": 143.92855834960938
+    },
+    "hintRect": {
+      "x": 151.3445281982422,
+      "y": 469.4800109863281,
+      "width": 127.8938980102539,
+      "height": 18.718486785888672,
+      "top": 469.4800109863281,
+      "right": 279.2384262084961,
+      "bottom": 488.1984977722168,
+      "left": 151.3445281982422
+    },
+    "hit": true,
+    "point": [
+      640,
+      1565
+    ]
+  },
+  "landscape": {
+    "text": "在外部应用打开",
+    "hint": "该格式文件暂时无法预览",
+    "width": 941,
+    "height": 430,
+    "rect": {
+      "x": 719.9789428710938,
+      "y": 256.4285583496094,
+      "width": 142.725830078125,
+      "height": 43.99684524536133,
+      "top": 256.4285583496094,
+      "right": 862.7047729492188,
+      "bottom": 300.4254035949707,
+      "left": 719.9789428710938
+    },
+    "hintRect": {
+      "x": 727.3948974609375,
+      "y": 221.71217346191406,
+      "width": 127.8938980102539,
+      "height": 18.718486785888672,
+      "top": 221.71217346191406,
+      "right": 855.2887954711914,
+      "bottom": 240.43066024780273,
+      "left": 727.3948974609375
+    },
+    "hit": true,
+    "point": [
+      2354,
+      828
+    ]
+  },
+  "systemChooser": {
+    "portrait": "PASS",
+    "landscape": "PASS",
+    "foregroundActivity": "com.android.intentresolver/.ChooserActivityLauncher"
+  },
+  "englishLight": {
+    "width": 941,
+    "height": 430,
+    "lang": "en",
+    "hint": "Preview is not available for this file type yet.",
+    "button": "Open in external app",
+    "style": {
+      "color": "rgb(15, 17, 21)",
+      "background": "rgb(255, 255, 255)",
+      "radius": "999px"
+    },
+    "hit": true
+  },
+  "plainTextRegression": {
+    "textVisible": true,
+    "noExternalButton": true,
+    "state": "text"
+  },
+  "restoredPreferences": {
+    "theme": "system",
+    "locale": "zh",
+    "userRotation": 0
+  },
+  "thirdPartyPlayback": "Not certified; music app update prompt blocked playback",
+  "screenshots": [
+    "portrait.png",
+    "landscape.png",
+    "english-light.png"
+  ]
+}
