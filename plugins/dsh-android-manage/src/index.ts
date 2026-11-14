@@ -809,8 +809,10 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       if (!uiCacheNow()! || Date.now() - uiCacheNow()!.ts > UI_CACHE_TTL) {
         return { ok: false, denied: false, text: '没有最近的控件清单——请先取树（android_ui_dump 或 android_ui_tree），再按需取明细' }
       }
-      const handle = detailHandle
-      const path = detailPath
+      // issue #1603：句柄/路径按**本次请求的桶**取（会话 + 目标屏），不再读进程级单槽。
+      // 取不到时回空串（等价于「本轮没有可用的明细」），绝不回落到别人的桶。
+      const handle = uiCacheNow()!.detailHandle ?? ''
+      const path = uiCacheNow()!.detailPath ?? ''
       if (ref !== undefined && ref.trim() !== '') {
         const hit = resolveRef(uiCacheNow()!.byId, uiCacheNow()!.nodes, ref.trim(), scopePoolFor())
         if (!hit.ok) return { ok: false, denied: false, handle, path, text: hit.error }
@@ -894,16 +896,6 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       }
       const size = /Physical size:\s*(\d+)x(\d+)/.exec(r.stdout)
       const screen = size ? { w: Number(size[1]), h: Number(size[2]) } : { w: 0, h: 0 }
-      // 0.14 D4（与注册同批）：ADB 完整抓取分支也必须落明细并回句柄，否则走 ADB 时
-      // android_ui_detail 只有空句柄（a11y 分支在同位置已发）。
-      const detail = publishDetail(pruned.nodes, {
-        gen: -1,
-        protocol: 'adb-xml',
-        view: 'all',
-        screen,
-        rotation: parsed.rotation,
-        rawCount: pruned.rawCount,
-      })
       const entry: UiCache = {
         nodes: pruned.nodes,
         byId: pruned.byId,
@@ -917,6 +909,17 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         session: sessionOf(exec),
         screenId: screenIdOf(args),
       }
+      // 0.14 D4（与注册同批）：ADB 完整抓取分支也必须落明细并回句柄，否则走 ADB 时
+      // android_ui_detail 只有空句柄（a11y 分支在同位置已发）。
+      // issue #1603：句柄/路径写进**本次请求的桶**（entry），先发布再落表——桶对象是同一个引用。
+      const detail = publishDetail(pruned.nodes, entry, {
+        gen: -1,
+        protocol: 'adb-xml',
+        view: 'all',
+        screen,
+        rotation: parsed.rotation,
+        rawCount: pruned.rawCount,
+      })
       // issue #984：经唯一写入口落表（写入时就地回收过期/超额条目）；键 = 会话 + 目标屏（#688）。
       uiCacheStore(cacheKeyOf(entry.session, entry.screenId), entry)
       // 本次请求内立即可见（作用域是 per-request 的，并发会话互不覆盖）。
@@ -1241,6 +1244,16 @@ properties: {
     session: string
     /** 目标屏（`screenId` 参数归一化；空串 = 未指定，按真实屏口径）。 */
     screenId: string
+    /**
+     * 本次 dump 的明细句柄 / 落盘路径（issue #1603：必须挂在桶上，不能是进程级单槽）。
+     *
+     * 两个字段原本是模块级 `let`，于是「会话 A 的句柄」会被「会话 B 的 dump」覆盖：A 调
+     * android_ui_detail 时 rows 取的是 A 自己的缓存（正确），但返回的 handle/path 与文案里的
+     * 「离线可 read/grep」路径指向 **B 的整屏明细**——模型读到的另一场对话的屏幕文本，且无任何报错。
+     * 归属维度与本表一致（会话 + 目标屏），故挂在条目上而不是另开一张表。
+     */
+    detailHandle?: string
+    detailPath?: string
   }
 
   /**
@@ -1369,21 +1382,24 @@ properties: {
   const DETAIL_HINT_MIN_NODES = 60
   const publishDetail = (
     nodes: UiNode[],
+    bucket: UiCache,
     meta: { gen: number; protocol: string; view: string; screen: { w: number; h: number }; rotation: number; rawCount: number },
   ): { handle: string; path: string; hint: string } => {
     const handle = treeFingerprint(nodes)
     let path = ''
+    // issue #1603：句柄/路径写回**产出这份清单的那个桶**（会话 + 目标屏），不再写进程级单槽。
+    // 落盘失败时必须把本桶的字段一起清空（D9）——否则 android_ui_detail 仍握着上一轮的句柄/路径，
+    // 模型会按旧句柄取到旧屏明细。
     try {
       path = writeDetailStore(detailDir(), handle, nodes.map((n) => detailRecord(n)), { ...meta, count: nodes.length, handle })
     } catch {
-      // 落盘失败绝不影响主结果（与上游 spill 的取向一致：落盘是尽力而为），但 D9：必须把模块级
-      // 句柄一起清空——否则 android_ui_detail 仍握着上一轮的句柄/路径，模型会按旧句柄取到旧屏明细。
-      detailHandle = ''
-      detailPath = ''
+      // 落盘失败绝不影响主结果（与上游 spill 的取向一致：落盘是尽力而为）。
+      bucket.detailHandle = ''
+      bucket.detailPath = ''
       return { handle: '', path: '', hint: '' }
     }
-    detailHandle = handle
-    detailPath = path
+    bucket.detailHandle = handle
+    bucket.detailPath = path
     if (nodes.length < DETAIL_HINT_MIN_NODES) return { handle, path, hint: '' }
     return {
       handle,
@@ -1392,9 +1408,8 @@ properties: {
     }
   }
 
-  /** 最近一次 dump 的明细句柄（两级披露取回时用；无 dump 时为空）。 */
-  let detailHandle = ''
-  let detailPath = ''
+  // issue #1603：明细句柄/路径已挂到 UiCache 条目上（见 interface UiCache 的 detailHandle/detailPath），
+  // 不再有模块级单槽——那正是跨会话串台的来源。
 
 
   /**
@@ -1674,7 +1689,8 @@ properties: {
         const webHint = webNode
           ? `\n检测到 WebView 容器 ${webNode.id}：其内部控件在本通道不可见。若目标是 DSH 自有 Web UI，改用 android_web_dump（DOM 快照，毫秒级、按选择器精准命中）；第三方网页仍只能靠坐标。`
           : ''
-        const detail = publishDetail(pruned.nodes, {
+        // issue #1603：明细句柄/路径写回**本次请求的桶**（entry），不落进程级单槽。
+        const detail = publishDetail(pruned.nodes, entry, {
           gen: v2?.gen ?? data.gen ?? -1,
           protocol: v2 ? 'v2' : 'v1',
           view: v2?.view ?? 'all',
@@ -1758,6 +1774,24 @@ properties: {
       const useAbs = typeof x === 'number' && Number.isFinite(x) && typeof y === 'number' && Number.isFinite(y)
       if (!useRef && !useNorm && !useAbs) {
         return { ok: false, denied: false, text: '需要 ref（语义引用）、nx/ny（0-1 归一化）或 x/y（绝对像素，需配 screenId）三者之一' }
+      }
+      // issue #1586：x/y 是**虚拟屏自身像素**语义，必须配非 real 的 screenId。
+      //
+      // 修前：useAbs 只看 x/y 有限就放行，而真正的像素分支要求 screenId 非 real（见下面的 vdInput
+      // 分支），于是「漏传 screenId」/「显式传 real」两者都从守卫底下漏过去，掉进 nx/ny 分支——
+      //   · 无障碍通道：payload 里 nx/ny 是 undefined（JSON 序列化丢键 = 一条没有目标的 click），
+      //     成功返回时 nx 的 toFixed 抛 TypeError，模型只看到一条工具异常；
+      //   · ADB 通道：nx 乘屏宽得 NaN ⇒ 下发 `input tap NaN NaN`。
+      // 守卫自己的文案早就写着「x/y（绝对像素，需配 screenId）」，这里把那句话实现掉。
+      // 注意 nx/ny 同时给了且可用时不拦：那是路径明确的归一化点击，不是「想点像素却落空」。
+      if (useAbs && !useRef && !useNorm && normalizeScreenId(screenId) === '') {
+        return {
+          ok: false, denied: false,
+          text: 'x/y 是绝对像素坐标，必须配 screenId（虚拟屏别名，如 "virtual-1"）——这次没给或给的是 "real"，'
+            + '而真实屏没有像素注入通道，照此执行只会静默点到别处。请改用：① nx/ny（0-1 归一化，相对物理屏；'
+            + '= 截图像素 x ÷ 截宽、y ÷ 截高）；② 或 x/y + screenId:"virtual-N"（坐标基于该虚拟屏自身像素，'
+            + '可先 android_vdisplay_status 看该屏宽高）；③ 或先用 android_ui_dump 拿 ref 再做语义点击。',
+        }
       }
       // **归一化坐标在虚拟屏上是歧义的，必须拒绝**（0.14.0 模拟器实锤的新缺陷）。
       //
