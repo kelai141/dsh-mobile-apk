@@ -1275,15 +1275,28 @@ internal class OverlayV2(private val svc: OverlayService) {
       lp.width = bubbleWidth
       lp.x = bubbleAnchorX(screen, bubbleWidth).coerceIn(margin, (rightLimit - bubbleWidth).coerceAtLeast(margin))
       // 关键 1：气泡不能贴底。贴底就是"接地的 sheet"，用户要的是"向上飘起"。
-      // 关键 2：改成 gravity=TOP 才能用绝对 y。带 gravity=BOTTOM 时 y 是从底边数的，
-      // 直接把"从顶边算的 chipRowTop-h-gap"塞进去，窗口会被算到屏幕最上方（实测 y=1330
-      // 变成了距顶 165px 的顶部气泡）。
-      lp.gravity = Gravity.TOP or Gravity.START
-      val location = IntArray(2)
-      c.view.getLocationOnScreen(location)
-      val chipRowTop = location[1] - c.chipSizesPx(OverlayWindowFrames.composerWidthPx(screen)).first.second
+      // 关键 2：用 gravity=BOTTOM **锚住底边**，而不是用 gravity=TOP 把顶边摆到一个
+      // 由"测量高度"推出来的位置。后者两次实测都被内容撑破：横屏 chip 行顶 726、
+      // gap 15px，按测量高 114 算出的 y=597 看着对，但窗口实际高 138 ⇒ 底边落到 735，
+      // 把 chip 顶部压掉 9px（竖屏同样压 9px：底边 1435 vs chip 顶 1426）。
+      // 测量值比实际矮 24px 是常态（气泡表面还有内边距/边框不参与测量），所以
+      // 高度只能当**期望值**，位置必须由真实底边定：y 是"窗口底边距屏幕底部"的距离，
+      // 令底边 = chipRowTop - gapPx ⇒ y = screenHeightPx - chipRowTop + gapPx。
+      // 这样不管内容把窗口撑多高，气泡永远悬在 chip 上方，两种朝向都不会压到它。
+      lp.gravity = Gravity.BOTTOM or Gravity.START
+      // chip 行的顶边**直接读它自己的窗口坐标**（那个窗口是 gr=TOP，y 就是屏幕 y）。
+      // 别用「composer 位置 - chip 高 - gap」反推：横屏实测反推值 750、真实值 726，
+      // 差 24px，气泡底边就压进 chip 9px（竖屏同样压 9px：底边 1435 vs chip 顶 1426）。
+      // 反推依赖 composer 内部布局（chip 行在药丸上方还是内嵌、间距算不算进窗口），
+      // 任一变动都会让这个差值漂移，而窗口坐标没有这层假设。
+      val chipRowTop = windows.params(OverlayWindows.Slot.WORKSPACE)?.y
+        ?: run {
+          val location = IntArray(2)
+          c.view.getLocationOnScreen(location)
+          location[1] - c.chipSizesPx(OverlayWindowFrames.composerWidthPx(screen)).first.second
+        }
       val gapPx = (10f * screen.density).toInt()
-      lp.y = (chipRowTop - h - gapPx).coerceAtLeast(margin)
+      lp.y = (screen.heightPx - chipRowTop + gapPx).coerceAtLeast(margin)
     } else {
       lp.gravity = Gravity.BOTTOM or Gravity.START
       lp.y = screen.navBarPx

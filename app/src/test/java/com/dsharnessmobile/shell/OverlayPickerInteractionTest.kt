@@ -237,6 +237,33 @@ class OverlayPickerInteractionTest {
     assertEquals(0, fake.removes)
   }
 
+  /**
+   * 气泡的底边必须由 **chip 行窗口的真实 y** 决定，不能由「composer 位置 - chip 高 - gap」反推，
+   * 也不能用 gravity=TOP 把顶边摆到「由测量高度推出来的 y」。
+   *
+   * 设备实测（横屏 1600x900 / 密度 1.5）两次都翻车：
+   *  - gravity=TOP + 测量高度 114 ⇒ 窗口实际被内容撑到 138，底边 735 压住 chip 顶 726 达 9 px；
+   *  - 换成反推 chipRowTop=750（真实 726）⇒ 同样压 9 px。竖屏同症状：底边 1435 vs chip 顶 1426。
+   *
+   * 现方案 gravity=BOTTOM 锚底边 + 直接读 WORKSPACE 窗口的 y，实测底边 711 / chip 顶 726，
+   * 间隙 15px（10dp x 1.5），两种朝向都成立。这条用例锁住「锚真实窗口、不反推」这两个要点。
+   */
+  @Test
+  fun pickerBubbleAnchorsItsBottomToTheRealChipWindowInsteadOfGuessedHeight() {
+    val text = source("OverlayV2.kt")
+    val sync = body(text, "syncDrawerWindow")
+    // 必须用 BOTTOM 锚底边：TOP + 测量高度会被内容撑破。
+    assertTrue("bubble must anchor its bottom edge", sync.contains("lp.gravity = Gravity.BOTTOM or Gravity.START"))
+    // 必须读 chip 窗口的真实 y；反推值实测偏 24px。
+    assertTrue("chip row top must come from the real window",
+      sync.contains("windows.params(OverlayWindows.Slot.WORKSPACE)?.y"))
+    // y 必须是「屏幕高 - chipRowTop + gap」这一形态，符号写反就会把气泡推到屏幕外或压住 chip。
+    assertTrue("bottom anchor formula", sync.contains("screen.heightPx - chipRowTop + gapPx"))
+    // 不允许回到「用测量高度算顶边」的老写法。
+    assertFalse("must not position by measured height",
+      sync.contains("lp.y = (chipRowTop - h - gapPx)"))
+  }
+
   private fun source(name: String) = listOf(
     File("src/main/java/com/dsharnessmobile/shell", name),
     File("app/src/main/java/com/dsharnessmobile/shell", name),
