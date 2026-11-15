@@ -8,10 +8,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
 const PLUGINS = [
-  'dsh-android-manage',
+  'dsh-android-phone-control',
   'dsh-android-browser',
   'dsh-android-bridge',
-  'dsh-android-vdisplay',
   'dsh-android-file-open',
   'dsh-android-linux-env',
 ]

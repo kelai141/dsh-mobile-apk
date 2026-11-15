@@ -44,6 +44,22 @@ class NotificationContractTest {
     ),
   ).readText()
 
+  /**
+   * 通知投影已迁到 shared-notifications.ts / notify-projection.ts；index.ts 只剩再导出。
+   * 断言必须跟着逻辑走，否则「文件在场」会代替「行为在场」。
+   */
+  private fun bridgeModule(name: String): String = find(
+    listOf(
+      "../plugins/dsh-android-bridge/src/" + name,
+      "plugins/dsh-android-bridge/src/" + name,
+      "../../plugins/dsh-android-bridge/src/" + name,
+    ),
+  ).readText()
+
+  private fun notificationBridgeSource(): String =
+    listOf("shared-notifications.ts", "notify-projection.ts", "index.ts")
+      .joinToString("\n") { bridgeModule(it) }
+
   /** 页面侧（dsh-client-ui-responsive）源文件：apk 仓镜像与本仓权威源两种布局都接受。 */
   private fun uiSource(rel: String): String = find(
     listOf(
@@ -457,10 +473,13 @@ class NotificationContractTest {
     val block = m.substring(idx, m.indexOf("/>", idx).let { if (it < 0) m.length else it })
     assertTrue("通知动作 receiver 必须 exported=false", block.contains("android:exported=\"false\""))
     assertFalse("通知动作 receiver 不得 exported=true", block.contains("android:exported=\"true\""))
-    // 口径校正：本 manifest 早已有两个 exported=true 的 receiver —— 断言不得写成「receiver 数量 == 0」
-    val exportedTrue = Regex("android:exported=\"true\"").findAll(m).count()
-    assertTrue("manifest 既有 exported=true 的 receiver 仍在（断言不得写成数量为 0）", exportedTrue >= 2)
-    assertTrue("receiver 声明总数 >= 3（含通知动作 receiver）", m.split("<receiver").size - 1 >= 3)
+    // 口径校正：receiver 声明数随旧通道退役而减少（ADB 键盘通道已删），断言不得钉死总数。
+    // 守住的是：通知动作 receiver 在内，且开机自启 receiver 这类既有 exported=true 声明仍在。
+    val receivers = m.split("<receiver").size - 1
+    assertTrue("至少还有通知动作与开机自启两个 receiver（实际 " + receivers + "）", receivers >= 2)
+    val exportedTrueReceivers = Regex("<receiver[^>]*?android:exported=\"true\"", RegexOption.DOT_MATCHES_ALL)
+      .findAll(m).count()
+    assertTrue("开机自启这类 exported=true 的 receiver 仍在（不得被顺手删掉）", exportedTrueReceivers >= 1)
   }
 
   // ── NT-07 / NT-09 / NT-11：接线与独立性 ─────────────────────────────────
@@ -558,18 +577,26 @@ class NotificationContractTest {
 
   @Test
   fun 引擎侧不得复活D13与D14误读() {
-    val code = codeOnly(bridgeSource())
+    // 投影本体在 notify-projection.ts，写入点在 shared-notifications.ts；index.ts 只剩再导出。
+    val code = codeOnly(notificationBridgeSource())
     assertFalse("D14：不得读 session.header.title", code.contains(".header?.title") || code.contains("header.title"))
     assertFalse("D13：不得把 reason 当 outcome", code.contains("outcome === 'success'") || code.contains("d?.outcome"))
     assertTrue("D13：turn/end 必须走 turnEndOk", code.contains("turnEndOk("))
+    assertEquals("turnEndOk 必须由投影模块定义并导出（不得只在再导出处出现）",
+      1, Regex("export function turnEndOk\\(").findAll(codeOnly(bridgeModule("notify-projection.ts"))).count())
   }
 
   @Test
   fun 引擎侧新信道写入在场且旧信道保留一个迭代周期() {
-    val src = bridgeSource()
+    val src = notificationBridgeSource()
     assertTrue(src.contains(".notify.ndjson"))
     assertTrue(src.contains("kind: 'report'"))
     assertTrue(src.contains("kind: 'todo'"))
     assertTrue("旧信道兼容期保留", src.contains(".task-done.ndjson"))
+    // 只匹配文件名：同一文件的写法带前导 "/" 且引号风格不一，钉整串会把断言变成字面量抄写。
+    assertEquals("旧信道的写盘点必须已搬到共享模块（index.ts 不再直接持有）",
+      1, Regex("task-done\\.ndjson").findAll(bridgeModule("shared-notifications.ts")).count())
+    assertEquals("index.ts 不得再直接写旧信道（迁移后只剩再导出）",
+      0, Regex("task-done\\.ndjson").findAll(bridgeModule("index.ts")).count())
   }
 }

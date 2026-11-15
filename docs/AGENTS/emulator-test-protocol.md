@@ -74,6 +74,10 @@ Coordination-only tools and delivery plans are external prerequisites, not files
 
 ## 3. 设备与前置检查（跑之前先过一遍）
 
+隔离原生控制宿主的 MuMu 仪器套件：先安装同一构建的 x86_64 调试 APK 与 androidTest APK，再执行 `pwsh -File scripts/test-native-control-mumu.ps1 -VmIndex <编号> -ExpectedName <专用实例名> -EvidenceDir <新目录>`。脚本限定实例与 ABI，拒绝运行中的 Node；启动仪器进程后临时重绑 A11y，结束恢复设置。套件覆盖私有 IPC、真实截图、裁剪交付、节点文本与过期 ref，以及通过调试按钮计数验证真实点击与同一请求的幂等回执。它属于原生组件设备验证；生产模型任务、CDP 和 ADB 用户操作按三层门另验。
+
+Shizuku 点按用例加 `-Shizuku`，仅在专用实例的 Shizuku 管理页实际开启 DSH 授权后运行；该模式不绑定 DSH 无障碍。撤权后另用新证据目录加 `-Shizuku -ShizukuDenied`，要求服务仍运行、请求未派发且测试按钮计数不变。
+
 设备矩阵、装机命令、CDP 端口与探活见 `AGENTS.md` §2 与 `docs/AGENTS/adb-chain.md`。本规范只列**跑验收前**必须确认的前置：
 
 ```bash
@@ -236,6 +240,7 @@ Settings probes read section labels after excluding injected description and che
 并关闭新增样式复现遮挡。该命令只计代码层；设备侧仍需打开真实长对话、滚动到按钮出现的位置，
 用 CDP 读取按钮与正文边界，再用 ADB 连续滚动、点击回到底部及切换输入法，保留横竖屏截图。
 
+原生控制的专用 MuMu 启动器另支持 `-DualChannel` 与 `-VirtualDisplay`，均要求预先在 Shizuku 管理页授权。前者在仪器进程启动后重绑 A11y，断言双通道就绪、点按走 A11y 且重发不再点击；后者在 A11y 关闭时验证壳侧建屏、同别名重建、旧代次明确拒绝及撤出注册。它们与 `-Shizuku` 互斥，均只计隔离组件设备证据。
 ## 11. 原生悬浮窗验证补充
 
 [verify-overlay-v2.mjs](<scripts/verify-overlay-v2.mjs>)默认只inspect，只有显式`--scenario gestures`才执行输入；每步截图与actual frame联存。须先准备允许悬浮窗的中性后台应用，确认真实PNG方向/density，不在系统权限页套用旧球坐标。到顶保持用`--top-idle-ms 60000`；药丸第二次上推必须在实际触区内且坐标非负，驱动注入的目标速度不等于Android收到的真实末速，失败后结合debug手势日志核对，禁止下调产品阈值洗绿。

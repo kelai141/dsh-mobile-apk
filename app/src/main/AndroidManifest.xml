@@ -52,33 +52,7 @@
       android:exported="false"
       android:process=":browser" />
 
-    <!-- 0.13.2 ADB 输入通道 IME（ADBKeyboard 协议；android_ui_input 中文输入；
-         仅在被选为当前输入法时提交文本，见 AdbKeyboardService.canCommit）。 -->
-    <service
-      android:name=".AdbKeyboardService"
-      android:exported="true"
-      android:permission="android.permission.BIND_INPUT_METHOD"
-      android:label="@string/adb_keyboard_label">
-      <intent-filter>
-        <action android:name="android.view.InputMethod" />
-      </intent-filter>
-      <meta-data
-        android:name="android.view.im"
-        android:resource="@xml/input_method" />
-    </service>
-
-    <!-- ADBKeyboard 协议广播入口（ADB_INPUT_TEXT/ADB_CLEAR_TEXT）；仅在 IME 活跃时生效。
-         0.14.8 #413：targetSdk 26+ 的 manifest 接收器收不到**隐式**广播（设备实测 0 个接收者），
-         因此点名组件/点名包的广播由本组件承接；纯隐式广播由 AdbKeyboardService 在 IME
-         活跃期运行期注册的接收器承接（两个实例按投递方式分工，见 AdbKeyboardReceiver）。 -->
-    <receiver
-      android:name=".AdbKeyboardReceiver"
-      android:exported="true">
-      <intent-filter>
-        <action android:name="ADB_INPUT_TEXT" />
-        <action android:name="ADB_CLEAR_TEXT" />
-      </intent-filter>
-    </receiver>
+    <!-- Text input is owned by the native controller; no application IME is registered. -->
 
     <!-- 0.13.2 W7：悬浮球实时面板（TYPE_APPLICATION_OVERLAY + FileObserver 事件流）。 -->
     <service

@@ -18,7 +18,20 @@ class RootOwnershipTest {
     assertTrue(aidl.contains("void configure(int appUid, String appDataDir)"))
     assertTrue(aidl.contains("Bundle repairOwnership(in String path, int maxEntries)"))
     assertTrue(aidl.contains("Bundle configuration() = 10"))
-    assertTrue(kotlin("ShizukuUserService").contains("PROTOCOL_VERSION = 4"))
+    // 版本号只前进：v4 的 configure/repair 语义必须仍在，后续新增事务不得重编号旧事务。
+    val version = Regex("const val PROTOCOL_VERSION = (\\d+)")
+      .find(kotlin("ShizukuUserService"))?.groupValues?.get(1)?.toIntOrNull()
+    assertTrue("协议版本必须 >= 4（v4 面仍在）", version != null && version >= 4)
+    // 编号不重排：这些既有事务号必须逐字保持，新增事务只能往后追加。
+    for (anchor in listOf(
+      "void configure(int appUid, String appDataDir) = 8",
+      "Bundle repairOwnership(in String path, int maxEntries) = 9",
+      "Bundle configuration() = 10",
+      "int nativeInputCapabilities() = 11",
+      "Bundle nativeTapReal(int x, int y) = 12",
+    )) {
+      assertTrue("既有事务号不得重排：" + anchor, aidl.contains(anchor))
+    }
     val transport = kotlin("ShizukuTransport")
     assertTrue(transport.contains("val ack = remote.configuration()"))
     assertTrue(transport.contains("if (valid) configuredForAge = age"))
@@ -55,8 +68,10 @@ class RootOwnershipTest {
     assertTrue(transport.contains("OwnershipRepairCore.MAX_ENTRIES, 20_000L"))
     assertFalse(transport.contains("owner == 0"))
     val jobs = kotlin("RootOwnershipJobs")
-    assertTrue(jobs.contains("if (running) return false"))
-    assertTrue(jobs.contains("wait.await(30, TimeUnit.SECONDS)"))
+    // start() 现在回传本次 Launch（ID + 闩），未启动返回 null；单飞判据本身不变。
+    assertTrue(jobs.contains("if (running) return null"))
+    // 等待用的是本次启动自己的闩（ID 与闩成对），不再从共享字段二次读取；30 秒有界不变。
+    assertTrue(jobs.contains("launch.latch.await(30, TimeUnit.SECONDS)"))
     assertTrue(jobs.contains("repair-result-unknown"))
     val bridge = kotlin("AndroidBridge")
     assertTrue(bridge.contains("RootOwnershipJobs.request(app)"))

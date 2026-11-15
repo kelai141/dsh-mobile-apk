@@ -439,7 +439,17 @@ class ShizukuBindStateTest {
     assertTrue("超时也必须移除远端僵尸，而非只清本地标志", watchdogBody.contains("discardOnMain(previous.userArgs, previous.connection, remove = true)"))
     assertFalse("resetConnection 不得同步等待新绑定（UI 路径）", body.contains("latch.await("))
     assertTrue("必须调用 bindState.onReset()（否则我们这一侧的闩不清，重置无效）", body.contains("bindState.onReset()"))
-    assertTrue("必须让 caps 缓存失效（否则最多 5 秒仍报旧值）", body.contains("ControlCarrier.invalidateShizukuCache()"))
+    // 旧实现靠 ControlCarrier.invalidateShizukuCache() 清 5 秒缓存；载体退役后，
+    // 能力失效的承重入口是 NativeShizukuFacts.onConnectionLost(新代)：它把绑定/功能就绪/
+    // 远端身份/各实测能力位一起降级并推进失效计数，使在飞结果无法写回。
+    assertTrue("必须让原生能力事实失效（旧 5 秒缓存已随载体退役）",
+      body.contains("NativeShizukuFacts.shared.onConnectionLost(bindState.currentGeneration)"))
+    val facts = File("src/main/java/com/dsharnessmobile/shell/nativecontrol/NativeShizukuFacts.kt").readText()
+    val lost = facts.substringAfter("fun onConnectionLost(generation: Long)").substringBefore("\n  }")
+    assertTrue("失效必须覆盖各类实测能力位",
+      listOf("functionalReady = null", "serverUid = null", "realTap = null", "realText = null", "realTree = null")
+        .all { lost.contains(it) })
+    assertTrue("失效必须推进票据计数（在飞结果不得写回）", lost.contains("invalidate()"))
     // 写后回读仍在（status(app)），但返回必须经动作面组装——直接 return status 会把「重置成功、
     // 通道待重建」渲染成「重置失败」（0.14.2 设备实测缺陷）。
     assertTrue("必须写后回读 status()（就绪事实取自真源，不得自造）", body.contains("status(app)"))

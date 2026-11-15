@@ -87,7 +87,9 @@ test('ST-16：workspace 实时取引擎启动目录（应用工作区根），en
 })
 
 test('ST-16：配方含三键来源标签，且工具面/状态路由仍在场', async () => {
-  const harness = makeCtx({ sandboxPolicy: { defaultMode: 'workspace-write' }, androidPrivilege: { status: () => ({ tier: 'T0' }) } })
+  const harness = makeCtx({ sandboxPolicy: { defaultMode: 'workspace-write' }, nativeSharedBridge: {
+    statusAsync: async () => ({ tier: 'T0', tierSource: 'native-capabilities', capabilitiesRead: true }),
+  } })
   apply(harness.ctx)
   const recipe = await callRoute(harness, '/api/android/env/recipe')
   for (const key of ['writeMode', 'writeModeSource', 'workspace', 'workspaceSource', 'sharedDirsSource']) {
@@ -96,6 +98,18 @@ test('ST-16：配方含三键来源标签，且工具面/状态路由仍在场',
   const status = await callRoute(harness, '/api/android/env/status')
   assert.equal(status.adbTier, 'T0')
   assert.deepEqual(harness.tools.map((t) => t.name).sort(), ['android_env_recipe', 'android_toolchain_status', 'linux_environment_status'])
+})
+
+test('原生档位未知时保持 unknown，不得回落 T0/T1', async () => {
+  const unreadable = makeCtx({ nativeSharedBridge: {
+    statusAsync: async () => { throw new Error('native unavailable') },
+  } })
+  apply(unreadable.ctx)
+  assert.equal((await callRoute(unreadable, '/api/android/env/status')).adbTier, 'unknown')
+
+  const missing = makeCtx({})
+  apply(missing.ctx)
+  assert.equal((await callRoute(missing, '/api/android/env/status')).adbTier, 'unknown')
 })
 
 test('#222：环境 exact 路由在读取状态/配方前拒绝未认证与伪造 Host', async () => {

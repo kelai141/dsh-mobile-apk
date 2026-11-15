@@ -84,6 +84,15 @@ test('合规假插件通过（schema 自洽 + render 非空 + 注册完整）', 
   })
 })
 
+test('声明表中的工具漏注册仍判红', () => {
+  const table = "for (const [operation, name, description] of [['read', 'android_fixture_probe', 'Read.'], ['write', 'android_fixture_missing', 'Write.']] as const) { defineTool({ name, description }) }"
+  withPlugin({lib: toolSource(), src: table}, dir => {
+    const {status, out} = run(dir)
+    assert.equal(status, 1, out)
+    assert.match(out, /android_fixture_missing/)
+  })
+})
+
 test('返回值多一个未声明键就判红（引擎整值校验会拒绝）', () => {
   withPlugin({ lib: toolSource({ execute: 'async () => ({ ok: true, extra: 1 })' }) }, (dir) => {
     const { status, out } = run(dir)

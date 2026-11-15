@@ -1,7 +1,32 @@
-import { tokenMatches } from './control-queue.js'
-
 /** Control-token HTTP header shared by Android-owned loopback routes. */
 export const CONTROL_TOKEN_HEADER = 'x-dsh-control-token'
+
+/** Token floor: shell-generated values are longer; short placeholders never match. */
+const MIN_TOKEN_LENGTH = 8
+
+/** Test switch that enables the environment token for deterministic probes. */
+export const CONTROL_TOKEN_TEST_ENV = 'DSH_CONTROL_TOKEN_TEST'
+
+const CONTROL_TOKEN_ENV = 'DSH_CONTROL_TOKEN'
+
+/** Exact token comparison; absent or too-short values fail closed. */
+export function tokenMatches(expected: string | undefined, provided: unknown): boolean {
+  if (typeof expected !== 'string' || expected.length < MIN_TOKEN_LENGTH) return false
+  return typeof provided === 'string' && provided === expected
+}
+
+/** Production reads the live shell prefs token; the env token only works with the test switch. */
+export function controlTokenFrom(
+  env: NodeJS.ProcessEnv,
+  prefs: { controlToken?: string } | undefined,
+): string | undefined {
+  const valid = (value: unknown): string | undefined =>
+    typeof value === 'string' && value.length >= MIN_TOKEN_LENGTH ? value : undefined
+  const fromPrefs = valid(prefs?.controlToken)
+  const rawFlag = env[CONTROL_TOKEN_TEST_ENV]
+  if (rawFlag !== '1' && rawFlag !== 'true') return fromPrefs
+  return valid(env[CONTROL_TOKEN_ENV]) ?? fromPrefs
+}
 
 /**
  * Loopback host names accepted when a deployment provides no client-connection service.

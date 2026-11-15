@@ -25,8 +25,11 @@ class ShizukuUserServiceBridge() : ShizukuUserService.Stub() {
     private const val TAG = "dsh-shizuku-user"
     private const val OUTPUT_LIMIT = 16 * 1024
 
-    /** v3（2026-09-30）：新增 [configure] / [repairOwnership]——root 通道写盘的属主归一。 */
-    const val PROTOCOL_VERSION = 4
+    /**
+     * v3（2026-09-30）：[configure] / [repairOwnership]——root 通道写盘的属主归一。
+     * v6（2026-11-14）：按 displayId 的实测能力、文本、节点与原始帧事务（18-21）。
+     */
+    const val PROTOCOL_VERSION = 6
     private const val MAX_TIMEOUT_MS = 600_000
     private const val MIN_TIMEOUT_MS = 250
     private const val CHUNK_LIMIT = 512 * 1024
@@ -322,6 +325,247 @@ class ShizukuUserServiceBridge() : ShizukuUserService.Stub() {
   }
 
   private fun isAbsolute(path: String): Boolean = path.startsWith("/") && path.length > 1
+
+  private fun nativeInputCallerAllowed(): Boolean =
+    Process.myUid() == 2000 && appUid > 0 && android.os.Binder.getCallingUid() == appUid
+
+  /**
+   * Capability bits are measured on every call, never inferred from readiness:
+   * bit 0 = the typed point tap surface below; bit 1 = the focused-editor surface it actually probes.
+   * bit 2 = the typed raw-tree read (display 0 only) whose connection was actually observed here.
+   * bit 3 = reserved for the shared-frame capture transaction.
+   * An unconfigured caller or a non-shell identity gets 0, so an older app keeps working with bit 0.
+   */
+  override fun nativeInputCapabilities(): Int {
+    if (!nativeInputCallerAllowed()) return 0
+    val tap = if (File("/system/bin/input").canExecute()) 1 else 0
+    val text = if (NativeShizukuEditor.available()) 2 else 0
+    // A tree bit is only published when this service could actually open and enumerate windows.
+    val tree = if (NativeShizukuTree.available()) 4 else 0
+    val capture = if (NativeShizukuCapture.available()) 8 else 0
+    val motion = if (com.dsharnessmobile.shell.nativecontrol.NativeShizukuMotion.advertisedOps()
+      .containsAll(listOf("longClick", "scroll", "global", "launchApp"))) 16 else 0
+    val nodes = if (tree != 0) 32 else 0
+    return tap or text or tree or capture or motion or nodes
+  }
+
+  override fun nativeTapReal(x: Int, y: Int): Bundle {
+    fun result(code: String, executed: String) = Bundle().apply {
+      putString("code", code)
+      putString("executed", executed)
+    }
+    // The existing bit-0 path keeps its own measured gate and never builds the editor automation.
+    if (!nativeInputCallerAllowed() || !File("/system/bin/input").canExecute())
+      return result("shizuku-native-input-unavailable", "no")
+    if (x !in 0..65535 || y !in 0..65535) return result("invalid-coordinate", "no")
+    // The package and UID are pinned at configure(); the Binder method cannot accept an argv.
+    val process = try {
+      ProcessBuilder("/system/bin/input", "-d", "0", "tap", x.toString(), y.toString())
+        .redirectErrorStream(true).start()
+    } catch (_: java.io.IOException) {
+      return result("shizuku-input-start-failed", "no")
+    }
+    return try {
+      val outcome = ProcIo.readBoundedMillis(process, 4_000L, 1024)
+      if (outcome.complete && !outcome.truncated && outcome.text.isBlank() && process.exitValue() == 0) {
+        result("shizuku-input-accepted", "yes")
+      } else {
+        // Nonzero exit, output, or timeout is not proof that Android injected nothing.
+        result("shizuku-input-unconfirmed", "unknown")
+      }
+    } catch (_: Exception) {
+      result("shizuku-input-unconfirmed", "unknown")
+    }
+  }
+
+  /**
+   * Focused-editor text for display 0. Every gate runs before the single possible mutation:
+   * real shell identity, the configured application Binder caller, measured bit 1, and a live
+   * elapsedRealtime deadline. There is no shell, IME, clipboard or root fallback here.
+   */
+  override fun nativeSetTextReal(text: String, clear: Boolean, deadlineMs: Long): Bundle {
+    fun result(code: String, executed: String) = Bundle().apply {
+      putBoolean("ok", executed == "yes")
+      putString("code", code)
+      putString("executed", executed)
+    }
+    if (!nativeInputCallerAllowed() || !NativeShizukuEditor.available())
+      return result("shizuku-editor-unavailable", "no")
+    if (text.toByteArray(Charsets.UTF_8).size > 8192) return result("invalid-text", "no")
+    if (deadlineMs <= android.os.SystemClock.elapsedRealtime()) return result("shizuku-editor-deadline", "no")
+    return try {
+      val reply = NativeShizukuEditor.setText(text, clear, deadlineMs)
+      val code = reply.getString("code") ?: "shizuku-text-unconfirmed"
+      when (reply.getString("executed")) {
+        "yes" -> if (code == "shizuku-text-confirmed") result(code, "yes")
+          else result("shizuku-text-unconfirmed", "unknown")
+        "no" -> result(code, "no")
+        // Missing or malformed execution evidence must not be reported as a success.
+        else -> result("shizuku-text-unconfirmed", "unknown")
+      }
+    } catch (_: Exception) {
+      // The editor dispatched only after its own gate; a thrown Binder call may have mutated text.
+      result("shizuku-text-unconfirmed", "unknown")
+    }
+  }
+
+  /**
+   * Raw UI tree for the real display only. The caller is the configured application, the process
+   * is a shell identity, and displayId must be 0; there is no argv, window or virtual-display
+   * override and no replay of a failed read.
+   */
+  override fun nativeCaptureReal(deadlineMs: Long): android.os.ParcelFileDescriptor? {
+    if (!nativeInputCallerAllowed() || deadlineMs <= SystemClock.elapsedRealtime()) return null
+    return runCatching { NativeShizukuCapture.capture(deadlineMs, spoolFile(appDataDir)) }.getOrNull()
+  }
+
+  override fun nativeMotionReal(operation: String, argsJson: String, deadlineMs: Long): Bundle {
+    if (!nativeInputCallerAllowed() || argsJson.toByteArray(Charsets.UTF_8).size > 16 * 1024) {
+      return Bundle().apply { putBoolean("ok", false); putString("code", "shizuku-motion-unavailable"); putString("executed", "no") }
+    }
+    return try { com.dsharnessmobile.shell.nativecontrol.NativeShizukuMotion.execute(operation, org.json.JSONObject(argsJson), deadlineMs) }
+      catch (_: Exception) { Bundle().apply { putBoolean("ok", false); putString("code", "shizuku-motion-unconfirmed"); putString("executed", "unknown") } }
+  }
+
+  override fun nativeNodeReal(windowId: Int, path: IntArray, operation: String, argsJson: String,
+    expectedNode: String, deadlineMs: Long): Bundle {
+    if (!nativeInputCallerAllowed()) return Bundle().apply {
+      putBoolean("ok", false); putString("code", "shizuku-node-unavailable"); putString("executed", "no")
+    }
+    return NativeShizukuNode.execute(windowId, path, operation, argsJson, expectedNode, deadlineMs)
+  }
+
+  override fun nativeSnapshotReal(displayId: Int, deadlineMs: Long): Bundle {
+    fun result(code: String, executed: String) = Bundle().apply {
+      putBoolean("ok", false)
+      putString("code", code)
+      putString("executed", executed)
+    }
+    if (!nativeInputCallerAllowed()) return result("shizuku-tree-unavailable", "no")
+    if (displayId < 0) return result("shizuku-tree-display-unsupported", "no")
+    if (deadlineMs <= android.os.SystemClock.elapsedRealtime()) return result("shizuku-tree-deadline", "no")
+    return try {
+      // Read-only: an empty or unreadable tree is a refusal, never a partially published snapshot.
+      val (body, refusal) = NativeShizukuTree.read(
+        displayId = displayId,
+        deadlineMs = deadlineMs,
+        authorized = { nativeInputCallerAllowed() },
+        stillCurrent = { nativeInputCallerAllowed() },
+      )
+      if (body == null) result(refusal ?: "shizuku-tree-unavailable", "no")
+      else Bundle().apply {
+        putBoolean("ok", true)
+        putString("code", "shizuku-tree-captured")
+        putString("executed", "yes")
+        putString("body", body)
+      }
+    } catch (_: Exception) {
+      // A read has no side effect, but its result must not be replayed as if it succeeded.
+      result("shizuku-tree-unconfirmed", "no")
+    }
+  }
+
+  // ── v6：按 displayId 的实测能力与派发事务 ────────────────────────────────
+
+  /**
+   * Per-display capability bits measured on this call.
+   *
+   * The service only reports what it actually enumerated for that displayId:
+   * bit 0 = a focused editable window on this display, bit 1 = at least one window readable,
+   * bit 2 = that window has a root a node action can reach, bit 3 = capture was measured now.
+   * Display 0 keeps the existing whole-connection bits. Any other display needs its own windows;
+   * an empty window list, a destroyed display or a missing capture token returns 0 for that bit.
+   * No bit is carried over from another display.
+   */
+  override fun nativeDisplayCapabilities(displayId: Int, alias: String): Int {
+    if (!nativeInputCallerAllowed() || displayId < 0) return 0
+    if (displayId == 0) return nativeInputCapabilities()
+    if (alias.length !in 9..20) return 0
+    val tree = if (NativeShizukuTree.available(displayId)) 2 else 0
+    val text = if (NativeShizukuEditor.available(displayId)) 1 else 0
+    // A node action is only claimed when the same window could actually be rooted for this display.
+    val nodes = if (tree != 0 && NativeShizukuNode.available(displayId)) 4 else 0
+    val capture = if (NativeShizukuCapture.available(displayId, alias,
+      android.os.SystemClock.elapsedRealtime() + 2_000L)) 8 else 0
+    // 截图和 UI 树都是有效的坐标来源。游戏等自绘界面没有树时仍可用截图点按。
+    val gestures = if ((capture != 0 || tree != 0 || text != 0) &&
+      com.dsharnessmobile.shell.nativecontrol.NativeShizukuMotion.gesturesAvailable()) 16 else 0
+    return text or tree or nodes or capture or gestures
+  }
+
+  /**
+   * v6：按 displayId 的坐标手势。argv 由服务侧固定拼装，displayId 是唯一可变的目标 token；
+   * 调用方不能传 argv、shell 片段或其它参数名。
+   */
+  override fun nativeMotionDisplay(displayId: Int, operation: String, argsJson: String,
+    deadlineMs: Long): Bundle {
+    if (displayId < 0 ||
+      operation !in setOf("click", "longClick", "scroll", "swipe", "keyEvent", "global") ||
+      argsJson.toByteArray(Charsets.UTF_8).size > 16 * 1024) {
+      return Bundle().apply {
+        putBoolean("ok", false); putString("code", "shizuku-motion-unavailable"); putString("executed", "no")
+      }
+    }
+    if (!nativeInputCallerAllowed()) return Bundle().apply {
+      putBoolean("ok", false); putString("code", "shizuku-motion-unavailable"); putString("executed", "no")
+    }
+    return try {
+      com.dsharnessmobile.shell.nativecontrol.NativeShizukuMotion.execute(displayId, operation,
+        org.json.JSONObject(argsJson), deadlineMs)
+    } catch (_: Exception) {
+      Bundle().apply {
+        putBoolean("ok", false); putString("code", "shizuku-motion-unconfirmed"); putString("executed", "unknown")
+      }
+    }
+  }
+
+  /**
+   * Focused-editor text on one display. Same gates as [nativeSetTextReal]; the editor is selected
+   * only among windows of displayId, so a focused editor on another display is never written.
+   */
+  override fun nativeSetTextDisplay(displayId: Int, text: String, clear: Boolean, deadlineMs: Long): Bundle {
+    fun result(code: String, executed: String) = Bundle().apply {
+      putBoolean("ok", executed == "yes")
+      putString("code", code)
+      putString("executed", executed)
+    }
+    if (displayId < 0) return result("shizuku-editor-display-unsupported", "no")
+    if (!nativeInputCallerAllowed() || !NativeShizukuEditor.available(displayId))
+      return result("shizuku-editor-unavailable", "no")
+    if (text.toByteArray(Charsets.UTF_8).size > 8192) return result("invalid-text", "no")
+    if (deadlineMs <= android.os.SystemClock.elapsedRealtime()) return result("shizuku-editor-deadline", "no")
+    return try {
+      val reply = NativeShizukuEditor.setText(displayId, text, clear, deadlineMs)
+      val code = reply.getString("code") ?: "shizuku-text-unconfirmed"
+      when (reply.getString("executed")) {
+        "yes" -> if (code == "shizuku-text-confirmed") result(code, "yes")
+          else result("shizuku-text-unconfirmed", "unknown")
+        "no" -> result(code, "no")
+        else -> result("shizuku-text-unconfirmed", "unknown")
+      }
+    } catch (_: Exception) {
+      result("shizuku-text-unconfirmed", "unknown")
+    }
+  }
+
+  /** Raw frame for one display; the alias is only used to resolve a virtual screen's SF token. */
+  override fun nativeCaptureDisplay(displayId: Int, alias: String, deadlineMs: Long):
+    android.os.ParcelFileDescriptor? {
+    if (!nativeInputCallerAllowed() || displayId < 0) return null
+    if (deadlineMs <= SystemClock.elapsedRealtime()) return null
+    return runCatching {
+      NativeShizukuCapture.capture(displayId, alias, deadlineMs, spoolFile(appDataDir))
+    }.getOrNull()
+  }
+
+  override fun nativeNodeDisplay(displayId: Int, windowId: Int, path: IntArray, operation: String,
+    argsJson: String, expectedNode: String, deadlineMs: Long): Bundle {
+    if (displayId < 0 || !nativeInputCallerAllowed()) return Bundle().apply {
+      putBoolean("ok", false); putString("code", "shizuku-node-unavailable"); putString("executed", "no")
+    }
+    return NativeShizukuNode.execute(displayId, windowId, path, operation, argsJson, expectedNode, deadlineMs)
+  }
+
 }
 
 /** Private staging spool + immutable bounded snapshot; no live writer can own a published path. */

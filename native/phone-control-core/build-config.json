@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "crate": "native/phone-control-core",
+  "library": "dsh_phone_control_core",
+  "compiler": {
+    "rustc": "1.99.0"
+  },
+  "ndk": {
+    "version": "27.0.12077973",
+    "apiLevel": 26
+  },
+  "pageSize": 16384,
+  "abis": {
+    "arm64-v8a": {
+      "rustTarget": "aarch64-linux-android",
+      "linkerTriple": "aarch64-linux-android",
+      "elfMachine": 183
+    },
+    "x86_64": {
+      "rustTarget": "x86_64-linux-android",
+      "linkerTriple": "x86_64-linux-android",
+      "elfMachine": 62
+    }
+  }
+}

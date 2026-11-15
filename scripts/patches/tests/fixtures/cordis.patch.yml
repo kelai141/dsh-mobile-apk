@@ -11,16 +11,14 @@
       name: '@dsh-android/dsh-client-ui-responsive'
     - id: android-bridge
       name: '@dsh-android/dsh-android-bridge'
-    - id: android-manage
-      name: '@dsh-android/dsh-android-manage'
+    - id: android-phone-control
+      name: '@dsh-android/dsh-android-phone-control'
     - id: android-linux-env
       name: '@dsh-android/dsh-android-linux-env'
     - id: android-file-open
       name: '@dsh-android/dsh-android-file-open'
     - id: android-browser
       name: '@dsh-android/dsh-android-browser'
-    - id: android-vdisplay
-      name: '@dsh-android/dsh-android-vdisplay'
     - id: dsh-code-diff-viewer
       name: dsh-code-diff-viewer
       config:

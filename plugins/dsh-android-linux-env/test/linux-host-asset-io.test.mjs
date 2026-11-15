@@ -152,6 +152,28 @@ const installConfirmed = (service) => service.install({ runtimeId: RUNTIME_ID, c
 
 // ── 正控：真正准备好的暂存包可以激活 ────────────────────────────────────────
 
+test('the APK native library directory reaches the runtime plugin config', async () => {
+  const filesDir = await tempFilesDir()
+  // An app process on targetSdk >= 29 may only execute apk_data_file, so the
+  // glibc loader lives in nativeLibraryDir rather than in the rootfs.
+  const config = createLinuxBootstrapConfig({
+    filesDir,
+    appVersion: '0.15.0',
+    nativeLibDir: '/data/app/~~x==/com.dsharnessmobile.shell-~~y==/lib/arm64',
+  })
+  const runtime = config.runtimePluginConfig
+  assert.equal(runtime.nativeLibDir, '/data/app/~~x==/com.dsharnessmobile.shell-~~y==/lib/arm64')
+  // The asset adapter must survive the spread: install still downloads and
+  // extracts through it.
+  assert.equal(typeof runtime.downloadAsset, 'function')
+})
+
+test('an absent native library directory leaves the runtime config untouched', async () => {
+  const filesDir = await tempFilesDir()
+  const runtime = createLinuxBootstrapConfig({ filesDir, appVersion: '0.15.0' }).runtimePluginConfig
+  assert.equal('nativeLibDir' in runtime, false)
+})
+
 test('a genuine host-staged bundle activates', async () => {
   const filesDir = await tempFilesDir()
   try {

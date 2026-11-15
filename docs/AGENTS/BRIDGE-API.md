@@ -2,9 +2,9 @@
 
 ## fx2 插件特权服务边界
 
-公共 `execAdbShell`、`execAdbLine`、`controlExec` 不接受调用者提供的 `internal` 标记；出现该字段即拒绝。SurfaceFlinger 查询只经私有固定调用路径获得免会话授权，不允许调用者提供任意 shell 文本。动画比例改用 `readAnimationScales` / `writeAnimationScales`：仅三个固定设置键，写值仅允许非负十进制字符串或 null，仍检查会话权限级别和危险操作开关。manage 插件复用桥内会话上下文，不保存额外授权凭证。
+公共 `execAdbShell`、`execAdbLine`、`controlExec` 已被删除，旧插件特权面不复存在。现行特权通道只有 phone-control 的 `shExec`、`rootExec` 与 `termuxExec`：Rust `shell_policy.rs` 先做词法准入（`shExec` 只放行只读查询，写命令、重定向与命令替换一律 `shell-command-denied`），Kotlin `NativePrivilegeExecution` 再紧邻调用前复查 `authorize`。`rootExec` 与 `shExec` 各走独立授权，不存在一次授权复用两条通道。
 
-这不是同一 Node 进程内恶意插件的沙箱：会话对象和插件装配仍属于既有信任边界。壳侧屏幕范围校验继续保留；不能把私有调用标记当成对任意同进程攻击的完整隔离。
+这不是同一 Node 进程内恶意插件的沙箱：会话对象和插件装配仍属于既有信任边界。壳侧屏幕范围校验继续保留，由原生计划与 `ScreenScopePrefs` 共同承担。
 
 > 桥方法与签名以 AndroidBridge/BackGateBridge/consoleBridge 源码为准，计数由门禁现取；不沿用旧版数量。后文版本增量用于历史溯源，不能代表当前版本的构建或验收状态。
 
@@ -21,8 +21,8 @@
 | consoleBridge | 仅本地console页面的输入/尺寸/退出等契约，不复用BrowserHost网页桥。 |
 
 The native console callback `window.__consoleInsets(top, bottom, ime)` uses CSS pixels. `top` and `bottom` are system-bar insets; `ime` is the keyboard overlap still inside the WebView after native resizing, not the raw keyboard height. The page preserves navigation padding and subtracts only the remaining overlap once. Native geometry and page-layout regressions cover resized and unresized views.
-| 壳↔引擎 | 精确受保护Android路由、控制队列、file-incoming与通知$events；本地HTTP/TCP探针NO_PROXY；回包须lossless JSON。 |
-| 插件↔壳 | androidPrivilege与ControlCarrier/ControlPoller；会话权限和native screen范围在执行点复查，不因UI展示值推断授权。 |
+| 壳↔引擎 | 精确受保护 Android 路由、file-incoming 与通知 `$events`；手机控制不再走 HTTP 控制队列，改由应用私有 socket。本地 HTTP/TCP 探针仍用 NO_PROXY；回包须 lossless JSON。 |
+| 插件↔壳 | `nativeSharedBridge`（仅 browser op）与 phone-control 的 `NativeClient`；会话权限与 native screen 范围由 Rust 在执行点复查，不因 UI 展示值推断授权。旧 `androidPrivilege`、`ControlCarrier`、`ControlPoller` 已删除。 |
 
 ## 2. 0.14.3 当前增量
 
@@ -165,7 +165,7 @@ tier-2（`isolationTier=process-suffix`）把浏览器视图放在 `:browser` �
 | 页面 → 壳 | ~~`openRootManager()`~~ **已移除**（2026-09-30 主人指正） | — | **不做「打开 Root 管理器」入口**：各家管理器包名/入口不一（KernelSU / Magisk / APatch 之外还有 SukiSU 等分支，部分 ROM 甚至没有管理器 App）⇒ `getLaunchIntentForPackage` 不保证拿得到入口 ✗；而"能刷 root 的用户自己会开管理器" ✓ ⇒ 改为**诚实引导**（识别到管理器就报它的名字，识别不到就说"你使用的 Root 管理器"）。`rootAccessState` 保留 `manager{package,label,installed}` 只读字段供展示 |
 | 页面 → 壳 | `repairRootOwnership()` | AndroidBridge → RootOwnershipJobs.request | 立即返回 `repair-started`/`repair-running` 与维护状态，不表示已修好；既有 `rootGrantState().ownership` 轮询真实 `result`。固定本应用维护不受 AI 开关约束，无任意命令入口；完整/部分/未知结果分别显示。 |
 | 页面 → 壳 | `requestShizukuPermission()` | AndroidBridge → MainActivity → `ShizukuTransport.requestPermission` | **显式请求 Shizuku 授权**（UI 线程 + 前台 Activity；后台自动请求落不到用户眼前——实测管理器列表里没有本应用）。返回写后回读 status + `requested` |
-| 同上（su 直连） | — | RootAccess.execRoot + ShellOps.canFallbackBeforeDispatch | 仅确知未派发的通道不可用可回退一次，且须有效 AI consent 与 su 授权；root-policy refusal、命令 exit≠0、超时、Binder/派发后结果不明不重跑。AIDL v4 追加 `configuration()=10`，确认完整 app UID/anchor 后才派发；旧/未确认服务拒绝。 |
+| 同上（su 直连） | — | `RootAccess.execRoot` + `RootAccess.execPrivileged` 的独立授权 | 只有确知未派发的通道不可用才回退一次，且须有效 AI consent 与 su 授权；root-policy refusal、命令 exit≠0、超时、Binder/派发后结果不明不重跑。AIDL `PROTOCOL_VERSION = 6`：v4 起 `configuration()` 确认完整 app UID/anchor 后才派发，旧或未确认服务拒绝。旧 `ShellOps.canFallbackBeforeDispatch` 已随文件删除，回退判据在 `RootAccess` 内。 |
 | 同上（启动路径） | — | EngineStartFlow / EngineService / GuidePageRenderer | Activity 与前台 Service 的后台 worker 在快照事务恢复、fresh 判定和 Node 启动前调用共享单飞机制；相近启动复用5s内结算，未知结果延后启动，不重复派发。失败相位只在完整结果时报告完成，部分失败与未知明确提示。旧 head 的真机证据不能替代维护者修订后的验收。 |
 
 ## 0.14.1 增量（Shizuku 引导面与外部链接通道，2026-09-22）
@@ -229,10 +229,10 @@ JS interface count is checked from source by `scripts/check-bridge-symmetry.mjs`
 |---|---|---|---|
 | 页面 → 壳 | `getScreenScope()` / `setScreenScope(scope)` | AndroidBridge → MainActivity → `ScreenScopePrefs` | 用户设置唯一写面；wire 值仅 `virtual-only`、`real-only`、`all`，未知值回落 `virtual-only`。模型工具没有 setter。设置页落在开发者选项「屏幕与 Shizuku 控制」。 |
 | 页面 → 壳 | `browserHostStatus/show/hide/reload/bounds/viewport/close/identity` | AndroidBridge → MainActivity → `BrowserHost` | Files 右栏的可信页面把 CSS stage bounds 与视口预设传给壳；第二 WebView 只覆盖该 stage（letterbox rect，不做 CSS 缩放），不挂 JavaScript bridge。`browserHostBounds` 可见挂载1000ms续租、4000ms过期隐藏；hidden/detach停止续租，普通几何消息仍去重。`browserHostStatus` 自 0.14.10 起带 `isolationTier`（`profile-api` = WebView 114+ 会话级隔离 / `process-suffix` = 旧 WebView 走 `:browser` 独立进程 + 数据目录后缀共享档案 / `unavailable`），`available` 与 `profileIsolation/profileName` 均按档位判定；tier-2 下会话共享一个 `dsh-browser-v1` 档案（与引擎 cookie/存储隔离），页签与控制语义不变。`profileIsolation` 取值域 = `isolated`（tier-1，会话级隔离）/ `process-shared`（tier-2，档案全 app 共享，**会话之间没有隔离**，issue #1575）/ `not-created`（档位可用但尚未 attach）/ `unavailable`；`browser_caps` 用同一判据。 |
-| 页面 → 壳 | `vdisplayStatus/create/destroy/launchSettingsProbe/backProbe/bounds` | AndroidBridge → MainActivity → `VdisplayController`/`VdisplayHost` | 建屏/销毁/`am start --display` 探针/`input -d` 回退探针/viewer stage 几何。`virtual-1` 建成前一律 `screen-not-ready`，绝不映射 display 0。 |
+| 页面 → 壳 | `vdisplayStatus/create/destroy/select/bounds/attachViewerSurface/forceDestroy` | AndroidBridge → MainActivity → `VdisplayController`/`VdisplayHost` | 建屏/销毁/选择/舞台几何与 viewer Surface 交接；`vdisplayLaunchSettingsProbe` 与 `backProbe` 不存在。模型侧 vd 工具已移入 phone-control，面板仍走这条桥。 |
 | 页面 → 壳 | `dshBackBridge.setAvailable/getBackAvailable` | BackGateBridge（独立 @JavascriptInterface 对象） | 注入层回传页内层栈可用性；URL 由 Activity 决策，`getBackAvailable` 为只读事实。 |
-| 引擎 → 壳 | `dsh_screen_scope.xml` 只读 | `androidPrivilege.screenScope/screenAccess` | manage 工具在选 a11y/ADB 前读取 native scope；无障碍执行点仍重复检查，防止直连控制队列绕过。 |
-| 引擎 → 壳 | `android_vdisplay_input` → `vdInput` | bridge `controlExec` → `VdisplayOps` → `VdisplayController.input` | `real-only` 下 bridge 与壳执行点均返回稳定 `screen-out-of-scope`，壳在 Shizuku `input -d` 前复核；显式 target 优先于 selected，不能重定向输入。`virtual-only`/`all` 允许已登记虚拟目标。 |
+| 引擎 → 壳 | 原生计划读 `dsh_screen_scope.xml` | Rust 控制器 + `ScreenScopePrefs` | 默认 `virtual-only`；显式 target 直接解析，不得被 selected 覆盖；旧 `androidPrivilege.screenScope/screenAccess` 与 manage 工具已删除。 |
+| 引擎 → 壳 | `vdCreate/destroy/info/launchApp` | phone-control `NativeClient` → Rust 计划 → `NativeVdisplayExecution` → `VdisplayController.executeAuthorized` | 计划必须带 `virtual-N` 与已注册屏的 `generation`；授权门在 `createVirtualDisplay`/`release`/`remote am start` 紧前执行，不在 `ensureBound` 之前消费。`launchApp` 先回读 `displaysRunning`，包已在别的 display 即 `vd-launch-denied` 且 `executed=no`。 |
 | 壳 ↔ 引擎 ↔ 页面 | file-incoming queue / claim / content / complete / clean | FileIncoming → dsh-android-file-open → ui-responsive | 五条 exact 路由全部受保护；队列状态只给 opaque entry metadata；成功导航后 claim 得进程内 ticket，再经同源 content 读取字节并交给上游 composer 形成未发送 generic file attachment。路径不进入页面或模型，重启不恢复草稿。 |
 | 壳 ↔ 引擎 | 通知应答流 `$events`（streamId=`dsh-notify-responder`） | NotifyBridge ↔ MuxClient | 与悬浮球事件流独立；waterfall 投放通知、cancel 撤通知、`$events/result` 投递回答。 |
 
@@ -262,7 +262,7 @@ bootstrap 调用 `linuxPluginHost.install({directory,entry='lib/index.js',config
 
 ### 资产准备（0.15.0，(iii) 形态：客户端触发）
 
-**为什么由宿主准备字节、而不是 bootstrap 自取**：`.tar.xz` 的解码在引擎侧没有实现（Node 的 zlib 不含 xz，本仓 node_modules 无任何 xz/tar 包），而宿主已有生产级的解包能力可复用；更要紧的是**引擎侧没有反向通道**调用宿主——壳侧是客户端，长轮询引擎的 `/api/android/ui/pending`（`ControlPoller.kt:48/101-113`），而那条队列就是设备控制队列，其策略要求 `danger-full-access`（`control-policy.ts:68/84-87`）。把下载挂上去等于「装 Linux 必须先开设备控制档」，与「Linux 不是沙箱、不要只靠 danger-full-access」相悖。客户端触发走 `@JavascriptInterface` 直连，不经过那条队列，也不需要新增任何引擎→壳能力。
+**为什么由宿主准备字节、而不是 bootstrap 自取**：`.tar.xz` 的解码在引擎侧没有实现（Node 的 zlib 不含 xz，本仓 node_modules 无任何 xz/tar 包），而宿主已有生产级的解包能力可复用；更要紧的是**引擎侧没有反向通道**调用宿主——壳侧是客户端，旧的长轮询设备控制队列（`ControlPoller` 与 `control-policy.ts`）已随原生切换删除；当前手机控制走私有 socket，其会话门同样要求 `danger-full-access`。把下载挂上去等于「装 Linux 必须先开设备控制档」，与「Linux 不是沙箱、不要只靠 danger-full-access」相悖。客户端触发走 `@JavascriptInterface` 直连，不经过那条队列，也不需要新增任何引擎→壳能力。
 
 | JS 桥方法（`androidBridge`） | 语义 |
 |---|---|
@@ -276,4 +276,8 @@ bootstrap 调用 `linuxPluginHost.install({directory,entry='lib/index.js',config
 **端到端仍未打通（不记通过）**：客户端调用 `linuxAssetPrepare` 的那一步、以及引擎侧 bootstrap 的透传接线都**尚未落地**；且 bootstrap 包本身还没进注入集，因此**不会随应用分发**。本轮交付的是宿主侧「可准备」的能力与其反证，不是可安装的系统。
 
 页面状态由 `normalizeLinuxStatus` 映射，同时接受 Bionilux 定稿字段与此前提案字段；其中两条插件 `releaseUrl` 来自 bootstrap 状态（`pluginReleaseUrls` 或 `plugins.*.releaseUrl`），不拼接默认最新版本。Linux rootfs 是 glibc 运行支持，不是安全沙箱；guest root 不等于 Android root；Termux/Bionic Bash 与 Debian/glibc Linux Bash 分开展示，共享 glibc Node 不替换原有 Termux Node。已安装但 runtime 被手工移除时，页面显式显示「自动更新已停用」并要求重新放回并启用，而不是静默停更。内部 bootstrap 成品接线及真实安装验收状态见 `known-gaps.md`。
+
+# 原生控制隔离接口补充
+
+Shizuku UserService v4 保留既有事务编号；增加可选事务 `nativeInputCapabilities()`（11）和 `nativeTapReal(x, y)`（12）。前者 bit 0 表示仅真实屏点按；旧服务不识别事务则能力未知。后者要求已配置且匹配的 Binder 调用方、实际服务 UID 2000、固定 display 0 和整数坐标。只有 Rust 计划选中该通道且最终派发验证通过才发出调用。执行不确认时返回 `executed=unknown`，不重放。没有新增 WebView、Node 或公开 Binder 入口。
 

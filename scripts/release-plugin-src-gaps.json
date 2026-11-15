@@ -6,7 +6,7 @@
       "reason": "宿主侧 release 注入只覆盖 dsh-shell-termux / dsh-client-ui-responsive / dsh-host-web-compat；@dsh-android 插件由设备侧 make-snapshot.sh 与 build-apk-013.ps1 注入链装配进快照，release 快照里已带其 lib，重复注入会与快照内 lib 版本不一致（build-release.ps1 2e 的 hash 比对会拒）"
     },
     {
-      "plugin": "plugins/dsh-android-manage",
+      "plugin": "plugins/dsh-android-phone-control",
       "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入"
     },
     {
@@ -19,10 +19,6 @@
     },
     {
       "plugin": "plugins/dsh-android-browser",
-      "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入"
-    },
-    {
-      "plugin": "plugins/dsh-android-vdisplay",
       "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入"
     },
     {

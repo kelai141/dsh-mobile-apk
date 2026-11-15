@@ -2,6 +2,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
   <application>
+    <activity
+      android:name=".NativeControlClickFixtureActivity"
+      android:exported="false"
+      android:theme="@android:style/Theme.Material.NoActionBar" />
+    <activity
+      android:name=".NativeControlVirtualFixtureActivity"
+      android:exported="true"
+      android:permission="android.permission.DUMP"
+      android:taskAffinity="com.dsharnessmobile.shell.virtual_fixture"
+      android:theme="@android:style/Theme.Material.NoActionBar" />
+
     <!-- 兼容架构 spike（PR1）：独立进程宿主 + 主进程投影宿主，仅 debug 构建存在。 -->
     <service
       android:name=".BrowserSpikeService"

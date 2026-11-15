@@ -1,42 +1,121 @@
 {
-  "baseline": 18528,
+  "baseline": 11100,
   "perPlugin": {
     "dsh-android-bridge": {
-      "count": 4,
-      "bytes": 1464
-    },
-    "dsh-android-manage": {
-      "count": 14,
-      "bytes": 7897
+      "count": 0,
+      "bytes": 0,
+      "conditional": 0
     },
     "dsh-android-browser": {
       "count": 19,
-      "bytes": 4973
-    },
-    "dsh-android-vdisplay": {
-      "count": 4,
-      "bytes": 1575
+      "bytes": 5015,
+      "conditional": 0
     },
     "dsh-android-file-open": {
       "count": 1,
-      "bytes": 159
+      "bytes": 159,
+      "conditional": 0
     },
     "dsh-android-linux-env": {
       "count": 3,
-      "bytes": 519
+      "bytes": 519,
+      "conditional": 0
+    },
+    "dsh-android-phone-control": {
+      "count": 21,
+      "bytes": 5407,
+      "conditional": 8
+    },
+    "dsh-session-delete": {
+      "count": 0,
+      "bytes": 0,
+      "conditional": 0
     }
   },
-  "initialVisible": 2951,
-  "maskedGroups": [
-    "phone",
-    "browser",
-    "virtual-display"
+  "initialVisible": 9423,
+  "conditionalTools": [
+    "android_app_launch",
+    "android_env_prepare",
+    "android_root_exec",
+    "android_shell_exec",
+    "android_termux_channel_exec",
+    "android_vdisplay_create",
+    "android_vdisplay_destroy",
+    "android_vdisplay_status"
+  ],
+  "phoneTools": [
+    "android_app_launch",
+    "android_device_info",
+    "android_env_prepare",
+    "android_privilege_status",
+    "android_read_region",
+    "android_root_exec",
+    "android_screen_list",
+    "android_screenshot",
+    "android_shell_exec",
+    "android_termux_channel_exec",
+    "android_ui_click",
+    "android_ui_detail",
+    "android_ui_dump",
+    "android_ui_global",
+    "android_ui_input",
+    "android_ui_scroll",
+    "android_ui_swipe",
+    "android_vdisplay_create",
+    "android_vdisplay_destroy",
+    "android_vdisplay_status",
+    "android_web_dump"
   ],
   "visibleTools": [
-    "android_capabilities",
+    "android_browser_tier",
+    "android_device_info",
     "android_env_recipe",
     "android_file_incoming_status",
+    "android_privilege_status",
+    "android_read_region",
+    "android_screen_list",
+    "android_screenshot",
     "android_toolchain_status",
+    "android_ui_click",
+    "android_ui_detail",
+    "android_ui_dump",
+    "android_ui_global",
+    "android_ui_input",
+    "android_ui_scroll",
+    "android_ui_swipe",
+    "android_web_dump",
+    "browser_back",
+    "browser_click",
+    "browser_close_tab",
+    "browser_follow_tab",
+    "browser_forward",
+    "browser_get_text",
+    "browser_list_tabs",
+    "browser_navigate",
+    "browser_open",
+    "browser_press",
+    "browser_reload",
+    "browser_screenshot",
+    "browser_scroll",
+    "browser_set_identity",
+    "browser_set_viewport",
+    "browser_snapshot",
+    "browser_type",
+    "browser_wait",
     "linux_environment_status"
+  ],
+  "history": [
+    {
+      "baseline": 18528,
+      "initialVisible": 2951,
+      "at": "2026-11-14",
+      "note": "superseded by --update"
+    },
+    {
+      "baseline": 10105,
+      "initialVisible": 8567,
+      "at": "2026-11-14",
+      "note": "superseded by --update"
+    }
   ]
 }

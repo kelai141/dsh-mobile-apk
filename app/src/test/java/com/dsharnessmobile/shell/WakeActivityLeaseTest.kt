@@ -170,25 +170,41 @@ class WakeActivityLeaseTest {
     assertTrue("非终态释放必须走 drop（close 是终态，会锁死在放锁态）", code.contains("owner.acquisition.drop()"))
   }
 
+  /**
+   * 活动来源必须接到同一个租约入口。
+   *
+   * 迁移说明：旧 ControlPoller 已随原生宿主退役，「控制请求在途」不再是独立来源——
+   * 新链里只剩三类真实来源（启动窗口、重启窗口、每拍 live 流/启动冷却）。本用例改为
+   * 钉住这三条接线，并守住「入口唯一」：任何模块不得绕开 [EngineService.noteWakeActivity]
+   * 直接写 [WatchdogV2.WakeActivityLease]，否则租约就变成不可核对的隐式约定。
+   */
   @Test
-  fun 三类活动来源都必须接到同一个租约入口() {
+  fun 每类真实活动来源都必须接到同一个租约入口() {
     val service = codeOnly(source("EngineService.kt"))
-    val poller = codeOnly(source("ControlPoller.kt"))
     val watchdog = codeOnly(source("WatchdogV2.kt"))
-    assertTrue("活动租约必须有唯一入口", watchdog.contains("object WakeActivityLease"))
-    // 启动/重启窗口
+    assertTrue("活动租约必须有唯一实现", watchdog.contains("internal object WakeActivityLease"))
+    // 启动窗口：先记活动再取锁，否则租约为空时取到的锁下一拍就会被放掉。
     val ensure = service.substringAfter("private fun ensureEngine(epoch: ServiceEpoch)")
-    assertTrue("启动窗口必须记活动，且先于取锁", ensure.indexOf("noteWakeActivity()") in 0 until ensure.indexOf("WatchdogV2.acquireWakeLock"))
-    // 重启窗口：noteWakeActivity 必须紧接在 startEngine 之前（判定用的是 codeOnly，
-    // 注释行已被剔除，故这里按「同一段内先后的相对位置」断言）。
+    assertTrue("启动窗口必须记活动，且先于取锁",
+      ensure.indexOf("noteWakeActivity()") in 0 until ensure.indexOf("WatchdogV2.acquireWakeLock"))
+    // 重启窗口：noteWakeActivity 必须先于 startEngine。
     val restartBranch = service.substringAfter("WatchdogV2.TickAction.RESTART -> {")
-    assertTrue("重启窗口必须先记活动再拉起引擎", restartBranch.indexOf("noteWakeActivity()") in 0 until restartBranch.indexOf("startEngine(force = plan.force)"))
-    // turn 在跑（live 流变长）
-    assertTrue("每拍必须观测 live 流活动", service.contains("noteWakeActivityForTick(epoch)"))
+    assertTrue("重启窗口必须先记活动再拉起引擎",
+      restartBranch.indexOf("noteWakeActivity()") in 0 until restartBranch.indexOf("startEngine(force = plan.force)"))
+    // turn 在跑 / 启动冷却：每拍观测。
+    assertTrue("每拍必须观测 live 流与启动冷却窗", service.contains("noteWakeActivityForTick(epoch)"))
     assertTrue("live 流观测只做一次 length", watchdog.contains("internal fun liveFeedLength(context: Context)"))
-    // 控制请求在途
-    assertTrue("控制请求在途必须记活动", poller.contains("WatchdogV2.WakeActivityLease.note()"))
-    assertTrue("控制请求执行窗两端都记活动", poller.indexOf("noteWakeActivity()") in 0 until poller.indexOf("var outcome = try"))
+    val tick = service.substringAfter("private fun noteWakeActivityForTick(epoch: ServiceEpoch)")
+      .substringBefore("private fun ")
+    assertTrue("live 流变长才记活动（空转不得续持）", tick.contains("liveLength > previous"))
+    assertTrue("启动冷却窗内记活动", tick.contains("START_COOLDOWN_MS"))
+    // 入口唯一：只有 EngineService 的公开入口可以写租约。
+    val shellDir = File("src/main/java/com/dsharnessmobile/shell")
+    val directWriters = shellDir.walkTopDown().filter { it.isFile && it.extension == "kt" }
+      .filter { it.name != "WatchdogV2.kt" && it.name != "EngineService.kt" }
+      .filter { codeOnly(it.readText()).contains("WakeActivityLease.note(") }
+      .map { it.name }.toList()
+    assertTrue("租约写入必须集中在单一入口，实际另有：" + directWriters, directWriters.isEmpty())
   }
 
   @Test

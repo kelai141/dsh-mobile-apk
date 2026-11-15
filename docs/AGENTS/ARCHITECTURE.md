@@ -91,14 +91,19 @@
 
 | 文件 | 职责一句话 | 被引用 |
 |---|---|---|
-| AdbKeyboardService.kt | 内嵌 ADBKeyboard 协议 IME（android_ui_input 中文输入；仅活跃时提交） | 运行期注册 AdbKeyboardReceiver（隐式广播）+ 注销 |
-| AdbKeyboardReceiver.kt | ADB_INPUT_TEXT/ADB_CLEAR_TEXT 广播入口；来源校验（root 隐式信任 + nonce；#679 起 uid 2000 不再白名单）并写回结果码 | manifest 注册（只收点名组件广播）＋ IME 运行期注册（隐式广播） |
 | BootReceiver.kt | BOOT_COMPLETED 恢复用户同意状态 + BatteryWhitelist 引导 | manifest 注册（无代码调用方） |
 | ShizukuSupport.kt | Shizuku 反射探活（历史：引导页状态行只读展示） | EngineStartFlow（状态行） |
 | ShizukuProbe.kt | Shizuku 五态探针（absent/not-running/denied/prev11 等错误码 + guidance，fail-closed） | MainActivity、DeviceControlService、VdisplayController |
-| ControlPoller.kt | 无障碍控制队列客户端（引擎侧 exact 路由长轮询 + 心跳 + 回填；协议版本/能力声明） | EngineStartFlow、DeviceControlService |
-| ControlProtocolV2.kt | 控制协议 V2 列式编码器（壳侧唯一编码入口；句柄 = 原始行号；与引擎解码器由跨语言门禁锁定） | ControlPoller、DeviceControlService |
-| DeviceControlService.kt | 无障碍服务（语义控制面）：能力声明、树快照、动作执行、截屏、屏幕范围执行点复查 | ControlPoller、ControlPolicy（引擎侧） |
+| NativeControlRuntime.kt / NativeControlHost.kt | 壳侧原生控制宿主：随前台引擎服务起停，在后台打开私有 socket，Node 重启不重建 Rust 控制器 | EngineService、NativeControlDispatcher |
+| NativeControlDispatcher.kt / NativeControlFrames.kt | 计划分派与长度前缀帧协议；Rust 决定授权与通道，Kotlin 只执行计划 | NativeControlHost、各 Platform 适配器 |
+| nativecontrol/NativeA11yExecution.kt | a11y 计划的执行适配：快照、点击、长按、输入、滚动、滑动、全局动作、截屏与区域读取 | NativeControlRuntime |
+| nativecontrol/NativeShizukuExecution.kt | Shizuku 后端：真实屏输入、固定键码按键与虚拟屏手势/全局 Back | NativeControlRuntime |
+| nativecontrol/NativeVdisplayExecution.kt | vd 计划绑定别名与 generation，再调 `VdisplayController.executeAuthorized`；授权门在真实副作用紧前 | NativeControlRuntime |
+| nativecontrol/NativePrivilegeExecution.kt | `shExec`/`rootExec`/`termuxExec` 的执行适配；紧邻调用前复查 `authorize` | NativeControlRuntime |
+| nativecontrol/NativeEnvironmentExecution.kt | `prepareEnvironment` 只关/恢复三项框架动画倍率，无输入法逻辑 | NativeControlRuntime |
+| nativecontrol/NativeAppWebViewExecution.kt | 自有 WebView 的 DOM 读取与动作计划（`webSnapshot`/`webAction`） | NativeSharedHostExecution |
+| nativecontrol/NativeSharedHostExecution.kt | browserHost 与 phone/virtual 适配的分发；浏览器 op 只经 `BrowserHost.controlOp` | NativeControlRuntime |
+| DeviceControlService.kt | 无障碍服务的系统绑定与 `nativePlatformService`、共享文件令牌、兼容 `WindowPick`；语义与动作执行在 `nativecontrol/` | NativePlatformFacts、AndroidBridge |
 | GlobalActionCatalog.kt | 全局动作目录（名称 ↔ 平台常量 ↔ minSdk，纯数据；可用性由 getSystemActions() 驱动） | DeviceControlService |
 | NotifyCenter.kt | 引擎事件→系统通知：五类渠道、六类 kind 分流、弹窗/静默形态、自检面 | MainActivity、WatchdogV2、NotifyStore |
 | NotifyStore.kt | `.notify.ndjson` 偏移消费（FileObserver + 字节偏移持久化 + 双读不双发） | NotifyCenter |
@@ -114,18 +119,19 @@
 | LiveProbe.kt | 轻量真源探测原语（TCP connect + TTL ≤ 页面轮询周期；时钟/探测体可注入单测） | 迁移保留，无当前调用者 |
 | ApkArtifactCheck.kt | 启动页 APK 自更新产物校验（缓存/新下载两路径共用同一严格度：存在/大小/sha256） | GuidePageRenderer、UpdateChecker |
 
+（`AdbKeyboardService.kt` / `AdbKeyboardReceiver.kt` 已随旧手机控制链删除：应用不再注册输入法，文本输入改走无障碍或 Shizuku `ACTION_SET_TEXT`。）
 （`AdbState.kt` 已于 8141e5c「0.14.0 正式轮」删除：ADB 授权/审计职责拆进 `EngineAuth`/`ShizukuTransport`/`ControlAudit`/`LiveProbe`/`ProcIo`；旧行保留在 git 历史里，不再列于本表。）
 
 ## 5. 0.14 新增：Shizuku 特权 transport、虚拟屏与浏览器宿主
 
 | 文件 | 职责一句话 | 被引用 |
 |---|---|---|
-| ShizukuTransport.kt | 应用侧 Shizuku UserService 生命周期（权限状态、bind/解绑、固定 argv 与经授权的 `sh -c` 执行） | VdisplayController、MainActivity、ShellOps |
+| ShizukuTransport.kt | 应用侧 Shizuku UserService 生命周期（权限状态、bind/解绑、固定 argv 执行）；`shExec` 由 Rust 词法限定为只读查询 | VdisplayController、NativePrivilegeExecution、NativeShizukuExecution |
 | ShizukuUserService.kt | shell/root 侧 v4 服务，确认完整 app UID/可信数据 anchor；有界执行、文件传输和共享 FD 属主修复 | ShizukuTransport |
-| RootGrant.kt / RootAccess.kt | 有效 AI 同意与 su 授权是独立门；最后可信派发点检查，固定维护例外不暴露任意 shell | ShizukuTransport、ShellOps、AndroidBridge |
+| RootGrant.kt / RootAccess.kt | 有效 AI 同意与 su 授权是独立门；最后可信派发点检查，固定维护例外不暴露任意 shell | ShizukuTransport、NativePrivilegeExecution、AndroidBridge |
 | OwnershipRepairCore.kt / OwnershipRepair.kt / RootRepairMain.kt | 共享有界遍历与 Android FD 适配；su 只加载已安装 APK 的固定 helper | RootAccess、ShizukuUserService |
 | RootExecutionFence.kt / RootMaintenanceLease.kt / RootOwnershipJobs.kt | Context感知公平零时限读栅栏/维护写栅栏；UID0派发前耐久lease；同boot UNKNOWN阻止新派发/维护/启动；共享job状态按当前lease诚实pending | RootAccess、ShizukuTransport、EngineStartFlow、EngineService、RootGrant |
-| VdisplayController.kt | VirtualDisplay 创建/销毁、Settings launch 探针、`input -d` 回退探针、viewer Surface attach/detach | MainActivity、VdisplayHost、DeviceControlService |
+| VdisplayController.kt | VirtualDisplay 创建/销毁、Settings launch 探针、`input -d` 回退探针、viewer Surface attach/detach；`nativeDisplayAllocations()` 提供同源的别名、Android Display 与私有分配身份，不续空闲租期 | MainActivity、VdisplayHost、DeviceControlService、NativePlatformFacts |
 | VdisplayHost.kt | 原生 viewer SurfaceView 宿主：把可信 Files stage 几何映射到根 FrameLayout 并 attach 到 controller | MainActivity |
 | VirtualDisplayProbe.kt | 建屏 flags 探针（本地位值常量，不引用 @hide 常量；金丝雀/无泄漏断言） | 调试验收（device probe） |
 | BackGate.kt | 返回网关决策器（页内层栈可用性 → 消费/退出）+ `BackGateBridge`（setAvailable/getBackAvailable 2 个 @JavascriptInterface） | MainActivity（OnBackPressedCallback 接线） |
@@ -192,10 +198,10 @@ runtime 激活还有一层**工具面**判据：linuxRuntimeManager.status().hea
 | .ConsoleActivity | activity（exported=false） | ConsoleActivity.kt | 引擎未运行也可用 |
 | .OverlayAttachProxyActivity | activity（exported=false） | [OverlayAttachProxyActivity.kt](<app/src/main/java/com/dsharnessmobile/shell/OverlayAttachProxyActivity.kt>) | 透明无界面；excludeFromRecents/taskAffinity空，不设noHistory以等待ActivityResult；绑定target/request并等draft-ready后退出；旋转/取消/超时需设备验 |
 | .EngineService | service（foregroundServiceType=dataSync） | EngineService.kt | 保活+看门狗宿主 |
-| .AdbKeyboardService | service（BIND_INPUT_METHOD，exported=true） | AdbKeyboardService.kt | @xml/input_method 注册 IME |
+（已删除）.AdbKeyboardService / .AdbKeyboardReceiver：manifest 与 @xml/input_method 随 ADB 输入法一并移除，应用不再声明 IME。
 | .DeviceControlService | service（BIND_ACCESSIBILITY_SERVICE，exported=true） | DeviceControlService.kt | @xml/accessibility_service_config 能力声明 |
 | .OverlayService | service（exported=false） | OverlayService.kt | SYSTEM_ALERT_WINDOW 悬浮球 |
-| .AdbKeyboardReceiver | receiver（exported=true，ADB_INPUT_TEXT/ADB_CLEAR_TEXT） | AdbKeyboardReceiver.kt | 只收点名组件/点名包的广播（隐式广播在 targetSdk 26+ 收不到）；纯隐式协议走 IME 运行期注册的同款接收器 |
+（已删除）见上一条；通知动作仍由 .NotifyActionReceiver 承担。
 | .BootReceiver | receiver（exported=true，BOOT_COMPLETED） | BootReceiver.kt | 开机恢复 |
 | .NotifyActionReceiver | receiver（exported=false，显式 Intent） | NotifyActionReceiver.kt | 通知动作（回复/选项/批准/拒绝/重试） |
 | androidx FileProvider | provider（${applicationId}.fileprovider） | （框架类） | 路径白名单 @xml/file_paths，不映射 .credentials.yaml 等机密区 |
@@ -203,38 +209,43 @@ runtime 激活还有一层**工具面**判据：linuxRuntimeManager.status().hea
 
 权限 13 项（INTERNET / MANAGE_EXTERNAL_STORAGE / READ_EXTERNAL_STORAGE maxSdk32 / WRITE_EXTERNAL_STORAGE maxSdk29 / POST_NOTIFICATIONS / FOREGROUND_SERVICE(+DATA_SYNC) / RECEIVE_BOOT_COMPLETED / WAKE_LOCK / REQUEST_IGNORE_BATTERY_OPTIMIZATIONS / REQUEST_INSTALL_PACKAGES / QUERY_ALL_PACKAGES / SYSTEM_ALERT_WINDOW），逐条理由见 AndroidManifest.xml 注释。
 
-## 8. 0.14 当前屏幕控制构造（施工中）
+## 8. 当前手机控制构造（原生宿主）
 
 ```
-android_screen_list (metadata only; no screen content)
-   └─ androidPrivilege.screenAccess(screenId)  ← reads native dsh_screen_scope.xml every operation
-        ├─ virtual-only / real-only / all user range check
-        ├─ virtual-1 not ready (no VirtualDisplay yet) → screen-not-ready, never display 0
-        └─ allowed real → gateFor(session) requires danger-full-access
-             └─ ControlPolicy.decideControl(op) → a11y or legacy ADB fallback
-                  └─ DeviceControlService repeats scope check and invalidates old refs on range change
+android_screen_list（metadata only; no screen content）
+   └─ NativeClient.capabilities ← Rust 控制器读壳侧 facts（scope + 每屏 op）
+        ├─ virtual-only / real-only / all 用户范围由 ScreenScopePrefs 决定
+        ├─ virtual-N 未建 → screen-not-ready，绝不回退 display 0
+        └─ 允许的真实屏 → Rust 复核会话与范围后再发一次 execute
+             └─ DispatchPlan: a11y / shizuku / root / browserHost / webViewHost / local
+                  ├─ a11y → NativeA11yExecution → NativeAccessibilityPlatform
+                  ├─ shizuku → NativeShizukuExecution / NativeVdisplayExecution
+                  ├─ root/termux/sh → NativePrivilegeExecution（Rust shell_policy 准入）
+                  ├─ browserHost → NativeSharedHostExecution → BrowserHost.controlOp
+                  └─ webViewHost → NativeAppWebViewExecution → MainActivity.webViewRef
 ```
 
-`VdisplayController` 已能建真实 VirtualDisplay（公开 `PUBLIC|OWN_CONTENT_ONLY|SUPPORTS_TOUCH`）并把
-别名 `virtual-1` 映射到运行时 displayId；viewer Surface 重挂与多屏选择面仍未收口（见 known-gaps.md）。
-本节记录代码施工状态，不表示已通过设备验收。
+`NativeControlRuntime` 随 `EngineService` 起停，在后台打开 `files/.native-control/control-v1.sock`；每个 execute 先调用 `EngineService.instance?.noteWakeActivity()` 续租，Node 重启不重建 Rust 控制器、代次与 journal。旧 `ControlCarrier` / `ControlPoller` / `ControlProtocolV2` / `VdisplayOps` / `ShellOps` 已物理删除。
 
-## 9. 0.13.5 设备控制面（双通道）
+手势与按键：`swipe` 接受任意两个不同端点，A11y 优先，点手势不可用时由 Rust 改选 Shizuku 固定 argv；`keyEvent` 只走 Shizuku 固定键码（`enter/tab/escape/backspace/delete/space/up/down/left/right/back`）。`global` 在虚拟屏只允许 `back` 且经 Shizuku；无障碍全局 API 只作用于真实屏。`wait` 在 Rust 中是 `Unsupported` 候选，没有 adapter，不宣称可执行。
+
+`NativeControlRuntime` 接入 `NativeEnvironmentExecution` 处理 `prepareEnvironment`。这项操作只关/恢复三项框架动画倍率，原值先落盘、每步复核 dispatching、失败不重放，且不修改输入法。
+
+本节记录代码当前形态，不表示已通过设备验收。
+
+## 9. 权限与诊断面（当前）
 
 ```
-AI 工具（dsh-android-manage）
-   └─ androidPrivilege.gateFor(session)   ← 会话档位 danger-full-access 恒需
-        ├─ 无障碍通道在线（prefs a11yEnabled + 队列心跳 <20s）
-        └─ 或 ADB 三道人门齐备（完全访问 + 允许访问 + 配对；0.14 起为迁移面，正式通道转 Shizuku）
-   └─ ControlPolicy.decideControl(op)     ← 后端选择（a11y 优先，ADB 回退，fail-closed）
-        ├─ a11y → ControlQueue（引擎侧 exact 路由 /api/android/ui/{pending,result}，共享令牌）
-        │        ↕ 长轮询（壳侧 ControlPoller，空闲 5s/有活即时，轮询即心跳）
-        │        DeviceControlService（AccessibilityService：树快照 + performAction + takeScreenshot）
-        └─ adb  → execAdbLine/execAdbShell（shell 执行、原图截图、pm/dumpsys 等系统面）
+AI 工具（dsh-android-phone-control）
+   └─ native-bridge 会话门（可信会话 + danger-full-access）
+   └─ 读 capabilities（epoch、scope、每屏 op；不读旧队列状态）
+        ├─ a11y 在线 → 语义与点手势计划
+        ├─ shizuku 就绪 → 固定 argv 的屏幕/按键/只读查询
+        ├─ root 独立授权 → rootExec（RootExecutionFence + RootMaintenanceLease）
+        └─ termux 就绪 → termuxExec（应用 UID，NativeAppShell）
 ```
 
-两条通道**等价且无障碍优先**（PRD-0.13.2 §3.3 B3）；授权面在设置页「设备控制授权」：无障碍为主入口，ADB 折叠为高级/脚本面。
-
+`android_device_info` 读壳侧 device facts，`android_privilege_status` 给显式特权诊断；两者只读。旧 ADB 三道人门、`androidPrivilege` 档位门与 ADB 输入法均随旧链删除。
 ### 移动端覆盖层内的双工作区
 
 响应式插件保持上游 DockLayout 的稳定 TabHost 与原生 row 状态，不重建或迁移正文祖先。`mobile-workspaces.ts` 封装当前固定引擎版本的 adopted Session store 适配点；所有布局写入调用原生 actions，适配面缺席时拒绝动作。竖屏网格呈上下、横屏呈左右；paneId 绑定标题与焦点，交换只改变整个工作区的物理位置。移动端通过 layout.openRightbar(false, fullscreen) 报告覆盖呈现，主对话不预留右侧轨道。

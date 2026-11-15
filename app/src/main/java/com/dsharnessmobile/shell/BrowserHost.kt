@@ -838,16 +838,22 @@ internal class BrowserHost(
    * Dispatch one registered shell control op. Called from the control queue thread; every WebView
    * touch/JS call is marshalled to the main thread with a bounded wait.
    */
-  fun controlOp(op: String, args: JSONObject): JSONObject {
+  fun controlOp(op: String, args: JSONObject, beforeDispatch: (() -> Boolean)? = null): JSONObject {
     if (op == "browserOpen") openConfigProblem(args)?.let { return rejectControl(it) }
     // Capture Session and tab on the sole UI owner. No global selection survives a main slice.
+    val nativeDenied = java.util.concurrent.atomic.AtomicBoolean(false)
     val target = onMain {
+      if (beforeDispatch != null && !beforeDispatch()) {
+        nativeDenied.set(true)
+        return@onMain null
+      }
       val session = args.optString("session", "").takeIf { it.isNotBlank() } ?: viewerSessionId
       val workspace = workspaceFor(session)
       val id = args.optString("tabId", "").takeIf { it.isNotBlank() }
         ?: workspace.modelTabId ?: workspace.activeTabId
       ControlTarget(workspace, id?.let { workspace.tabs[it] })
-    } ?: return controlTimeout()
+    } ?: return if (nativeDenied.get()) JSONObject().put("ok", false)
+      .put("reason", "native-authorization-denied") else controlTimeout()
     if (args.optString("tabId", "").isNotBlank() && target.tab == null && op != "browserOpen") {
       return targetFailure(target, "tab-not-found")
     }

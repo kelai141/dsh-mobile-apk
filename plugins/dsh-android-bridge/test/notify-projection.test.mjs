@@ -229,7 +229,8 @@ test('源码门禁：不得再读 session.header.title / reason.outcome', () => 
 })
 
 test('源码门禁：.notify.ndjson 写入与六种 kind 的壳侧消费面在场', () => {
-  const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  // The channels moved to a shared module; the entry point still installs them.
+  const src = readFileSync(new URL('../src/shared-notifications.ts', import.meta.url), 'utf8')
   assert.match(src, /\.notify\.ndjson/)
   assert.match(src, /kind: 'report'/)
   assert.match(src, /kind: 'todo'/)
@@ -412,7 +413,7 @@ test('D5 兼容分支：整条消息无任何块带 type 时才退化为取全�
 })
 
 test('D5 源码门禁：不得再出现「按字段取值拼 content」的写法', () => {
-  const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const src = readFileSync(new URL('../src/shared-notifications.ts', import.meta.url), 'utf8')
   const code = src
     .split('\n')
     .filter((l) => !l.trimStart().startsWith('//') && !l.trimStart().startsWith('*'))

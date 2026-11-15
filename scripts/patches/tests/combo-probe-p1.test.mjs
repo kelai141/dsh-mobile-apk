@@ -53,7 +53,7 @@ try {
 
   const apply = () => spawnSync(process.execPath,
     [join(repoRoot, 'scripts', 'patches', 'apply-patches.mjs'), scratch, '--apply', '--scope', 'engine',
-      '--only', 'combo-probe-P1,client-registry-scan-C4'], { encoding: 'utf8' })
+      '--only', 'combo-probe-P1'], { encoding: 'utf8' })
   const first = apply()
   check('P1 在当前基线真产物上施加成功（A4 已于 2026-09-25 退役，不再作为前置）', first.status === 0,
     (first.stdout + first.stderr).trim().split('\n').slice(-2).join(' | '))

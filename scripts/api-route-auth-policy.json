@@ -11,14 +11,6 @@
       "expected": 2
     },
     {
-      "source": "plugins/dsh-android-bridge/src/index.ts",
-      "expected": 1
-    },
-    {
-      "source": "plugins/dsh-android-bridge/src/control-queue.ts",
-      "expected": 2
-    },
-    {
       "source": "plugins/dsh-android-file-open/src/index.ts",
       "expected": 5
     },
@@ -32,10 +24,6 @@
     },
     {
       "source": "plugins/dsh-android-browser/src/index.ts",
-      "expected": 1
-    },
-    {
-      "source": "plugins/dsh-android-vdisplay/src/index.ts",
       "expected": 1
     },
     {
@@ -82,15 +70,6 @@
       ],
       "literalEvidence": "/api/android/env/status",
       "reason": "for-of 配对表解构键（表内两条路径字面量由 dynamicRoutePathLiterals 全量发现并锁定）。"
-    },
-    {
-      "source": "plugins/dsh-android-vdisplay/src/index.ts",
-      "expression": "VD_STATUS_PATH",
-      "resolvesTo": [
-        "/api/android/vdisplay/status"
-      ],
-      "literalEvidence": "/api/android/vdisplay/status",
-      "reason": "状态面常量在 status.ts 单一来源定义（面板与工具面同源）；字面量在场即声明可核验。"
     },
     {
       "source": "vendor/dshmarketplace-plugin/lib/index.js",
@@ -234,39 +213,6 @@
       "authCallMarker": "dshMobileMarketplaceRouteAuthorized(n,e)"
     },
     {
-      "id": "privilege-status",
-      "path": "/api/android/privilege/status",
-      "kind": "exact",
-      "registrationSource": "plugins/dsh-android-bridge/src/index.ts",
-      "registration": "path: '/api/android/privilege/status'",
-      "endpointSource": "plugins/dsh-android-bridge/src/index.ts",
-      "access": "public",
-      "publicResponseMarker": "sendJson(res, 200, buildPrivilegeStatusPayload(svc, controlToken() !== undefined))",
-      "rationale": "Only a structured capability/status view is returned. It contains no control token, request body, filesystem path, UI tree, screenshot, or mutation route."
-    },
-    {
-      "id": "control-pending",
-      "path": "/api/android/ui/pending",
-      "kind": "exact",
-      "registrationSource": "plugins/dsh-android-bridge/src/control-queue.ts",
-      "registration": "path: '/api/android/ui/pending'",
-      "endpointSource": "plugins/dsh-android-bridge/src/control-queue.ts",
-      "access": "protected",
-      "authMarker": "tokenMatches(token(), body.token)",
-      "authCallMarker": "tokenMatches(token(), body.token)"
-    },
-    {
-      "id": "control-result",
-      "path": "/api/android/ui/result",
-      "kind": "exact",
-      "registrationSource": "plugins/dsh-android-bridge/src/control-queue.ts",
-      "registration": "path: '/api/android/ui/result'",
-      "endpointSource": "plugins/dsh-android-bridge/src/control-queue.ts",
-      "access": "protected",
-      "authMarker": "tokenMatches(token(), body.token)",
-      "authCallMarker": "tokenMatches(token(), body.token)"
-    },
-    {
       "id": "file-incoming",
       "path": "/api/android/file-incoming",
       "kind": "exact",
@@ -397,17 +343,6 @@
       "access": "protected",
       "authMarker": "authorizeIncomingRoute(req, authOptions())",
       "authCallMarker": "authorizeIncomingRoute(req, authOptions())"
-    },
-    {
-      "id": "vdisplay-status",
-      "path": "/api/android/vdisplay/status",
-      "kind": "exact",
-      "registrationSource": "plugins/dsh-android-vdisplay/src/index.ts",
-      "registration": "path: VD_STATUS_PATH",
-      "endpointSource": "plugins/dsh-android-vdisplay/src/status.ts",
-      "access": "public",
-      "publicResponseMarker": "sendJson(res, 200, await readVdToolSnapshot(faceOf()))",
-      "rationale": "Only fail-closed VirtualDisplay readiness metadata is returned. It contains no pixels, UI tree, input, task command, shell output, path, or credential."
     },
     {
       "id": "runtime-cache-scan",

@@ -45,10 +45,26 @@ internal object SnapshotTransaction {
   private val REMOVED_PROFILE_PLUGINS = listOf(
     // 0.14.1 审查 §9（用户裁定）：第三方模型同步插件，理由见 profile-web.cordis.patch.yml 的注释。
     RemovedProfilePlugin(mountId = "dsh-model-sync", packageName = "@aiwayds/dsh-model-sync"),
+    // native 控制切流（2026-11）：手机工具面搬到 phone-control，旧的 manage/vdisplay 两个插件
+    // 不再注入。身份与 FactoryProfilePatch.RETIRED_FACTORY_ENTRIES 同源，包名逐字相等才清。
+    // 这两个是**旧手机执行器**：native 直接 setText/点击后，它们仍注册工具就是双 input 来源。
+    // 用户明确要求完整退役：对**所有** profile（含用户自建）解除注册、摘依赖、清包；
+    // 同 id 但不同包名的自定义 fork 仍保留（身份按 id + 包名逐字匹配）。
+    RemovedProfilePlugin(
+      mountId = "android-manage", packageName = "@dsh-android/dsh-android-manage", allProfiles = true,
+    ),
+    RemovedProfilePlugin(
+      mountId = "android-vdisplay", packageName = "@dsh-android/dsh-android-vdisplay", allProfiles = true,
+    ),
   )
 
   /** [REMOVED_PROFILE_PLUGINS] 的条目。 */
-  private data class RemovedProfilePlugin(val mountId: String, val packageName: String)
+  private data class RemovedProfilePlugin(
+    val mountId: String,
+    val packageName: String,
+    /** true = 旧执行器：用户自建 profile 同样退役（条目配置先备份）；false = 只动工厂 profile。 */
+    val allProfiles: Boolean = false,
+  )
   const val MARKER_NAME = ".snapshot-transaction"
   private const val TMP_MARKER_NAME = ".snapshot-transaction.tmp"
 
@@ -679,6 +695,63 @@ internal object SnapshotTransaction {
   // 一次性判定空壳，见 [reconcileRemovedProfilePlugins]。
 
   /**
+   * 从工厂 profile 的 package.json 摘掉退役依赖，**不依赖新快照是否还带这份清单**。
+   *
+   * 为什么不复用 [mergePackageJson]：它只在 staged 有同名文件时才跑；工厂新快照已经不再
+   * 写 retired 依赖时它压根不执行，覆盖升级后老设备上的依赖行会一直留着。这里把工厂侧
+   * 当成空清单跑同一套 [ProfilePackageManifest.merge]，语义正好是「只摘退役、不添新键」。
+   *
+   * 判不准就不动：符号链接、读不到、JSON 不合法一律跳过（迁移是删除动作）。
+   */
+  private fun retireManifestDependencies(profile: File, notes: MutableList<String>) {
+    val manifest = File(profile, "package.json")
+    if (!manifest.isFile || SnapshotFs.isSymbolicLink(manifest)) return
+    val liveText = runCatching { manifest.readText() }.getOrNull() ?: return
+    val merged = ProfilePackageManifest.merge(liveText, "{}") ?: return
+    if (merged == liveText) return
+    writeTextAtomic(manifest, merged, "package.json") { validateJson(it, "package.json") }
+    notes += "profile " + profile.name + "：摘除 package.json 中的退役依赖与 bundles"
+  }
+
+  /**
+   * 按**精确包名**摘除依赖与 bundles 条目（旧执行器专用）。
+   *
+   * 与 [retireManifestDependencies] 的区别是本函数只动调用方给出的包名：用户在自建 profile 里
+   * 装的其它第三方插件、以及历史退役项（`dsh-undo-savepoint` 等）一律原样保留。
+   * 判不准就不动：符号链接、读不到、JSON 不合法一律跳过并留 note。
+   */
+  private fun retireManifestPackages(profile: File, packages: List<String>, notes: MutableList<String>) {
+    val manifest = File(profile, "package.json")
+    if (!manifest.isFile || SnapshotFs.isSymbolicLink(manifest)) return
+    val text = runCatching { manifest.readText() }.getOrNull() ?: return
+    val root = runCatching { org.json.JSONObject(text) }.getOrNull() ?: return
+    var changed = false
+    for (section in listOf("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")) {
+      val deps = root.optJSONObject(section) ?: continue
+      for (name in packages) {
+        if (deps.has(name)) { deps.remove(name); changed = true }
+      }
+    }
+    for (bundles in listOfNotNull(
+      root.optJSONArray("dsh.profile.bundles"),
+      root.optJSONObject("dsh")?.optJSONObject("profile")?.optJSONArray("bundles"),
+    )) {
+      val kept = org.json.JSONArray()
+      var dropped = false
+      for (i in 0 until bundles.length()) {
+        val item = bundles.optString(i)
+        if (item in packages) { dropped = true; changed = true; continue }
+        kept.put(item)
+      }
+      if (!dropped) continue
+      while (bundles.length() > 0) bundles.remove(0)
+      for (i in 0 until kept.length()) bundles.put(kept.getString(i))
+    }
+    if (!changed) return
+    writeTextAtomic(manifest, root.toString(2), "package.json") { validateJson(it, "package.json") }
+    notes += "profile " + profile.name + "：摘除 package.json 中的旧手机执行器依赖 " + packages.joinToString(",")
+  }
+  /**
    * 已摘除插件的**存量迁移**（0.14.1 D-1 的设备侧收尾）。
    *
    * 为什么必须有它（设备实测，不是推演）：profile 根的两个清单是**用户面**（[mergeProfiles] 里
@@ -691,21 +764,66 @@ internal object SnapshotTransaction {
    * 迁移内容（逐条具名，不做通用清理——用户自己装的第三方插件必须原样保留）：
    *   ① 从每个 profile 的 `cordis.patch.yml` 摘掉该插件的 insert 条目（两行：id + name）；
    *   ② 删除该插件在 profile `node_modules` 下的包目录。
-   * 幂等：条目/目录已不在时是空操作（每轮刷新都会跑，必须无副作用）。
-   *
+    * 幂等：条目/目录已不在时是空操作（每轮刷新都会跑，必须无副作用）。
+    *
+    * 边界（native 控制切流加严）：
+    * - 只动**工厂拥有的 profile**：新快照（[stagedProfiles]）里存在同名 profile，或该 profile 自述为
+    *   出厂容器（`name=dsh-profile-*` / 带 `dsh.profile` 块）。用户自建 profile 里的同包可能是
+    *   用户自己装的，一律跳过并留档，不按目录名猜归属。
+    * - profile 目录、`node_modules`、`@scope` 三层都按 NOFOLLOW 判定；任一层是符号链接就跳过——
+    *   跟随它会把删除作用到 profile 之外（用户数据或共享农场）。
+    *
    * @param liveProfiles live 的 `home/.dsh/profiles`。
-   * @param notes [mergeProfiles] 的说明列表（迁移动作逐条留档，供 swapNotes 日志）。
-   */
-  private fun reconcileRemovedProfilePlugins(liveProfiles: File, notes: MutableList<String>) {
+   * @param stagedProfiles 新快照的 `home/.dsh/profiles`（工厂归属的权威证据）。
+    * @param notes [mergeProfiles] 的说明列表（迁移动作逐条留档，供 swapNotes 日志）。
+    */
+  private fun reconcileRemovedProfilePlugins(
+    liveProfiles: File,
+    stagedProfiles: File,
+    notes: MutableList<String>,
+  ) {
     val profiles = liveProfiles.listFiles() ?: return
+    val factoryNames = (stagedProfiles.listFiles() ?: emptyArray())
+      .filter { it.isDirectory }
+      .map { it.name }
+      .toHashSet()
+    // 旧执行器（allProfiles）覆盖**所有** profile：用户自建 profile 里挂一份旧 manage/vdisplay
+    // 同样是第二个输入来源（双 input）。它们的依赖行与 bundles 也按精确包名摘除；
+    // 这里刻意不复用 [retireManifestDependencies]——那个会连 `dsh-undo-savepoint` 一起摘，
+    // 而本轮只授权这两个旧执行器，历史退役项的保护策略不变。
+    for (profile in profiles) {
+      val packages = REMOVED_PROFILE_PLUGINS.filter { it.allProfiles }.map { it.packageName }
+      if (packages.isNotEmpty()) retireManifestPackages(profile, packages, notes)
+    }
+    // ③ package.json 的退役依赖必须**与「新快照是否也带这份清单」解耦**：
+    // [mergePackageJson] 只对 staged 里存在的 package.json 运行，新工厂快照不再写退役依赖时
+    // 它压根不会执行，老设备上的依赖就一直留着（retiresAndroidManageAndVdisplay 实测判红）。
+    // 这里对每个工厂 profile 直接用「{}+退役摘除」跑一遍并集，等价于「只摘退役、不添新键」。
+    for (profile in profiles) {
+      if (profile.name !in factoryNames && !isFactoryOwnedProfile(profile)) continue
+      retireManifestDependencies(profile, notes)
+    }
     for (removed in REMOVED_PROFILE_PLUGINS) {
       for (profile in profiles) {
-        if (!profile.isDirectory) continue
+        if (!removed.allProfiles && profile.name !in factoryNames && !isFactoryOwnedProfile(profile)) {
+          notes += "profile " + profile.name + "：非工厂 profile，保留 " + removed.packageName + "（不按名字猜归属）"
+          continue
+        }
+        val stagedProfile = File(stagedProfiles, profile.name)
+        // 新快照仍提供这个包时它属于**工厂内容**（例如 pnpm 嵌套布局下的包目录），不是存量残渣：
+        // mergeTree 已把它按工厂件覆盖进来，这里再删就是把工厂件删掉（nestedCordisPatchYml 实测判红）。
+        val factoryStillProvides = SnapshotFs.exists(
+          File(File(stagedProfile, "node_modules"), removed.packageName),
+        )
+        // 清单里是否还有条目指向这个包（用户自装同 id/同名的、或带 config: 被保留的工厂条目）。
+        // 有引用就不能删目录，否则留下一条指向空目录的装配条目。
+        var stillReferenced = false
         // ① 清单条目
         val patch = File(profile, "cordis.patch.yml")
         if (patch.isFile) {
           val lines = patch.readLines()
           val kept = mutableListOf<String>()
+          val backupFragments = mutableListOf<String>()
           var dropped = 0
           // 摘除单位是**整个条目**（缩进块），不是固定两行。旧实现写死 `index += 2`，在真实形态
           // 下会把条目摘成空壳键（apk #249，设备实测 boot 期 TypeError）：
@@ -720,7 +838,11 @@ internal object SnapshotTransaction {
           var index = 0
           while (index < lines.size) {
             val trimmed = lines[index].trim()
-            if (trimmed == "- id: " + removed.mountId) {
+            // 旧执行器按**包名**识别：换个挂载 id 仍指向同一个包，旧工具面照样会注册。
+            // 其它退役项仍只认精确 id（用户自装同 id 不同包 fork 必须保留）。
+            val idMatches = trimmed == "- id: " + removed.mountId
+            val candidateId = removed.allProfiles && trimmed.startsWith("- id: ")
+            if (idMatches || candidateId) {
               // 再确认 name 就是被摘除的包名，避免误删「同 id 但不同包」的用户自定义条目。
               // name 行可能不在紧邻下一行（条目里允许有其它键/注释），故在条目跨度内找。
               val idIndentWidth = idIndent(lines[index])
@@ -735,8 +857,15 @@ internal object SnapshotTransaction {
               val nameLine = itemBody.firstOrNull { it.trim().startsWith("name:") }?.trim().orEmpty()
               val matches = nameLine == "name: '" + removed.packageName + "'" ||
                 nameLine == "name: \"" + removed.packageName + "\""
-              if (matches) {
+              // 带 `config:` 的条目是用户配置面（与 FactoryProfilePatch 的 hasEntryConfig 同一口径）：
+              // 摘掉它等于删用户的配置，宁可留着并在日志里说明，也不做物理清退。
+              val userConfigured = itemBody.any { it.trimEnd('\r').trimStart().startsWith("config:") }
+              // 旧执行器（allProfiles）即使带用户 config 也要解除注册：它一旦在场就是第二个
+              // 输入执行器（双 input）。配置不丢——摘除前把整段条目另存备份文件，日志点名路径。
+              val removable = matches && (removed.allProfiles || !userConfigured)
+              if (removable) {
                 dropped += 1
+                if (userConfigured) backupFragments += lines.subList(index, end).joinToString("\n")
                 // 0.14.2（D11）：摘除**只作用于目标条目** —— 旧实现在这里用「缩进区间里还有没有
                 // 兄弟」的启发式顺手摘 `- insert:` 包装行，判据一旦误判，连坐范围就从「目标条目」
                 // 放大到「整组」：同组里我们自己的硬清单插件一起消失（实测反证：2 子组里摘
@@ -746,6 +875,7 @@ internal object SnapshotTransaction {
                 index = end
                 continue
               }
+              if (matches) stillReferenced = true
             }
             kept += lines[index]
             index += 1
@@ -756,21 +886,47 @@ internal object SnapshotTransaction {
               "# 0.14.1：已摘除 " + removed.mountId + "（升级迁移自动清理；本行由 SnapshotTransaction 写入）\n"
             patch.writeText(text)
             notes += "profile " + profile.name + "：摘除挂载 " + removed.mountId + "（" + dropped + " 处）"
+            if (backupFragments.isNotEmpty()) {
+              val stamp = System.currentTimeMillis().toString() + "-" + java.util.UUID.randomUUID()
+              val backup = File(patch.parentFile, ".pre-cordis.patch.yml-" + stamp + ".retired")
+              backup.writeText(backupFragments.joinToString("\n") + "\n")
+              notes += "profile " + profile.name + "：退役条目的用户配置已备份 -> " + backup.name
+            }
+          }
+          // 摘除后仍有条目指向该包 ⇒ 目录必须留着，按「条目还在、包没了」判红比留一份包更坏。
+          if (kept.any { it.trim().startsWith("name:") && it.contains(removed.packageName) }) {
+            stillReferenced = true
           }
         }
         // ② 包目录
         val packageDir = File(File(profile, "node_modules"), removed.packageName)
-        if (SnapshotFs.exists(packageDir)) {
+        val nodeModules = File(profile, "node_modules")
+        val scopeDir = packageDir.parentFile
+        // 父路径不得跟随指向外部的符号链接：`node_modules` 或 `@scope` 任一层是链接时，
+        // packageDir 已经落在 profile 之外（共享农场/用户目录），deletePath 会顺着真实路径删过去。
+        // pnpm 的 node_modules 里本来就有大量链接，因此这里必须按 NOFOLLOW 逐层判定而不是 File.isDirectory。
+        // 链接本身也算「该包在场」：旧执行器常常以链接形式装进 node_modules（pnpm 共享农场），
+        // 只删实体目录会留下一个仍可解析的链接 ⇒ 旧执行器照样加载。
+        val packagePresent = SnapshotFs.exists(packageDir) || SnapshotFs.isSymbolicLink(packageDir)
+        val escaped = listOf(profile, nodeModules, scopeDir).any { it != null && SnapshotFs.isSymbolicLink(it) }
+        if (escaped) {
+          notes += "profile " + profile.name + "：" + removed.packageName + " 的父路径是符号链接，跳过物理删除（不跟随到 profile 之外）"
+        } else if (factoryStillProvides || stillReferenced) {
+          // 工厂件 / 仍有引用：不动目录，只留档。
+          if (!factoryStillProvides) {
+            notes += "profile " + profile.name + "：" + removed.packageName + " 仍被清单条目引用，保留包目录"
+          }
+        } else if (packagePresent) {
           SnapshotFs.deletePath(packageDir)
           if (!SnapshotFs.exists(packageDir)) {
             notes += "profile " + profile.name + "：删除存量包 " + removed.packageName
           }
-        }
-        // 作用域目录（`node_modules/@scope`）删空后一并清掉：留着空目录会让人误以为包还在
-        // （构建期的 prune 也是这个语义）。
-        val scopeDir = packageDir.parentFile
-        if (scopeDir != null && scopeDir.name.startsWith("@") && (scopeDir.listFiles() ?: emptyArray()).isEmpty()) {
-          SnapshotFs.deletePath(scopeDir)
+          // 作用域目录（`node_modules/@scope`）删空后一并清掉：留着空目录会让人误以为包还在
+          // （构建期的 prune 也是这个语义）。同样只删真正的目录，不删指向外部的链接。
+          if (scopeDir != null && scopeDir.name.startsWith("@") &&
+            !SnapshotFs.isSymbolicLink(scopeDir) && (scopeDir.listFiles() ?: emptyArray()).isEmpty()) {
+            SnapshotFs.deletePath(scopeDir)
+          }
         }
       }
     }
@@ -789,6 +945,7 @@ internal object SnapshotTransaction {
     links: LinkPrimitives = PRODUCTION_LINKS,
     preserveCopy: (File, File) -> Unit = { from, to -> Files.copy(from.toPath(), to.toPath(), REPLACE_EXISTING) },
   ) {
+    // 工厂拥有的 profile 判定见 [isFactoryOwnedProfile]（迁移清退前逐个 profile 用）。
     // ① 备份先写临时名（拷贝失败/被杀 = live 与 journal 都不受影响）
     val copying = File(previousProfiles.parentFile, previousProfiles.name + ".copying")
     SnapshotFs.deletePath(copying)
@@ -813,7 +970,7 @@ internal object SnapshotTransaction {
       // "./route-auth" 直接 ERR_PACKAGE_PATH_NOT_EXPORTED（引擎 exit=1）。
       val userFacingFiles = profileUserFacingFiles(stagedProfiles)
       mergeTree(stagedProfiles, liveProfiles, notes, userFacingFiles, preserveCopy, links)
-      reconcileRemovedProfilePlugins(liveProfiles, notes)
+      reconcileRemovedProfilePlugins(liveProfiles, stagedProfiles, notes)
       val suffix = if (notes.isEmpty()) "" else "；工厂语义纠正 " + notes.size + " 处"
       onEntry("home/.dsh/profiles (merged" + suffix + ")")
     } catch (t: Throwable) {
@@ -878,6 +1035,29 @@ internal object SnapshotTransaction {
       original.addSuppressed(compensation)
     }
     return original
+  }
+
+  /**
+   * 工厂拥有的 profile（web / headless 这类出厂 seed）：`package.json` 的 `name=dsh-profile-*`
+   * 且带 `dsh.profile` 块，与 `EngineManager.isFactoryOwnedProfile` 同一判据。
+   * 本文件不依赖 Android 上下文，故就地实现一份纯 JVM 版本。
+   *
+   * 读不到、被解析失败或 package.json 本身是符号链接一律 false：迁移是**删除**动作，判不准就不动。
+   */
+  internal fun isFactoryOwnedProfile(profileDir: File): Boolean {
+    val pkg = File(profileDir, "package.json")
+    if (!pkg.isFile || SnapshotFs.isSymbolicLink(pkg)) return false
+    return try {
+      val json = org.json.JSONObject(pkg.readText())
+      // 出厂 seed 的两种形态：带 `name=dsh-profile-*` 的完整形态，以及只写 `dsh.profile` 块的
+      // 最小形态（旧版快照与部分测试夹具就是这样，覆盖升级的真实设备上也存在）。
+      // 判据始终落在「这是工程的 profile 容器」这一结构上，不看目录名。
+      val named = json.optString("name").startsWith("dsh-profile-")
+      val profiled = json.optJSONObject("dsh")?.optJSONObject("profile") != null
+      named || profiled
+    } catch (_: Throwable) {
+      false
+    }
   }
 
   /**
@@ -1324,6 +1504,30 @@ internal object SnapshotTransaction {
   }
 
   /**
+   * 退役清理后的**结构校验**：把拟写入的文本解析成条目，确认除了退役 id 之外一条不少。
+   *
+   * 为什么要在写盘前判：`repairRetiredEntries` 是按 id/name 的文本级摘除，一旦解析口径退化
+   * 就可能连带删掉同组条目。删除是破坏性的，判不准就不写——保留旧文件、下一次启动重试。
+   * 用户自装同 id 但不同包名的条目不在 [FactoryProfilePatch.RETIRED_FACTORY_ENTRIES] 的值里，
+   * 因此不会被算进「允许消失」的集合。
+   *
+   * @throws SnapshotFsException code=`snapshot-atomic-write` —— 结构不满足，拒绝落盘。
+   */
+  private fun validateRetirementKeepsOtherEntries(beforeText: String, candidate: String, label: String) {
+    val retired = FactoryProfilePatch.RETIRED_FACTORY_ENTRIES.keys + FactoryProfilePatch.RETIRED_DISABLED_ROW_IDS
+    val required = FactoryProfilePatch.blockIds(beforeText).toSet() - retired
+    val kept = FactoryProfilePatch.blockIds(candidate).toSet()
+    val missing = required - kept
+    if (missing.isEmpty()) return
+    throw SnapshotFsException(
+      code = CODE_ATOMIC_WRITE,
+      residue = emptyList(),
+      message = label + " 退役清理会连带删掉无关条目（" + missing.sorted().joinToString(",")
+        + "），已拒绝落盘并保留旧文件",
+    )
+  }
+
+  /**
    * package.json 并集：live 为基座（用户 pin 权威），工厂新增的 dependencies 键与
    * dsh.profile.bundles 条目补入；同名冲突保留 live。JSON 解析失败按原样保留 live（宁缺毋滥）。
    */
@@ -1351,10 +1555,22 @@ internal object SnapshotTransaction {
   private fun mergePatchYamlById(staged: File, live: File, notes: MutableList<String>) {
     val liveText = if (SnapshotFs.exists(live)) live.readText() else ""
     val stagedText = try { staged.readText() } catch (_: Throwable) { return }
-    val result = FactoryProfilePatch.merge(liveText, stagedText)
+    val merged = FactoryProfilePatch.merge(liveText, stagedText)
+    // 退役工厂插件：merge 只按「工厂出现过的 id」追加与纠正，已被新快照删掉的插件在 live 里
+    // 没有任何对应块，合并本身不会摘它。这里再按精确 id + name 摘除，保证覆盖升级后旧条目
+    // 不会留在装配面。放在合并之后是因为 merge 可能把工厂块追加进来，退役清单必须覆盖最终文本。
+    val retired = FactoryProfilePatch.repairRetiredEntries(
+      merged.text,
+      retiredFactories = FactoryProfilePatch.RETIRED_FACTORY_ENTRIES,
+    )
+    val result = FactoryProfilePatch.Result(retired.text, merged.changes + retired.changes)
     if (result.text == liveText) return
     // issue #274 ②：原子写 + 非空校验（旧实现直写，半份 patch 会让引擎读不到装配条目）。
-    writeTextAtomic(live, result.text, "cordis.patch.yml") { validatePatchYaml(it, "cordis.patch.yml") }
+    writeTextAtomic(live, result.text, "cordis.patch.yml") {
+      validatePatchYaml(it, "cordis.patch.yml")
+      // 只允许搬走退役条目：其余条目 id 集合必须原样保留，否则拒绝落盘、保留旧文件。
+      validateRetirementKeepsOtherEntries(liveText, it, "cordis.patch.yml")
+    }
     for (change in result.changes) notes += live.parentFile?.name + "/" + live.name + ": " + change
   }
 

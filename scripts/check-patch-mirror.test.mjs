@@ -29,7 +29,8 @@ const PREVIOUSLY_UNCOVERED = [
 ]
 const SCRIPT_ENTRY = 'scripts/build-apk-013.ps1'
 const SELF_ENTRY = 'scripts/check-patch-mirror.mjs'
-const CONFIG_ENTRY = 'scripts/control-ops-pending.json'
+// 旧控制 op 台账已随六面登记链删除；共享配置改用仍在镜像面的 contract.json。
+const CONFIG_ENTRY = 'scripts/contract.json'
 
 /**
  * 把复制出来的树权限放开：仓库里的镜像面在磁盘上常是只读位，`cpSync` 会原样保留 ——
@@ -147,7 +148,7 @@ test('负控：共享控制协议配置漂移仍判红，不能当作脚本副�
     writeFileSync(target, Buffer.concat([original, Buffer.from('\n ')]))
     const { status, out } = run(['--peer', peer])
     assert.equal(status, 1, out)
-    assert.match(out, /FAIL {2}镜像一致: scripts\/control-ops-pending\.json/)
+    assert.match(out, /FAIL {2}镜像一致: scripts\/contract\.json/)
   } finally { writeFileSync(target, original) }
 })
 

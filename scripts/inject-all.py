@@ -37,6 +37,39 @@ DSH_ANDROID_NS = "node_modules/@dsh-android/"
 EXT_INCLUDE_FILES = ("package.json", "cordis.patch.yml", "spec.json", "README.md", "README.zh-CN.md", "LICENSE")
 
 
+def retired_packages(manifest_path):
+    """Retired local packages must disappear even when inherited from an older base archive."""
+    with open(manifest_path, encoding="utf-8-sig") as handle:
+        manifest = _json.load(handle)
+    retired = set()
+    for directory in manifest.get("retiredDirs", []):
+        if not isinstance(directory, str) or not directory.startswith("plugins/") or \
+                directory.count("/") != 1 or not directory[8:].startswith("dsh-"):
+            raise ValueError("invalid retired local package directory")
+        if directory in manifest.get("dirs", []):
+            raise ValueError("retired package remains in active injection list: " + directory)
+        retired.add(directory[8:])
+    return retired
+
+
+def is_retired_member(name, retired):
+    parts = name.removeprefix("./").split("/")
+    return len(parts) >= 7 and parts[:3] == ["home", ".dsh", "profiles"] and \
+        parts[4:6] == ["node_modules", "@dsh-android"] and parts[6] in retired
+
+
+def strip_retired_dependencies(data, retired):
+    manifest = _json.loads(data)
+    changed = False
+    for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        for package in retired:
+            key = "@dsh-android/" + package
+            if key in manifest.get(section, {}):
+                del manifest[section][key]
+                changed = True
+    return (_json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode() if changed else data
+
+
 def parse_args(argv):
     if len(argv) < 4:
         print(__doc__)
@@ -173,6 +206,9 @@ def main():
     ext_repl = build_ext_replacements(ext_dirs)
     dsh_names = set(dsh_repl.keys())
     ext_names = set(ext_repl.keys())
+    retired = retired_packages(os.path.join(os.path.dirname(__file__), "plugin-dirs.json"))
+    if dsh_names & retired:
+        raise ValueError("cannot inject a retired package")
     # ST-05：权威 patch 与注入包的覆盖面 = 全部真实装配 profile（默认行为，不再只写 web）。
     target_profiles = list(PROFILES)
     print(f"inject-all: preset={preset} | assembly profiles: {target_profiles} "
@@ -238,8 +274,19 @@ def main():
 
         for member in tin:
             name = member.name
+            if is_retired_member(name, retired):
+                pruned += 1
+                continue
             if member.isfile():
                 data = None
+                parts = name.removeprefix("./").split("/")
+                if len(parts) == 5 and parts[:3] == ["home", ".dsh", "profiles"] and parts[4] == "package.json":
+                    original = tin.extractfile(member).read()
+                    cleaned = strip_retired_dependencies(original, retired)
+                    if cleaned != original:
+                        push(cleaned, name, int(member.mtime))
+                        replaced += 1
+                        continue
                 # 修剪：工厂包目录内、源包已不存在的成员一律丢弃（否则「注入后 == 源包」不成立）
                 fr = factory_rel(name)
                 if fr is not None:

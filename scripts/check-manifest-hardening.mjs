@@ -324,9 +324,7 @@ const manifest = manifestText === null ? null : parseXml(manifestText)
 // name -> { reason, guard: 'permission' | 'user-facing' | 'source-check' }
 const EXPORTED_ALLOW = new Map([
   ['.MainActivity', { reason: '启动器 + ACTION_VIEW/SEND 分享入口（用户可见入口，无特权面）', guard: 'user-facing' }],
-  ['.AdbKeyboardService', { reason: 'IME 服务，android:permission=BIND_INPUT_METHOD', guard: 'permission' }],
   ['.DeviceControlService', { reason: '无障碍服务，android:permission=BIND_ACCESSIBILITY_SERVICE', guard: 'permission' }],
-  ['.AdbKeyboardReceiver', { reason: 'ADB 输入广播，源码 isTrustedSender 校验', guard: 'source-check' }],
   ['.BootReceiver', { reason: 'BOOT_COMPLETED（受保护系统广播）', guard: 'permission' }],
   ['rikka.shizuku.ShizukuProvider', { reason: 'Shizuku 官方 Binder bootstrap；INTERACT_ACROSS_USERS_FULL 保护 provider', guard: 'permission' }],
 ])
@@ -344,6 +342,7 @@ const COMPONENTS = ['activity', 'service', 'receiver', 'provider', 'activity-ali
 // 这些名字**不得**出现在 main（release）清单里 —— 出现即视为 debug 面泄漏到发布产物。
 // name -> { reason, guard }
 const DEBUG_EXPORTED_ALLOW = new Map([
+  ['.NativeControlVirtualFixtureActivity', { reason: '专用模拟器以 shell 启动虚拟屏测试夹具，入口受 DUMP 权限保护', guard: 'debug-only' }],
   ['.ConsoleDebugAlias', { reason: '控制台 CDP 量测通路（ConsoleActivity 未导出，adb 起不来）；仅 debug 构建', guard: 'debug-only' }],
 ])
 
@@ -479,6 +478,16 @@ if (manifest) {
     unguarded.push(name + '（无 android:permission）')
   }
   check('exported="true" 组件有权限或来源校验', unguarded.length === 0, unguarded.join('、'))
+
+  // 文本输入由原生控制器（Shizuku 聚焦编辑器 + ACTION_SET_TEXT）承担。应用一旦注册输入法，
+  // 就会进入系统输入法列表并参与键盘切换，影响用户自己的键盘。这条断言不依赖白名单是否完整：
+  // 即使有人把组件名登记进 EXPORTED_ALLOW，只要声明了输入法动作仍判红。
+  const imeComponents = components
+    .filter(({ node }) => descendants(node, 'action')
+      .some((action) => action.attrs['android:name'] === 'android.view.InputMethod'))
+    .map(({ kind, node }) => kind + ' ' + (node.attrs['android:name'] ?? '(无名)'))
+  check('不注册应用内输入法（android.view.InputMethod；文本输入归原生控制器）',
+    imeComponents.length === 0, imeComponents.join('、'))
 }
 
 // ── 3. network security config（0.14.1 块K：姿态由「默认禁明文」改为「撑开明文」）─────────

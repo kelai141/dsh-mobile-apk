@@ -38,7 +38,7 @@ object VdisplayController {
   private const val DEFAULT_HEIGHT = 800
   /** 本版上限 1 屏（0.14.0 用户拍板）；多屏设计保留（MAX 提高即可放开）。 */
   private const val MAX_VIRTUAL_DISPLAYS = 1
-  private const val MIN_EDGE = 240
+  private const val MIN_EDGE = 64
   private const val MAX_EDGE = 4096
 
   /**
@@ -58,6 +58,7 @@ object VdisplayController {
   private class Record(
     val alias: String,
     val display: VirtualDisplay,
+    val allocationId: Long,
     val reader: ImageReader,
     val thread: HandlerThread,
     val width: Int,
@@ -73,6 +74,7 @@ object VdisplayController {
 
   private val lock = Any()
   private val records = LinkedHashMap<String, Record>()
+  private var lastAllocationId = 0L
   // 序号不再是单调计数器：分配时扫描最小空闲号（见 create 内的分配逻辑）。
   /** 会话归属（0.14.0）：建屏时绑定发起会话；非归属会话的生命周期操作一律拒绝。 */
   private var ownerSessionId: String? = null
@@ -159,6 +161,18 @@ object VdisplayController {
 
   /** Owned virtual aliases ordered by allocation (the model-facing `virtual-N` set). */
   fun activeAliases(): List<String> = synchronized(lock) { records.keys.toList() }
+
+  internal data class NativeDisplayAllocation(val alias: String, val display: Display, val allocationId: Long)
+
+  /** Snapshot of the shell's own allocations. A facts read must not renew the idle lease. */
+  internal fun nativeDisplayAllocations(): List<NativeDisplayAllocation> = synchronized(lock) {
+    records.values.mapNotNull { record ->
+      val display = record.display.display
+      if (display.isValid && display.displayId != Display.DEFAULT_DISPLAY) {
+        NativeDisplayAllocation(record.alias, display, record.allocationId)
+      } else null
+    }
+  }
 
   /**
    * 某虚拟屏的**内容尺寸**（虚拟屏自己的像素宽高）。
@@ -325,7 +339,7 @@ object VdisplayController {
   }
 
   /** Create one non-mirrored public display on a user gesture or controller operation. */
-  fun create(context: Context, args: JSONObject? = null): JSONObject {
+  fun create(context: Context, args: JSONObject? = null, authorize: (() -> Boolean)? = null): JSONObject {
     val appContext = context.applicationContext
     val session = args?.optString("session", "")?.takeIf { it.isNotBlank() }
     // 0.14.0 用户口径修正：**隔离「可见性/操作」，但共享「物理资源」**。
@@ -342,7 +356,7 @@ object VdisplayController {
     //
     // 因此幂等判断回到「本机是否已有屏」——存在即复用，无论它当初由谁创建。
     val existing = synchronized(lock) { records.size }
-    if (existing > 0) return status(appContext)
+    if (existing > 0) return if (authorize == null || authorize()) status(appContext) else nativeDenied()
     val bound = ShizukuTransport.ensureBound(appContext)
     if (!bound.optBoolean("ok")) return status(appContext)
       .put("code", bound.optString("code", "shizuku-not-ready"))
@@ -413,6 +427,10 @@ object VdisplayController {
           while (records.containsKey("virtual-$candidate")) candidate += 1
           "virtual-$candidate"
         }
+        if (authorize != null && !authorize()) {
+          nextReader.close(); nextThread.quitSafely()
+          return nativeDenied()
+        }
         val created = manager.createVirtualDisplay(
           "DSH $alias",
           width,
@@ -421,7 +439,8 @@ object VdisplayController {
           nextReader.surface,
           flags,
         ) ?: throw IllegalStateException("DisplayManager returned null VirtualDisplay")
-        records[alias] = Record(alias, created, nextReader, nextThread, width, height, dpi, owner = session)
+        records[alias] = Record(alias, created, ++lastAllocationId, nextReader, nextThread, width, height, dpi,
+          owner = session)
         if (selectedAlias == null) selectedAlias = alias
         if (ownerSessionId == null && session != null) ownerSessionId = session
         generation += 1
@@ -441,7 +460,7 @@ object VdisplayController {
   }
 
   /** Explicitly remove one display; DESTROY_CONTENT_ON_REMOVAL prevents third-party task migration. */
-  fun destroy(context: Context, args: JSONObject? = null): JSONObject = synchronized(lock) {
+  fun destroy(context: Context, args: JSONObject? = null, authorize: (() -> Boolean)? = null): JSONObject = synchronized(lock) {
     val session = args?.optString("session", "")?.takeIf { it.isNotBlank() }
     // 销毁权限（用户明确要求）：**任何会话都能销毁**（模型与人都能关掉）。
     //
@@ -451,10 +470,13 @@ object VdisplayController {
     //
     // 选择顺序：显式 target → 本会话自己的屏 → 当前选中 → 任意一块（保证只要存在就能关掉）。
     val requested = args?.optString("target", "").orEmpty().ifBlank { selectedAlias }
+    if (authorize != null && (requested == null || !records.containsKey(requested)))
+      return nativeDenied().put("code", "screen-not-found")
     val alias = requested?.takeIf { records.containsKey(it) }
       ?: records.values.firstOrNull { it.owner == session }?.alias
       ?: records.keys.firstOrNull()
       ?: return status(context.applicationContext)
+    if (authorize != null && !authorize()) return nativeDenied()
     val record = records.remove(alias) ?: return status(context.applicationContext)
     runCatching { record.display.release() }
     runCatching { record.reader.close() }
@@ -468,6 +490,79 @@ object VdisplayController {
     Log.i(TAG, "destroyed alias=$alias generation=$generation remaining=${records.size}")
     status(context.applicationContext)
   }
+
+  /**
+   * Rust-authorized vd* entry point.
+   *
+   * The caller has already verified the committed Rust plan and passes its bound [screenId]. Unlike
+   * [destroy] / [launchApp], an explicit alias is never replaced by the selected screen: a missing
+   * alias is reported as such. [allowSelectFallback] is only for read-only vdInfo.
+   *
+   * @param op one of the supported virtual-display operations.
+   * @param args validated Rust arguments (geometry or package).
+   * @param screenId the alias bound by the Rust plan.
+   * @param allowSelectFallback true only for vdInfo, which may report the selected screen when the
+   *   planned alias no longer exists.
+   */
+  internal fun executeAuthorized(
+    context: Context,
+    op: String,
+    args: JSONObject,
+    screenId: String,
+    allowSelectFallback: Boolean = false,
+    authorize: (() -> Boolean)? = null,
+  ): JSONObject {
+    val appContext = context.applicationContext
+    val alias = screenId.trim()
+    if (alias.isEmpty() || alias == ScreenTargets.REAL) {
+      return JSONObject().put("ok", false).put("code", "invalid-screen")
+        .put("guidance", "Rust 计划没有绑定可执行的虚拟屏别名。")
+    }
+    val explicit = recordOf(alias)
+    if (allowSelectFallback && op == "vdInfo" && explicit == null) {
+      return status(appContext).put("screenId", alias)
+    }
+    if (explicit == null && op !in setOf("vdCreate", "vdInfo")) {
+      return JSONObject().put("ok", false).put("code", "screen-not-found")
+        .put("screenId", alias)
+        .put("guidance", "目标虚拟屏 " + alias + " 不存在；不会改用当前选中屏幕。")
+    }
+    return when (op) {
+      "vdCreate" -> {
+        val existing = activeAliases()
+        val creatable = (existing.isEmpty() && alias == "virtual-1") || existing == listOf(alias)
+        if (!creatable) {
+          JSONObject().put("ok", false).put("code", "vdisplay-alias-mismatch")
+            .put("screenId", alias).put("aliases", JSONArray(existing))
+            .put("guidance", "可创建的虚拟屏别名与本计划的 " + alias + " 不一致；未创建第二块屏。")
+        } else {
+          val created = create(appContext, args, authorize)
+          if (created.optString("executed") == "no") return created
+          if (created.optJSONArray("aliases")?.let { array ->
+              (0 until array.length()).any { array.optString(it) == alias }
+            } == true || activeAliases() == listOf(alias)) {
+            // Reuse preserves the existing alias; a fresh allocation is checked against the plan.
+            if (existing == listOf(alias)) created.put("alias", alias)
+            created
+          }
+          else JSONObject().put("ok", false).put("code", "vdisplay-alias-mismatch")
+            .put("screenId", alias).put("guidance", "创建结果没有登记计划绑定的 " + alias + "。")
+        }
+      }
+      "vdDestroy" -> destroy(appContext, JSONObject().put("target", alias), authorize)
+      "vdLaunch" -> launchSettingsProbe(appContext, JSONObject(args.toString()).put("target", alias), authorize)
+      "vdLaunchApp" -> launchApp(appContext, args.optString("pkg", ""), alias, authorize)
+      "vdInfo" -> if (authorize == null || authorize()) status(appContext) else nativeDenied()
+      else -> JSONObject().put("ok", false).put("code", "platform-adapter-unavailable")
+        .put("screenId", alias)
+    }.also { result ->
+      // The adapter and dispatcher bind the receipt to the plan; nothing here may rewrite it.
+      result.put("screenId", alias)
+    }
+  }
+
+  private fun nativeDenied(): JSONObject = JSONObject().put("ok", false)
+    .put("code", "authorize-denied").put("executed", "no")
 
   /**
    * Select the controller-owned presentation target. The real screen is not mirrorable and is
@@ -590,10 +685,11 @@ object VdisplayController {
    * Minimal fixed-action proof: launch Android Settings onto the selected virtual display through
    * the shell UserService. This command contains no model/user supplied shell text.
    */
-  fun launchSettingsProbe(context: Context, args: JSONObject? = null): JSONObject {
+  fun launchSettingsProbe(context: Context, args: JSONObject? = null, authorize: (() -> Boolean)? = null): JSONObject {
     requireOwner("vdLaunch", args?.optString("session", "")?.takeIf { it.isNotBlank() })?.let { return it }
     val target = args?.optString("target", "").orEmpty().ifBlank { null }
-    val record = selectedRecord() ?: recordOf(target)
+    if (authorize != null) return launchApp(context, "com.android.settings", target, authorize)
+    val record = (if (target != null) recordOf(target) else selectedRecord())
       ?: return status(context.applicationContext).put("ok", false).put("code", "screen-not-ready")
         .put("guidance", "虚拟屏幕尚未创建，无法拉起测试应用。")
     touch(record.alias) // #671：往这块屏送任务 = 使用中。
@@ -601,6 +697,7 @@ object VdisplayController {
     val result = ShizukuTransport.runController(
       context.applicationContext,
       arrayOf("am", "start", "--display", id.toString(), "-a", "android.settings.SETTINGS"),
+      authorize = authorize,
     )
     val out = status(context.applicationContext)
     out.put("launch", result)
@@ -702,17 +799,26 @@ object VdisplayController {
    * @param target - 虚拟屏别名；缺省取当前选中/第一块。
    * @returns 结果对象（ok/code/guidance/screenId/displayId）。
    */
-  fun launchApp(context: Context, pkg: String, target: String? = null): JSONObject {
+  fun launchApp(context: Context, pkg: String, target: String? = null, authorize: (() -> Boolean)? = null): JSONObject {
     val appContext = context.applicationContext
     if (!Regex("^[a-zA-Z][\\w.]*$").matches(pkg)) {
       return JSONObject().put("ok", false).put("code", "invalid-package")
         .put("guidance", "包名不合法：$pkg（须为 Android 包名文法，如 com.example.app）。")
     }
-    val record = selectedRecord() ?: recordOf(target)
+    val record = (if (target != null) recordOf(target) else selectedRecord())
       ?: return status(appContext).put("ok", false).put("code", "screen-not-ready")
         .put("guidance", "虚拟屏幕尚未创建，无法在其上拉起应用；可先 android_vdisplay_create。")
     touch(record.alias) // #671：往这块屏送任务 = 使用中。
     val id = record.displayId
+    if (authorize != null) {
+      val before = ShizukuTransport.runShell(appContext, ACTIVITY_DISPLAY_PROBE, 8_000)
+      if (!before.optBoolean("ok")) return JSONObject().put("ok", false)
+        .put("code", "vd-launch-state-unavailable").put("executed", "no").put("screenId", record.alias)
+      val priorDisplays = displaysRunning(pkg, before.optString("stdout"))
+      if (priorDisplays.any { it != id }) return JSONObject().put("ok", false)
+        .put("code", "vd-launch-denied").put("executed", "no").put("screenId", record.alias)
+        .put("landedDisplayIds", JSONArray(priorDisplays.toList()))
+    }
     // 拉起路径（0.14.0 模拟器逐条实测，**四条路只有最后一条成立**）：
     //
     //   ① `monkey -p <pkg> --display <id>`            → Error: Unknown option: --display（monkey 无屏幕维度）
@@ -741,7 +847,9 @@ object VdisplayController {
     val result = ShizukuTransport.runController(
       appContext,
       arrayOf("am", "start", "--display", id.toString(), "-n", component),
+      authorize = authorize,
     )
+    if (result.optString("executed") == "no") return result.put("screenId", record.alias)
     val amTail = result.optString("stdout", result.optString("error", "")).trim().takeLast(400)
     val out = status(appContext).put("displayId", id).put("screenId", record.alias)
     if (!result.optBoolean("ok")) {

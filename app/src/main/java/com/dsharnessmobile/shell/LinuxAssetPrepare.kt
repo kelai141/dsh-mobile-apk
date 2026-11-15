@@ -6,11 +6,8 @@ import org.json.JSONObject
 /**
  * Linux 环境的**客户端触发**准备入口（0.15.0，(iii) 形态）。
  *
- * 为什么是「客户端触发」而不是引擎侧调用：引擎（Node/Cordis）侧**没有反向通道**调用宿主 ——
- * 壳侧是客户端，长轮询引擎的 `/api/android/ui/pending`（`ControlPoller.kt:48/101-113`），而那条队列
- * 就是**设备控制队列**，其策略要求 `danger-full-access`（`control-policy.ts:68/84-87`）。把资产下载
- * 挂上去等于「装 Linux 必须先开设备控制档」，与用户「Linux 不是沙箱、不要只靠 danger-full-access
- * 才能用」的要求相反。客户端触发走 `@JavascriptInterface`，是直连、不经过那条队列，也不需要新能力。
+ * 客户端触发走受信页面的 `@JavascriptInterface`。Linux 资产准备属于独立环境能力，
+ * 不经过手机控制的原生执行接口，也不受设备控制会话档位约束。
  *
  * 职责边界（刻意窄）：本对象只做「下载 + 校验 + 解包到宿主自己的暂存目录」。**不**决定装什么、
  * 不激活任何东西、不写 bootstrap 的状态。版本/状态/最终落位/激活仍归引擎侧 bootstrap，

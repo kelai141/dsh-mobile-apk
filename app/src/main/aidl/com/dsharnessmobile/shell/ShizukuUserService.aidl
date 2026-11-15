@@ -69,5 +69,81 @@ interface ShizukuUserService {
 
     /** v4: confirm the one-time configured full UID and trusted data anchor. */
     Bundle configuration() = 10;
+
+    /**
+     * Optional native input contract: bit 0 is a real-display point tap; bit 1 is focused-editor
+     * text on display 0. Each bit is only set when this service measured the capability itself.
+     */
+    int nativeInputCapabilities() = 11;
+
+    /** Typed point tap for display 0 only. No text, argv or display override. */
+    Bundle nativeTapReal(int x, int y) = 12;
+
+    /**
+     * Typed focused-editor text for display 0 only. No node ref, argv or display override.
+     * deadlineMs is an elapsedRealtime deadline: past it the service must not mutate anything.
+     * @return {ok,code,executed}: no = nothing dispatched; unknown = a mutation may have happened.
+     */
+    Bundle nativeSetTextReal(String text, boolean clear, long deadlineMs) = 13;
+
+    /**
+     * Typed raw UI tree read for the real display (displayId must be 0). The service returns a
+     * bounded JSON body (windowId, nodes, complete, stopReason, elapsedMs); the application adds
+     * the Rust-owned target before publishing it. No node ref, argv or window override.
+     *
+     * deadlineMs is an elapsedRealtime deadline: past it the service returns no tree.
+     * @return {ok,code,executed,body}: no = nothing read; the body is never replayed later.
+     */
+    Bundle nativeSnapshotReal(int displayId, long deadlineMs) = 14;
+
+    /** Read-only finite frame descriptor; pixel bytes do not pass through a Binder bundle. */
+    @nullable android.os.ParcelFileDescriptor nativeCaptureReal(long deadlineMs) = 15;
+
+    /** Typed bounded real-display motion; operation and arguments are validated by the service. */
+    Bundle nativeMotionReal(String operation, String argsJson, long deadlineMs) = 16;
+
+    /** Node path measured first, verified by Rust, then compared again before a single action. */
+    Bundle nativeNodeReal(int windowId, in int[] path, String operation, String argsJson, String expectedNode, long deadlineMs) = 17;
+
+    /**
+     * v6: measured capability bits for one display. The service enumerates its own windows for the
+     * requested display and never infers another display's capabilities.
+     * bit 0 = focused-editor text, bit 1 = raw tree read, bit 2 = node action, bit 3 = raw capture,
+     * bit 4 = coordinate gestures (tap/longClick/scroll) via the shell input binary, whose argv
+     * carries this display id. Gesture capability is measured from the binary being executable on
+     * this service; it is only published together with this display being enumerable.
+     * A display the service cannot enumerate returns 0; an unconfigured or non-shell caller also
+     * returns 0. Display 0 is the real display; any other id must be a display the application
+     * resolved from its own registration table before calling. alias is the application's own
+     * screen name: it is only used to prove that the exact SurfaceFlinger token is resolvable now
+     * before the capture bit is published (display 0 ignores it).
+     */
+    int nativeDisplayCapabilities(int displayId, String alias) = 18;
+
+    /**
+     * v6: focused-editor text on one display. Same gates as [nativeSetTextReal]; the editor is only
+     * selected among windows of displayId, so a focused editor on another display is never written.
+     * @return {ok,code,executed}
+     */
+    Bundle nativeSetTextDisplay(int displayId, String text, boolean clear, long deadlineMs) = 19;
+
+    /**
+     * v6: raw frame for one display. displayId 0 stays the real screen; a virtual display needs its
+     * alias so the service can resolve the current SurfaceFlinger token for that exact screen name.
+     * The token is looked up per call and never cached. No pixel bytes travel through the bundle.
+     */
+    @nullable android.os.ParcelFileDescriptor nativeCaptureDisplay(int displayId, String alias, long deadlineMs) = 20;
+
+    /** v6: node read/action limited to one window that must belong to displayId. */
+    Bundle nativeNodeDisplay(int displayId, int windowId, in int[] path, String operation, String argsJson, String expectedNode, long deadlineMs) = 21;
+
+    /**
+     * v6: coordinate/key gestures for one display. Only click/longClick/scroll/swipe/keyEvent/global
+     * are accepted; the argv template is fixed by the service and the display id is the only target
+     * token. keyEvent takes one of eleven fixed key names. global keeps display 0 for
+     * home/recents/notifications and refuses them elsewhere instead of acting on the real screen.
+     * App launch keeps its real-display transaction.
+     */
+    Bundle nativeMotionDisplay(int displayId, String operation, String argsJson, long deadlineMs) = 22;
 }
 

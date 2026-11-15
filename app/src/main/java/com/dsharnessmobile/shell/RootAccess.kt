@@ -94,7 +94,6 @@ object RootAccess {
 
   /** 当前是否已授权（供 [RootGrant] 的策略门消费；只认缓存，不触发弹窗）。 */
   fun isGranted(context: Context): Boolean {
-    if (suPath() == null) return false
     return cachedState(context).first == STATE_GRANTED
   }
 
@@ -110,7 +109,7 @@ object RootAccess {
    * 状态读面（**永不触发弹窗**）。字段：
    * `suExists` / `state` / `uid` / `granted` / `requesting` / `manager{package,label,installed}` / `guidance`。
    */
-  fun state(context: Context): JSONObject {
+  fun state(context: Context, includeOwnership: Boolean = true): JSONObject {
     val su = suPath()
     val (state, uid) = cachedState(context)
     val effective = if (su == null && state != STATE_REQUESTING) STATE_NO_SU else state
@@ -130,7 +129,8 @@ object RootAccess {
         .put("installed", mgr != null),
     )
     out.put("guidance", guidance(effective, mgr?.second, UiText.isEnglish(context)))
-    out.put("ownership", RootOwnershipJobs.state(context))
+    // 读面折进 ownership 会连带读租约并做启动判断；省掉这一层可让状态读面保持廉价。
+    if (includeOwnership) out.put("ownership", RootOwnershipJobs.state(context))
     return out
   }
 
@@ -235,22 +235,41 @@ object RootAccess {
    * 每个失败分支都带 `reason`（= code）：页面对 `ok:false` 只读 `reason` 翻人话
    * （`user-copy.ts` 的 CALL_REASON 唯一真源），只带 code 会落「未在本版登记」兜底。
    */
-  fun execRoot(context: Context, command: String, timeoutMs: Int = 20_000): JSONObject =
+  fun execRoot(context: Context, command: String, timeoutMs: Int = 20_000,
+    authorize: () -> Boolean = { true }): JSONObject =
     RootExecutionFence.command(context) {
       val app = context.applicationContext
-      RootMaintenanceLease.begin(app, "su-shell")?.let { return@command it }
-      val result = execPrivileged(app, command, timeoutMs, requireAiGrant = true)
+      val lease = RootMaintenanceLease.beginOperation(app, "su-shell")
+      lease.second?.let { return@command it }
+      val operationId = lease.first
+      val result = execPrivileged(app, command, timeoutMs, requireAiGrant = true, authorize = authorize)
+      // C1/C2：拒绝集只收「进程确实没起来」的原因。su-exec-failed 覆盖了 start() 之后的读取异常，
+      // 一律按结果不明处理（旧实现把它当零副作用并清租约，会抹掉已派发证据）。
       val refusedBeforeDispatch = !result.has("exitCode") && result.optString("code") in
-        setOf("no-su", "root-not-granted", "requesting", "empty-command", "root-grant-required", "su-exec-failed")
-      val acknowledged = result.has("exitCode") && !result.optBoolean("exitTimedOut") &&
-        !result.optBoolean("drainTimedOut") && !result.optBoolean("cleanupIncomplete") && result.optString("readError").isEmpty()
+        setOf("no-su", "root-not-granted", "requesting", "empty-command", "root-grant-required",
+          "root-lease-evidence-unavailable", "authorize-denied")
+      val acknowledged = suAcknowledgement(result)
       if (refusedBeforeDispatch || acknowledged) {
-        if (RootMaintenanceLease.finish(app)) result else RootMaintenanceLease.markUnknown(app, "lease-clear-failed")
+        if (RootMaintenanceLease.finish(app, operationId)) result
+        else RootMaintenanceLease.markUnknown(app, "lease-clear-failed")
       } else RootMaintenanceLease.markUnknown(app, "su-command-settlement-unknown").put("noReplay", true)
     }
 
+  /**
+   * su 结果的结算判据（纯函数，JVM 可直测）。
+   *
+   * C2：只有「完整读取 + 非超时 + 无排水超时 + 无清理未完成 + 无读错误 + 退出码非负」才算已确认。
+   * 退出码 -1 不能冒充确认——Shizuku 侧 executionDefinitive 早就是这条口径，此处补齐对称。
+   */
+  internal fun suAcknowledgement(result: JSONObject): Boolean =
+    result.has("exitCode") && result.optInt("exitCode", -1) >= 0 &&
+      !result.optBoolean("exitTimedOut") && !result.optBoolean("drainTimedOut") &&
+      !result.optBoolean("cleanupIncomplete") && result.optString("readError").isEmpty() &&
+      !result.optBoolean("truncated")
+
   // Only the fixed native ownership-maintenance operation may use this private primitive without AI consent.
-  private fun execPrivileged(context: Context, command: String, timeoutMs: Int, requireAiGrant: Boolean): JSONObject {
+  private fun execPrivileged(context: Context, command: String, timeoutMs: Int, requireAiGrant: Boolean,
+    authorize: () -> Boolean = { true }): JSONObject {
     if (command.isBlank()) return fail("empty-command", "命令为空。")
     val su = suPath() ?: return fail("no-su", "本机没有可用的 su。")
     if (!isGranted(context)) {
@@ -275,6 +294,11 @@ object RootAccess {
         !RootMaintenanceLease.markDispatched(context, "su")) {
         return fail("root-lease-evidence-unavailable",
           "无法把「已派发」证据落盘，本次不派发特权工作（避免以后误判为未派发）。")
+      }
+      // 上层只读快速授权检查：紧贴派发，之后立刻 start；拒绝即零副作用（未置 dispatched、
+      // 未起进程），调用方按「确定没派发」结算租约。
+      if (!safeAuthorize(authorize)) {
+        return fail("authorize-denied", "本机当前授权已不成立，本次不派发 root 命令。")
       }
       val process = ProcessBuilder(su, "-c", command).redirectErrorStream(true).start()
       val output = ProcIo.readBoundedMillis(process, timeout.toLong())
@@ -312,6 +336,15 @@ object RootAccess {
   /** shell 单引号安全包裹（路径可能含空格/引号；命令由本文件拼，不接受调用方原始拼接）。 */
   private fun shq(raw: String): String = "'" + raw.replace("'", "'\\''") + "'"
 
+  /**
+   * authorize 的求值纪律：回调抛异常按「不授权」处理，绝不因为上层检查出错而放行特权派发。
+   */
+  internal fun safeAuthorize(authorize: () -> Boolean): Boolean = try {
+    authorize()
+  } catch (_: Throwable) {
+    false
+  }
+
   /** Fixed signed-APK ownership maintenance; this private transport exception is not a model shell. */
   fun repairOwnership(context: Context, path: String, maxEntries: Int = 20_000,
     timeoutMs: Long = OwnershipRepair.DEFAULT_TIMEOUT_MS): JSONObject = RootExecutionFence.maintenance(context) {
@@ -339,10 +372,15 @@ object RootAccess {
     if (apk.isNullOrBlank() || !File(apk).isFile) return fail("installed-apk-unavailable", "无法读取已安装的应用代码。")
     val command = "CLASSPATH=" + shq(apk) + " /system/bin/app_process /system/bin " +
       "com.dsharnessmobile.shell.RootRepairMain " + args.joinToString(" ") { shq(it) }
-    RootMaintenanceLease.begin(app, "su-ownership")?.let { return it }
+    val lease = RootMaintenanceLease.beginOperation(app, "su-ownership")
+    lease.second?.let { return it }
+    val operationId = lease.first
     val transport = execPrivileged(app, command, budget.toInt(), requireAiGrant = false)
-    if (!transport.has("exitCode") && transport.optString("code") in setOf("no-su", "root-not-granted", "requesting", "empty-command", "su-exec-failed")) {
-      return if (RootMaintenanceLease.finish(app)) transport else RootMaintenanceLease.markUnknown(app, "lease-clear-failed")
+    // 与 execRoot 同一条口径：su-exec-failed 不在「确定没派发」集合里，只能按结果不明处理。
+    if (!transport.has("exitCode") && transport.optString("code") in
+      setOf("no-su", "root-not-granted", "requesting", "empty-command", "root-lease-evidence-unavailable")) {
+      return if (RootMaintenanceLease.finish(app, operationId)) transport
+      else RootMaintenanceLease.markUnknown(app, "lease-clear-failed")
     }
     if (transport.optBoolean("exitTimedOut") || transport.optBoolean("drainTimedOut") || transport.optBoolean("truncated") ||
       transport.optBoolean("cleanupIncomplete") || transport.optString("readError").isNotEmpty()) {
@@ -361,12 +399,13 @@ object RootAccess {
       parsed.opt("truncated") is Boolean && parsed.opt("deadlineExceeded") is Boolean &&
       transport.optInt("exitCode", -1) in setOf(0, 2)
     if (!completeEnvelope) return RootMaintenanceLease.markUnknown(app, "repair-helper-envelope-incomplete").put("transport", "su")
-    if (!RootMaintenanceLease.finish(app)) return RootMaintenanceLease.markUnknown(app, "lease-clear-failed").put("transport", "su")
+    if (!RootMaintenanceLease.finish(app, operationId))
+      return RootMaintenanceLease.markUnknown(app, "lease-clear-failed").put("transport", "su")
     val verified = transport.optInt("exitCode", -1) == 0 && parsed.optBoolean("ok") &&
       parsed.has("checked") && parsed.has("healed") && parsed.optInt("failures", -1) == 0 &&
       parsed.optInt("unverifiedMutations", -1) == 0 && parsed.optInt("remaining", -1) == 0 &&
       !parsed.optBoolean("truncated") && !parsed.optBoolean("deadlineExceeded")
-    return parsed.put("ok", verified).put("transport", "su").apply {
+    return parsed.put("ok", verified).put("transport", "su").put("operationId", operationId ?: "").apply {
       if (!verified && optString("reason").isBlank()) {
         put("reason", "repair-incomplete").put("code", "repair-incomplete").put("remaining", -1)
       }

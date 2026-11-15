@@ -41,7 +41,7 @@ class ShizukuRpcLeaseWiringFixtureTest {
     val lease = source().substringAfter("    fun beforeRpc(").substringBefore("    fun acknowledged()")
     assertTrue(lease.contains("dispatchIdentity(context, remote, applyGate)"))
     assertTrue(lease.contains("if (uid == 0 && !leased)"))
-    val begin = lease.indexOf("RootMaintenanceLease.begin(context, operation)")
+    val begin = lease.indexOf("RootMaintenanceLease.beginOperation(context, operation)")
     assertTrue(begin >= 0)
     assertTrue(lease.indexOf("dispatchIdentity(context, remote, applyGate)", begin) > begin)
     assertTrue(lease.indexOf("inFlight = true") > begin)
@@ -53,11 +53,25 @@ class ShizukuRpcLeaseWiringFixtureTest {
 
   @Test fun executionGatesAreAfterArgvSetupAndImmediatelyBeforeRpc() {
     val controller = body("runControllerInternal")
-    assertTrue(Regex("""lease\.beforeRpc\(remote\)\?\.let \{ return it }\s+val reply = remote\.exec\(""")
+    // runController 也有原生诊断用的 authorize 复核：只允许它在 beforeRpc 之后、exec 之前，
+    // 且拒绝必须当场结算成 executed=no（不能先跑一次再说没执行）。
+    assertTrue(Regex("""lease\.beforeRpc\(remote\)\?\.let \{ return it\.put\("executed", "no"\) }""")
+      .containsMatchIn(controller))
+    val gate = controller.indexOf("if (authorize != null && !authorize())")
+    val exec = controller.indexOf("val reply = remote.exec(")
+    assertTrue("authorize 复核必须在 beforeRpc 之后", gate > controller.indexOf("lease.beforeRpc(remote)"))
+    assertTrue("authorize 复核必须在真正 exec 之前", exec > gate)
+    assertTrue(Regex("""return lease\.complete\(JSONObject\(\)\.put\("ok", false\)\.put\("code", "authorize-denied"\)\.put\("executed", "no"\)\)""")
       .containsMatchIn(controller))
     val shell = body("runShellInternal")
     assertTrue(shell.indexOf("val argv =") < shell.indexOf("lease.beforeRpc(remote)"))
-    assertTrue(Regex("""lease\.beforeRpc\(remote\)\?\.let \{ return it }\s+val reply = if \(capture\) remote\.execCapture""")
+    // 原生诊断面在 RPC 前多一道 authorize 复核（紧贴派发、拒绝即零副作用）；它必须仍在
+    // beforeRpc 之后、真正 exec 之前，否则「拒绝」会变成「先跑再报拒绝」。
+    assertTrue(Regex("""lease\.beforeRpc\(remote\)\?\.let \{ return it }\s+if \(authorize != null && !authorize\(\)\)""")
+      .containsMatchIn(shell))
+    assertTrue(Regex("""lease\.acknowledged\(\)\s+return lease\.complete\(JSONObject\(\)\.put\("ok", false\)\.put\("code", "authorize-denied"\)""")
+      .containsMatchIn(shell))
+    assertTrue(Regex("""val reply = if \(capture\) remote\.execCapture\(argv, timeout, 8 \* 1024\) else remote\.exec\(argv, timeout\)""")
       .containsMatchIn(shell))
   }
 
@@ -65,7 +79,8 @@ class ShizukuRpcLeaseWiringFixtureTest {
     val text = source()
     assertTrue(text.contains("val result = if (!definitive || inFlight) unknown"))
     assertTrue(text.contains("RootMaintenanceLease.markUnknown(context, reason)"))
-    assertTrue(text.contains("RootMaintenanceLease.finish(context)"))
+    assertTrue(text.contains("RootMaintenanceLease.finish(context, leaseOperationId)"))
+    assertTrue(text.contains("leaseOperationId = begun.first ?: return"))
     assertTrue(text.contains("definitive = !inFlight"))
     assertTrue(text.contains(".put(\"offsetFact\", \"acknowledged-bytes\")"))
     assertTrue(text.contains(".put(\"noReplay\", true)"))

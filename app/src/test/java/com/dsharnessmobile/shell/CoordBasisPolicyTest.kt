@@ -145,83 +145,24 @@ class CoordBasisPolicyTest {
   }
 }
 
-/**
- * 单一真源接线契约（issue #258 实现要求）：归一化的换算点只能有一处。
- *
- * 为什么用源码契约而不是行为测试：执行侧 [DeviceControlService] 是 AccessibilityService，
- * 纯 JVM（无 Robolectric）无法实例化；而这里要防的缺陷形态是「某条路径漏改、又各自写一份换算」
- * ——正是最适合源码断言的形态（与仓内 `CallSiteContractTest` 同一思路）。
- */
+/** 宿主采集显示器逻辑尺寸，执行器消费计划尺寸和真实像素。 */
 class CoordBasisWiringContractTest {
+  private fun code(name: String) = File("src/main/java/com/dsharnessmobile/shell/nativecontrol", name).readText()
+    .replace(Regex("/\\*[\\s\\S]*?\\*/"), "").lineSequence().map { it.substringBefore("//") }.joinToString("\n")
 
-  private fun source(name: String): String {
-    val candidates = listOf(
-      File("src/main/java/com/dsharnessmobile/shell", name),
-      File("app/src/main/java/com/dsharnessmobile/shell", name),
-    )
-    val f = candidates.firstOrNull { it.isFile }
-      ?: throw AssertionError("找不到壳侧源码 " + name + "（工作目录 = " + File(".").absolutePath + "）")
-    return f.readText()
+  @Test fun factsReadTheDisplayRatherThanTheActivityWindow() {
+    val reader = code("NativePlatformFacts.kt")
+    assertTrue(reader.contains("display.getRealSize(size)"))
+    assertTrue(reader.contains("manager.getDisplay(Display.DEFAULT_DISPLAY)"))
+    assertTrue(reader.contains("VdisplayController.nativeDisplayAllocations()"))
+    assertFalse(reader.contains("currentWindowMetrics"))
+    assertFalse(reader.contains("resources.displayMetrics"))
   }
 
-  /**
-   * 断言面必须**剥掉注释**：本类刚踩过——KDoc 里描述修复前实现时会写出 `currentWindowMetrics`
-   * 字样，用整文件原文断言会把「注释提到缺陷 API」误判成「代码用了缺陷 API」（判据自伤）。
-   * 与仓内 `CallSiteContractTest` 的 `codeOnly` 同一口径。
-   */
-  private val service = codeOnly(source("DeviceControlService.kt"))
-
-  /** 反证核心：执行侧**不得**再出现「当前窗口」这一缺陷基准的取数调用。 */
-  @Test
-  fun executionSideNeverDerivesTheBasisFromCurrentWindowMetrics() {
-    assertFalse(
-      "issue #258：execution side must not read currentWindowMetrics for the coordinate basis",
-      service.contains("currentWindowMetrics"),
-    )
-    assertFalse("不得回退到会返回窗口尺寸的 Resources 取数面", service.contains("resources.displayMetrics"))
-    assertTrue("基准必须经唯一真源解析", service.contains("CoordBasisPolicy.screenBasis(this)"))
-  }
-
-  /** 行注释 / 块注释 / KDoc 一律剥除（保留代码行，行号会变但本类只做包含性断言）。 */
-  private fun codeOnly(src: String): String = src
-    .replace(Regex("/\\*[\\s\\S]*?\\*/"), "")
-    .lineSequence()
-    .map { it.substringBefore("//") }
-    .joinToString("\n")
-
-  /** 四条消费路径必须共用同一真源：click / longClick 显式经 coordBasis()，快照与滚动经 screenSize()。 */
-  @Test
-  fun everyCoordinateConsumerGoesThroughTheSingleSourceOfTruth() {
-    val click = memberBody("private fun handleClick(")
-    val longClick = memberBody("private fun handleLongClick(")
-    assertTrue("click 的归一化必须用 coordBasis()", click.contains("coordBasis()"))
-    assertTrue("longClick 的归一化必须用 coordBasis()", longClick.contains("coordBasis()"))
-    // 归一化分支不得再出现任何本地的 metrics 变量（否则又是一份独立换算）。
-    assertFalse("click 的 nx/ny 分支不得再自取尺寸", click.contains("screenSize()"))
-    assertFalse("longClick 的 nx/ny 分支不得再自取尺寸", longClick.contains("screenSize()"))
-    assertTrue("屏幕尺寸唯一入口必须委托真源", memberBody("private fun screenSize(").contains("coordBasis()"))
-  }
-
-  /** 回显基准：两条归一化动作的返回值都必须带 basis/basisWidth/basisHeight。 */
-  @Test
-  fun normalizedActionsEchoTheBasisTheyUsed() {
-    val withBasis = memberBody("private fun withBasis(")
-    assertTrue(withBasis.contains("\"basis\""))
-    assertTrue(withBasis.contains("\"basisWidth\""))
-    assertTrue(withBasis.contains("\"basisHeight\""))
-    assertTrue("click 必须回显基准", memberBody("private fun handleClick(").contains("withBasis("))
-    assertTrue("longClick 必须回显基准", memberBody("private fun handleLongClick(").contains("withBasis("))
-  }
-
-  /** 按签名取**函数体**（整文件正则跨成员会误判，见 `BootDiagnosticsContractTest` 的教训）。 */
-  private fun memberBody(signature: String): String {
-    val idx = service.indexOf(signature)
-    if (idx < 0) throw AssertionError("找不到成员签名 " + signature)
-    val rest = service.substring(idx + signature.length)
-    val cut = listOf("\n  private fun ", "\n  internal fun ", "\n  override fun ", "\n  fun ")
-      .map { rest.indexOf(it) }
-      .filter { it >= 0 }
-      .minOrNull() ?: rest.length
-    return rest.substring(0, cut)
+  @Test fun gesturesUseTheLogicalPlanSizeWithoutWindowMetrics() {
+    val adapter = code("NativeAccessibilityPlatform.kt")
+    assertTrue(adapter.contains("x >= target.logicalWidth || y >= target.logicalHeight"))
+    assertFalse(adapter.contains("currentWindowMetrics"))
+    assertFalse(adapter.contains("resources.displayMetrics"))
   }
 }

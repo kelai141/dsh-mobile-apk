@@ -343,9 +343,12 @@ if (peer) {
     'scripts/check-snapshot-decode.mjs',
     'scripts/check-tool-output-schema.mjs',
     'scripts/check-control-ops.mjs',
+    'scripts/check-control-ops.test.mjs',
+    'scripts/check-op-registry-parity.mjs',
+    'scripts/check-protocol-v2.mjs',
+    'scripts/check-protocol-v2.test.mjs',
+    'scripts/lib/native-control-contract.mjs',
     'scripts/check-release-gates.mjs',
-    'scripts/control-ops-known-gaps.json',
-    'scripts/control-ops-pending.json',
     'scripts/check-inject-completeness.mjs',
     'scripts/check-kotlin-comments.mjs',
     // 0.14.2 D7：执行地图门禁纳入聚合并声明集合，它就必须与产物面同源 ——
@@ -365,7 +368,6 @@ if (peer) {
     'scripts/check-mcp-client-deps.mjs',
     'scripts/check-build-chain-abort.mjs',
     'scripts/release-plugin-src-gaps.json',
-    'scripts/gen-protocol-v2-fixture.mjs',
     'scripts/profile-web.cordis.patch.yml',
     'scripts/snapshot-config/engine-overlay.json',
     // 快照瘦身清单（0.14.2 T2）：slim.json 是**供给侧数据面**——两条构建链
@@ -395,7 +397,6 @@ if (peer) {
     // 屏幕范围判定的跨语言 fixture 同步器（0.14.1 审查 §8.3/§8.3b 收口）：它把插件侧权威源
     // 复制成壳侧单测资源，是「引擎侧第一道门」与「壳侧执行点第二道门」等价的唯一真值链。
     // 脚本单边演进 = 一侧按旧规则生成/校验副本，等价性无声失效。
-    'scripts/gen-screen-scope-fixture.mjs',
     // 死 token 门禁（0.14.2 D3 / B6）：它是两条构建链与协调仓 CI 的同一执行面——单边演进会让
     // 云端自包含构建跑到旧副本（对端缺文件即 SKIP），与 ST-17 同型缺陷。
     'scripts/check-dead-tokens.mjs',

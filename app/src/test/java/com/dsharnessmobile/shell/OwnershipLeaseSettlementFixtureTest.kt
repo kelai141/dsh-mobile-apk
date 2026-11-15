@@ -91,15 +91,17 @@ class OwnershipLeaseSettlementFixtureTest {
     assertFalse(repair.contains("definitive = verified"))
   }
 
-  @Test fun suSpawnFailureIsNeverDispatchedAndSettlesLeaseInsteadOfQuarantine() {
-    // 边界收紧后这条 contains 钉的确实是 execRoot **自己**新增的拒绝集项；且执行面在隔壁函数里，
-    // 用 writeState 的存在与否反证切片没跨过去。
+  @Test fun suPostSpawnFailureKeepsLeaseUnknownInsteadOfPretendingNoSideEffect() {
+    // C1 反证：try 覆盖了 start() 之后的读取，所以 su-exec-failed **不能**再进「派发前拒绝」集合。
+    // 它一旦在场，execRoot/repairOwned 会把已派发的租约当零副作用清掉，抹掉派发证据。
     val entry = body("RootAccess", "fun execRoot(")
-    assertTrue(entry.contains("\"su-exec-failed\""))
-    assertFalse(entry.contains("writeState("))
+    assertFalse("su-exec-failed 必须有副作用同等的结算待遇", entry.contains("\"su-exec-failed\""))
+    assertTrue("派发前拒绝集合仍要保留真正没起进程的原因", entry.contains("\"authorize-denied\""))
+    assertTrue("结算判据必须检查退出码非负", entry.contains("suAcknowledgement(result)"))
     val repair = body("RootAccess", "private fun repairOwned(")
-    assertTrue(repair.contains("\"su-exec-failed\""))
-    val finishInExec = entry.indexOf("RootMaintenanceLease.finish(app)")
+    assertFalse(repair.contains("\"su-exec-failed\""))
+    // 结算顺序仍然是「先尝试 finish，失败才 markUnknown」，且都在结果判据之后。
+    val finishInExec = entry.indexOf("RootMaintenanceLease.finish(app")
     val markInExec = entry.indexOf("RootMaintenanceLease.markUnknown")
     assertTrue(finishInExec >= 0 && (markInExec < 0 || finishInExec < markInExec))
   }
@@ -326,7 +328,8 @@ class OwnershipLeaseSettlementFixtureTest {
     // 真机实测（2026-10-02）：清算放进本锁、且只在确实有租约时付探测成本；置 running 在同一临界区内。
     val jobs = body("RootOwnershipJobs", "private fun start(")
     val lock = jobs.indexOf("synchronized(entryLock)")
-    val runningCheck = jobs.indexOf("if (running) return false")
+    // start() 现在回传本次 Launch（ID + 闩），未启动返回 null：判据形态变，语义不变。
+    val runningCheck = jobs.indexOf("if (running) return null")
     val firstOutstanding = jobs.indexOf("RootMaintenanceLease.outstanding(app) != null")
     val clear = jobs.indexOf("ShizukuTransport.clearLeaseWhenNoRootChannel(app)")
     val secondOutstanding = jobs.lastIndexOf("RootMaintenanceLease.outstanding(app) != null")
@@ -358,7 +361,12 @@ class OwnershipLeaseSettlementFixtureTest {
 
   @Test fun noRootPathClearIsTheOnlyNonOwnerExitAndKeepsUnknownSemanticsElsewhere() {
     val lease = source("RootMaintenanceLease")
-    assertTrue(lease.contains("unknown || owner !== Thread.currentThread()"))
+    // finish 的准入已收敛到纯判据 finishAllowed：owner + unknown 两条仍在，且新增了 ID 相等这一条。
+    assertTrue(lease.contains("ownerMatches = owner === Thread.currentThread()"))
+    assertTrue(lease.contains("leaseUnknown = unknown"))
+    assertFalse("owner 判据不得放松成只看 unknown",
+      lease.substringAfter("fun finish(").substringBefore("fun markUnknown")
+        .contains("unknown || owner !== Thread.currentThread()"))
     assertTrue(lease.substringAfter("fun finish(").substringBefore("fun markUnknown")
       .doesNotContain("clearWhenNoRootChannel"))
   }

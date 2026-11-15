@@ -190,14 +190,12 @@ const pinnedDigestProblem = (name, bytes) => {
 const TS_CANDIDATES = [
   'plugins/dsh-android-bridge/node_modules/typescript',
   'plugins/dsh-android-browser/node_modules/typescript',
-  'plugins/dsh-android-vdisplay/node_modules/typescript',
   'dsh-client-ui-responsive/node_modules/typescript',
   'dsh-shell-termux/node_modules/typescript',
   'node_modules/typescript',
 ]
 const ESBUILD_CANDIDATES = [
   'plugins/dsh-android-bridge/node_modules/esbuild',
-  'plugins/dsh-android-vdisplay/node_modules/esbuild',
   'dsh-client-ui-responsive/node_modules/esbuild',
   'node_modules/esbuild',
 ]
