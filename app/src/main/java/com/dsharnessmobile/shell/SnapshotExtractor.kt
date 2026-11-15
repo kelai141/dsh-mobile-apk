@@ -174,29 +174,71 @@ object SnapshotExtractor {
       /** 达到此可用堆才允许 4 线程（256 MiB 是 4 线程实测仍余 160 MiB 的下界）。 */
       const val MIN_HEAP_FOR_FOUR_BYTES = 256L * 1024L * 1024L
 
+      /**
+       * 并行判据之外**必须**留出的余量（issue #1714）。
+       *
+       * 为什么要有它：上面两个阈值在原实现里是拿 `Runtime.maxMemory()` 比的，而那是**堆上限**，
+       * 不是**现在能用多少**。设备日志里 OOM 的那一行同时写着两件事：
+       *     `Failed to allocate a 368 byte allocation with 296032 free bytes and 289KB until OOM`
+       *     `target footprint 201326592, growth limit 201326592`
+       * 也就是「上限 192 MiB、已用满」——`maxMemory()` 依然读到 192 MiB，于是判据照旧放行 2/4 线程，
+       * 而实际上一个 368 字节的分配都拿不到。判据读的数和真实处境完全脱钩。
+       *
+       * 修法：把判据从 `maxMemory()` 换成**可用余量** `maxMemory - usedMemory`，并在这里再扣一段
+       * 保底（xz 字典 + tar 缓冲 + 解压期间的临时分配）。余量不足就降档，**宁可慢也不 OOM**。
+       */
+      const val PARALLEL_HEAP_RESERVE_BYTES = 64L * 1024L * 1024L
+
       /** 单线程计划（测试与回退路径共用）。 */
       val SINGLE = ParallelPlan(1)
 
       /**
-       * 纯判据：核数 + 可用堆 + 块数 → 线程数。
+       * 纯判据：核数 + **可用堆余量** + 块数 → 线程数。
        *
        * @param cores 可用处理器数（生产传 Runtime.availableProcessors()）。
-       * @param maxHeapBytes 可用堆上限（生产传 Runtime.maxMemory()）。
+       * @param maxHeapBytes **当前可用堆余量**（生产传 `maxMemory - usedMemory`），
+       *   **不是**堆上限。这是 issue #1714 的修法：上限恒定而实际可用量会随已用堆下降，
+       *   拿上限判据在「堆已用满」时仍会放行并行，届时一次 368 字节的分配都拿不到。
+       *   （形参名沿用旧名以保持既有调用的命名参数兼容；语义以本注释为准。）
        * @param blockCount xz 的块数（线程数不得超过它——多于块数只会空转）。
        */
       fun threadsFor(cores: Int, maxHeapBytes: Long, blockCount: Int = Int.MAX_VALUE): Int {
         if (cores <= 1) return 1
-        if (maxHeapBytes < MIN_HEAP_FOR_TWO_BYTES) return 1
-        val heapCap = if (maxHeapBytes >= MIN_HEAP_FOR_FOUR_BYTES) MAX_THREADS else 2
+        // 先扣保底余量再比阈值：扣完不够就是不够，不让并行把最后一点堆吃干。
+        val usable = maxHeapBytes - PARALLEL_HEAP_RESERVE_BYTES
+        if (usable < MIN_HEAP_FOR_TWO_BYTES) return 1
+        val heapCap = if (usable >= MIN_HEAP_FOR_FOUR_BYTES) MAX_THREADS else 2
         val wanted = minOf(cores, heapCap, blockCount).coerceAtLeast(1)
         // threads >= 2 才启用并行：1 线程走原路径，不做无谓封装（与纪律 3 同源）。
         return if (wanted < 2) 1 else wanted
       }
 
-      /** 生产计划：按本进程的核数与堆上限推导。 */
+      /**
+       * 生产计划：按本进程的核数与**实时可用堆余量**推导。
+       *
+       * `maxMemory - (totalMemory - freeMemory)` 就是「此刻还能再分配多少」。
+       * 每次调用现算而不是缓存：解压前可能刚跑完快照校验/GC，余量是会变的数字。
+       */
       fun production(): ParallelPlan {
         val runtime = Runtime.getRuntime()
-        return ParallelPlan(threadsFor(runtime.availableProcessors(), runtime.maxMemory()))
+        return ParallelPlan(
+          threadsFor(runtime.availableProcessors(), liveFreeHeapBytes(runtime)),
+        )
+      }
+
+      /**
+       * 「此刻还能再分配多少字节」（issue #1714 的判据来源，单独抽出以便离线反证）。
+       *
+       * 为什么不直接用 `maxMemory()`：那是**堆上限**，恒定不变。设备 OOM 现场
+       * `growth limit 201326592` 与 `296032 free bytes` 并存——上限照旧 192 MiB，
+       * 而一个 368 字节的分配都拿不到。拿上限当余量，判据读的数与真实处境脱钩。
+       *
+       * 结果钳到 0 以上：`used > max` 在极端 GC 压力下可能出现负值，
+       * 负余量对调用方没有意义（一律等价于「没有余量」）。
+       */
+      fun liveFreeHeapBytes(runtime: Runtime): Long {
+        val used = runtime.totalMemory() - runtime.freeMemory()
+        return (runtime.maxMemory() - used).coerceAtLeast(0L)
       }
     }
   }
