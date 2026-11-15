@@ -413,6 +413,42 @@ test('受控负控：把构建类型改回 debug 后，最终产物形态门禁�
   assert.deepEqual(debug.calls.at(-1), ['/tools/check-apk-form.mjs', '--apk', resolve(debug.delivered), '--require'])
 })
 
+test('verifyForm=false 只跳过发布链的形态门禁：签名照跑，且默认仍是严格档', () => {
+  // 为什么需要这条缝：调试包（buildType=debug）的「含 application-debuggable」是**期望值**，
+  // 发布链的形态判据对那个变体恒红。把所有 debug 构建的形态判据一律删掉是错的 ——
+  // 0.14.9 的事故形态（构建类型被静默改回 debug）只有那条判据能抓。故做成显式开关：
+  // 只有 debug 链显式声明 verifyForm=false，release 路径一行不变。
+  //
+  // 本用例断言三件事，缺任一条这个开关就会退化成「顺手关掉门禁」：
+  //   ① skipForm 时签名门禁**仍然**以 --keystore/--keystore-alias/--keystore-pass 被调用；
+  //   ② skipForm 时形态门禁一次都不被调用（含它的 --self-test）；
+  //   ③ 默认（不给该参数）时形态门禁**仍然**以 --require 被调用 —— 也就是「忘记传」= 保持严格。
+  const calls = []
+  const verify = (extra) => verifyApks({
+    files: ['/out/x.apk'],
+    signatureGate: '/tools/check-apk-signatures.mjs',
+    formGate: '/tools/check-apk-form.mjs',
+    keystore: '/release/debug.keystore',
+    log() {},
+    ...extra,
+  }, (command, args) => { calls.push(args); return { status: 0 } })
+
+  calls.length = 0
+  verify({ skipForm: true })
+  const signatureCall = calls.find((a) => a[0] === '/tools/check-apk-signatures.mjs' && a.includes('--apk'))
+  assert.ok(signatureCall, 'skipForm 时签名门禁必须照跑')
+  // 只断言凭据确实被显式传了，不逐字比整条 argv：路径要过 resolve()，在 Windows 上会带盘符，
+  // 逐字比对实际验证的是平台路径拼接，不是我们要守的判据。
+  assert.equal(signatureCall[signatureCall.indexOf('--keystore-alias') + 1], 'androiddebugkey')
+  assert.equal(signatureCall[signatureCall.indexOf('--keystore-pass') + 1], 'android')
+  assert.equal(calls.some((a) => a[0] === '/tools/check-apk-form.mjs'), false,
+    'skipForm 时不得再调形态门禁（含 --self-test）')
+
+  calls.length = 0
+  verify({})
+  assert.ok(calls.some((a) => a[0] === '/tools/check-apk-form.mjs' && a.includes('--require')),
+    '默认必须仍跑形态门禁（忘记传参数 = 保持严格）')
+})
 test('a debuggable form rejection aborts the terminal stage just like a bad signature', () => {
   // 签名全绿 + 形态判红：这正是 0.14.9 发布产物的真实形态（debug 变体但签名完全正确），
   // 故形态门禁判红必须与签名判红一样中止交付，而不是被前一步的绿掩盖。
