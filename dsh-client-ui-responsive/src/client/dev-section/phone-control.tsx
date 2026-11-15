@@ -1290,6 +1290,26 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
     </div>
   )
 
+  /**
+   * 分层容器请本页退出下级层：监听它派发在那个登记节点上的可取消事件。
+   *
+   * 为什么不是「让容器点本页眉那个返回按钮」：手机形态下本页眉的箭头被样式表隐藏
+   * （一屏只能有一个返回出口），而全局激活护栏会拦掉落在隐藏控件上的程序化点击，
+   * 于是容器「点它」在真机上等于什么都没发生（设备实测：系统返回后仍停在第三层）。
+   * 契约因此改成事件：容器只管说「退一层」，怎么退由本页自己决定。
+   */
+  useEffect(() => {
+    if (view === 'home') return
+    const node = document.querySelector('[data-dsh-settings-sublayer]')
+    if (node === null) return
+    const onPop = (event: Event): void => {
+      event.preventDefault()
+      setView('home')
+    }
+    node.addEventListener('dsh-settings-sublayer-pop', onPop)
+    return () => { node.removeEventListener('dsh-settings-sublayer-pop', onPop) }
+  }, [view])
+
   /** 当前下级页的标题（上游注册名之外的本页自造名，中英各一份）。 */
   const viewTitle = view === 'a11y' ? tr('无障碍通道', 'Accessibility channel')
     : view === 'shizuku' ? tr('Shizuku 授权', 'Shizuku access')

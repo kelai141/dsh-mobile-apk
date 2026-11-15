@@ -46,6 +46,8 @@ const LEVEL_DETAIL = 'detail'
  */
 /** 三级页深度：0 = 停在二级页，1 = 分区内部还有一层（系统返回先弹这一层）。 */
 const SUBDEPTH_ATTR = 'data-dsh-settings-depth'
+/** 分层容器请分区退出下级层的事件名（分区监听并 preventDefault，见 popSublayer）。 */
+const SUBLAYER_POP_EVENT = 'dsh-settings-sublayer-pop'
 /** 分区登记下级层的三个钩子（由分区自己渲染，见 dev-section/phone-control.tsx 的 subhead）。 */
 const SUBLAYER_ATTR = 'data-dsh-settings-sublayer'
 const SUBLAYER_TITLE_ATTR = 'data-dsh-settings-sublayer-title'
@@ -517,12 +519,24 @@ export class MobileSettingsNav {
   }
 
   /**
-   * 弹回分区自己的下级层：点分区登记的返回控件。
+   * 弹回分区自己的下级层：在分区登记的那层上派发一个可取消事件，由分区自己退。
    *
-   * 控件找不到（分区换实现 / 该层被卸载）时退回二级页——总比把返回吞掉好：吞掉会让
-   * 「返回键没反应」，而退回二级页至少是一步可解释的动作。
+   * 为什么不是「点分区那个返回控件」：手机形态下那个控件正是被样式表藏掉的那个
+   * （一屏两个返回箭头，必须去掉一个），而全局激活护栏（activation-guard）会拦掉
+   * 落在隐藏控件上的程序化点击——于是「点它」在真机上什么都不会发生（设备实测：
+   * 系统返回后仍停在第三层，dsh-back 日志显示已派发到页面栈）。壳侧不能靠伪造点击去
+   * 操作一个自己藏起来的控件，所以契约改成事件：分区监听、自己退、默认行为被取消即完成。
+   *
+   * 控件点击保留为兜底：分区只登记了控件而没监听事件时仍能退一层。两者都够不到时退回
+   * 二级页——总比把返回吞掉好：吞掉会让「返回键没反应」。
    */
   private popSublayer(panel: HTMLElement): void {
+    const layer = panel.querySelector<HTMLElement>('[' + SUBLAYER_ATTR + ']')
+    if (layer !== null) {
+      const request = new CustomEvent(SUBLAYER_POP_EVENT, { bubbles: true, cancelable: true })
+      layer.dispatchEvent(request)
+      if (request.defaultPrevented) return
+    }
     const back = panel.querySelector<HTMLElement>('[' + SUBLAYER_BACK_ATTR + ']')
     if (back !== null) {
       back.click()

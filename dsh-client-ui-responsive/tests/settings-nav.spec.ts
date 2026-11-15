@@ -703,6 +703,12 @@ describe('三级页：分区自报的下级层（系统返回只退一层）', (
     node.setAttribute('data-plugin', 'dev-phone-control')
     node.setAttribute('data-dsh-settings-sublayer', '')
     node.setAttribute('data-dsh-settings-sublayer-title', title)
+    // 契约：分区监听容器派发的可取消事件并自己退（容器不伪造点击）。
+    node.addEventListener('dsh-settings-sublayer-pop', (event) => {
+      event.preventDefault()
+      calls += 1
+      node.remove()
+    })
     const back = document.createElement('button')
     back.type = 'button'
     back.setAttribute('data-dsh-settings-sublayer-back', '')
@@ -776,5 +782,44 @@ describe('三级页：分区自报的下级层（系统返回只退一层）', (
     await settle()
     expect(handle.panel.getAttribute('data-dsh-settings-depth')).toBe('0')
     expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('手机控制')
+  })
+
+  /**
+   * 真机实测回归（本缺陷首次修法的失败点）：手机形态下一屏只能有一个返回出口，
+   * 分区页眉那个返回控件被样式表藏掉；而全局激活护栏会拦掉落在隐藏控件上的程序化点击。
+   * 于是容器若靠「点它」来弹这一层，真机上什么都不发生（系统返回后仍停在第三层）。
+   *
+   * 判据：控件不可点也必须能退一层 —— 契约必须是事件，而不是点那个被藏起来的按钮。
+   */
+  it('分区返回控件被隐藏时，返回键仍必须弹回二级页（不能依赖点隐藏控件）', async () => {
+    const handle = buildPanel(['通用设置', '手机控制'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    handle.rows.get('手机控制')!.click()
+    await settle()
+    let pops = 0
+    const node = document.createElement('div')
+    node.setAttribute('data-dsh-settings-sublayer', '')
+    node.setAttribute('data-dsh-settings-sublayer-title', '高级设置与诊断')
+    node.addEventListener('dsh-settings-sublayer-pop', (event) => {
+      event.preventDefault()
+      pops += 1
+      node.remove()
+    })
+    // 与手机形态一致：返回控件存在但对命中面不可见（样式表 display:none），点击无效。
+    const back = document.createElement('button')
+    back.type = 'button'
+    back.setAttribute('data-dsh-settings-sublayer-back', '')
+    back.style.display = 'none'
+    back.addEventListener('click', () => { throw new Error('不得依赖点击隐藏控件') })
+    node.appendChild(back)
+    handle.content.appendChild(node)
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-depth')).toBe('1')
+    handle.mask.click()
+    await settle()
+    expect(pops, '必须经由事件退一层，而不是点隐藏控件').toBe(1)
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
+    expect(handle.panel.getAttribute('data-dsh-settings-depth')).toBe('0')
   })
 })
