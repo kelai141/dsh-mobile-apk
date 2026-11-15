@@ -35,8 +35,31 @@ internal class OverlayV2(private val svc: OverlayService) {
   internal companion object {
     /** 悬浮显示偏好（既有 overlay_display prefs；新键在此文件集中定义，便于 PERSISTENT-DATA 登记）。 */
     internal const val PREFS = "overlay_display"
-    /** 新 UI 总开关（默认 false；P7 验收通过后单独 PR 改为 true）。 */
+    /**
+     * 新 UI 总开关。**默认开启**。
+     *
+     * 历史：Phase 2 落地时取默认 false，把「旧三窗实现」留作回滚路径，计划等 P7 验收通过后
+     * 单独一个 PR 改成 true。实际问题有两层：
+     *
+     *  1. 改名容易，**能不能验到**才是难点。v2 的开启通道原本只有
+     *     OverlayLiveFeed 那条 `.overlay-test-pending` 文件通道，而它要求
+     *     `FLAG_DEBUGGABLE`；release 包进不去那个分支（design.md §344 明文）。
+     *     于是「默认 false + 只有 debug 能开」= **release 包永远用不到 v2**，
+     *     用户在正式包里看到的始终是旧三窗，功能等于没交付。
+     *  2. 开关本身是偏好项而不是构建项，默认值属于产品决策，不该靠改代码猜。
+     *
+     * 现在默认 true：release 装完即 v2。用户仍可在设置里用 entry_style 换入口形态；
+     * 需要退回旧实现时把本键写成 false 即可（见 [KEY_ENTRY_UI_V2] 的 prefs 监听，
+     * OverlayService 会在主线程切换，不需要重启服务）。
+     */
     internal const val KEY_ENTRY_UI_V2 = "entry_ui_v2"
+    /**
+     * [KEY_ENTRY_UI_V2] 的缺省值。**改这一处即可全局生效**。
+     *
+     * 单独抽成常量而不是在 [enabled] 里写死字面量，是为了让「默认开/关」有一个
+     * 可被单测直接断言、也可被 PERSISTENT-DATA 文档引用的单一事实位。
+     */
+    internal const val ENTRY_UI_V2_DEFAULT = true
     /** 入口形态：ball | strip（默认 ball）。 */
     internal const val KEY_ENTRY_STYLE = "entry_style"
     /** 取件租约恢复失败时的有限重试：不设上限就变成永久轮询。 */
@@ -55,9 +78,11 @@ internal class OverlayV2(private val svc: OverlayService) {
     internal fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     internal fun enabled(context: Context): Boolean = try {
-      prefs(context).getBoolean(KEY_ENTRY_UI_V2, false)
+      prefs(context).getBoolean(KEY_ENTRY_UI_V2, ENTRY_UI_V2_DEFAULT)
     } catch (_: Throwable) {
-      false
+      // 读偏好失败时回落到与默认值一致的行为：release 上「读不到」不能变成「静默退回旧实现」，
+      // 否则会以「功能偶尔不见了」的形式表现成随机缺陷。
+      ENTRY_UI_V2_DEFAULT
     }
 
     internal fun entryStyle(context: Context): String = try {
