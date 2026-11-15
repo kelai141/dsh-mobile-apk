@@ -23,6 +23,20 @@
  * 施加到 WebView 自身的布局尺寸上（`MainActivity` 的 `webView.setPadding(0, 0, 0, ime)`），
  * 布局视口因此真的变短，seat 的自然底边早已落在键盘顶。键盘弹起期间这条预留由
  * keyboard-boundary.ts 归零，避免同一个高度被两侧各算一次。
+ *
+ * #1782（用户真机 V2425A 1260x2800）：**键盘展开 + 输入框里有附件**时，输入框被抬到
+ * 特别高。真因不在 IME 通道（那条按设计不进这里，实测 ime=0px 时同样复现），而在
+ * seat 与它的滚动容器之间的高度关系：
+ *   - 上游 `scrollBody` 是 `flex:1; min-height:0; overflow-y:auto` 的滚动盒；
+ *   - seat 是 `flex:none` + `position:sticky; bottom:0`，**没有任何高度上限**；
+ *   - 键盘展开后 scrollBody 只剩 ~180-300px，而带附件缩略图的 seat 实测 218px。
+ *   一旦 seat 高于 scrollBody，sticky 的「贴底」锚点就把 seat 的**顶边**顶到容器
+ *   顶边之上（实测 bodyTop=119 / seatTop=82 甚至 42），看起来就是输入框被抬到半空。
+ *
+ * 修法：给 seat 一个不超过滚动容器的**高度上限**，并允许其内部滚动。超过上限的部分
+ * 在 seat 内部滚，而不是把整块内容往上顶。
+ * 判据（见 tests/composer-insets-seat-cap.spec.ts）：seat 的 max-height 必须是 100%，
+ * 且 overflow-y 不是 visible —— 两条缺一：只有上限时内容会被裁掉，只有滚动时上限不生效。
  */
 export const COMPOSER_INSETS_CSS: string = `
 [data-composer-seat] [class*='composerStack'] {
@@ -30,5 +44,11 @@ export const COMPOSER_INSETS_CSS: string = `
     env(safe-area-inset-bottom, 0px),
     var(--dsh-android-navbar-bottom, var(--dsh-android-system-bottom, 0px))
   );
+}
+
+/* #1782：seat 不得高过它的滚动容器，否则 sticky 贴底会把 seat 顶边顶出容器。 */
+[data-composer-seat] {
+  max-height: 100%;
+  overflow-y: auto;
 }
 `;

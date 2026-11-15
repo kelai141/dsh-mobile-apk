@@ -78,11 +78,22 @@ body { margin:0; font:16px/24px sans-serif; }
     check('touch target '+width+'/'+composerHeight+'/'+distance, b.width>=44 && b.height>=44 && b.left>=0 && b.right<=width, {width:b.width,height:b.height,left:b.left,right:b.right});
    }
    check('negative control '+width+'/'+composerHeight, negativeHits>0, {negativeHits});
-   const before={width:flow.offsetWidth,height:flow.offsetHeight,scrollHeight:scroller.scrollHeight};
-   const parent=slot.parentElement; slot.remove();
-   const after={width:flow.offsetWidth,height:flow.offsetHeight,scrollHeight:scroller.scrollHeight};
-   check('tail has no rewrap or bottom gap '+width+'/'+composerHeight, JSON.stringify(before)===JSON.stringify(after), {before,after});
+   // #1782 契约变更：净空只在按钮确实在屏上时占用正文列。
+   // 旧断言「取下按钮后正文尺寸不变」测的是 #1145 的常驻通道，那正是用户报障的永久窄列，
+   // 所以这里反过来：没有按钮可挡时必须吃满整列；有按钮时必须不压正文。
+   const parent=slot.parentElement;
+   // box-sizing:border-box 下 padding 变化不改 offsetWidth，判据必须看**内容区宽度**
+   // （offsetWidth - 左右 padding）：那才是正文真正能用的宽度。
+   const contentWidth=()=>flow.offsetWidth-parseFloat(getComputedStyle(flow).paddingLeft)-parseFloat(getComputedStyle(flow).paddingRight);
+   const withButton={pad:getComputedStyle(flow).paddingRight,content:contentWidth()};
+   slot.remove();
+   const withoutButton={pad:getComputedStyle(flow).paddingRight,content:contentWidth()};
    parent.append(slot);
+   check('no lane without button '+width+'/'+composerHeight,
+     parseFloat(withoutButton.pad)===0 && withoutButton.content>withButton.content,
+     {withButton,withoutButton});
+   check('lane reserved while button visible '+width+'/'+composerHeight,
+     parseFloat(withButton.pad)>=44, {pad:withButton.pad});
    check('no horizontal overflow '+width+'/'+composerHeight, scroller.scrollWidth===scroller.clientWidth);
   }
  }
