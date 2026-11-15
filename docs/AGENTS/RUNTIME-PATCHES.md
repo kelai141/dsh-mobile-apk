@@ -307,7 +307,9 @@ unlink ENOENT 容忍），与 attachment 资产逐字节同源——此前这三
   `No usable native binding found for node-addon-require-builtin-android-x64`（引擎 boot 期硬崩，
   不是「静默禁用插件」）。fixture 与回归见 §7.1 行。
 - **重锚 2 条**：`boot-third-party-isolation-G3`（`mountRootInclude(..., binName)` 第 5 参漂移，`binName` 一路透传）、
-  `perf-compile-cache-flush-N2`（根包不再 `import { readFileSync } from "node:fs"`，锚改末条顶层 import）。
+  `perf-compile-cache-flush-N2`（根包不再 `import { readFileSync } from "node:fs"`，锚改末条顶层 import；
+  0.2.2-rc.3 起根包入口再拆一层——`lib/bin.js` 只剩 shebang + `node:fs`/`node:url` 两条内置 import，
+  真 CLI 在 `./bin-CwxESKe-.js` 里按需动态 import，故末条顶层 import 现为 `import { pathToFileURL } from "node:url";`）。
   唯一可信锚点判据 = `node scripts/probe-engine-anchors.mjs`（按 overlay 的 (包名, 版本) 回读构建期同一批
   未打补丁 tgz）；**不要用 stage 目录**（本轮实测它停在 0.1.2-rc.1），**也不要用测试夹具**（0.1.5 时代写死在
   目录名里，真树断 9 条而 16 个补丁测试全绿）。
@@ -459,6 +461,34 @@ node scripts/patches/apply-patches.mjs <stage> --check --scope engine   # 24/24 
 复算/重出的唯一合法方式（禁止手改资产）：把夹具 `<fixture>/lib/index.js` 放到 stage 里该文件的目标路径，按 registry 顺序施加该文件全部 engine 补丁，逐字节比对 `assets/patched/` 同名文件；随后仍需 `node scripts/check-runtime-assets.mjs x86_64 --require` 与最终快照对账（§7.3 三件套，不因本轮换代放宽）。
 
 **配置联动（跨仓）**：A1/L1 的锚点依赖 profile 侧新 schema——协调仓 `scripts/profile-web.cordis.patch.yml` 的 `- id: ptc-runtime` 已由 `nodeExecutable:` 改为 `launch: { kind: node-script, executable: <快照内包装脚本> }`。补丁与 profile 必须同批落地；只改一侧会让 PTC 行配置失效或锚点失配。
+
+### 7.8 追上游 0.2.2-rc.3（2026-11-15 实测，服务端/根包 4 条）
+
+**目标**：官方 `dsh-v0.2.2-rc.3` / commit `38a6a5c965aa99ab525161efb7cc5cf1fe62fced`。本节只记这 4 条的重锚结论，
+判据一律是 `node scripts/probe-engine-anchors.mjs --only <id,...>`（回读构建期同一批未打补丁 tgz）。
+
+**重锚 3 条**
+
+| 补丁 | 上游变化（rc.3 实字节） | 重锚后 |
+|---|---|---|
+| `perf-compile-cache-flush-N2` | 根包入口再拆一层：`lib/bin.js` 只剩 shebang + `import { realpathSync } from "node:fs";` / `import { pathToFileURL } from "node:url";`，真 CLI 移到 `./bin-CwxESKe-.js` 按需动态 import。旧锚 `import { inspect } from "node:util";` 逐字符消失（不是被压缩，是入口形态变了） | 锚改 `import { pathToFileURL } from "node:url";`（末条顶层 import），注入点仍在 import 段之后、首个 `//#region` 之前 → 定时器与 exit 兜底先于 `if (import.meta.main)` 的 runCli 分派注册 |
+| `ptc-argv-L1` | 三处位移，语义未变：① `packaged`/`heapFlag` 两条声明从 executable 之前挪到之后；② `bootstrapArgs` 少了第 4 实参 `this.retainsState`（持久 PTC 拆到 `persistent-process.js`）；③ packaged 分支的 `env.NODE_OPTIONS` 由裸 `heapFlag` 变成 ``${heapFlag} --experimental-vm-modules`` | 三个锚按 rc.3 实字节重排；**新增约束**：无条件 `env.NODE_OPTIONS = heapFlag` 之外，packaged 分支必须原样保留上游的 `--experimental-vm-modules`（`process.js:1399` 在缺该 flag 时显式 throw，丢掉会让 embedded PTC 崩） |
+| `sealed-reasoning-1304` | 6 个目标文件锚点全部仍在（llm-pi-ai / pi-ai models / responses-shared / anthropic-messages / openai-completions / transform-messages）；唯一漂移是第 7 个目标 `dsh-client-ui-chat/lib/client.js` —— rc.2 起该 bundle 是**紧凑单行**（rc.1 是 5,784 行格式化文本），标识符未改名，只有换行与缩进被抹掉 | `patchReasoningUi` 改为**双形态**：同一语义给 pretty / compact 两条锚，按在场形态择一施加；两代都命中或都不命中都判红（不静默跳过）。契约 token 同步支持「任一形态在场」 |
+
+**未退役**：4 条均属真结构漂移，没有一条的上游行为「已原生实现」。逐条排除记录见下。
+
+- N2：rc.3 根包全树 `lib/**` 对 `flushCompileCache` / `NODE_COMPILE_CACHE` / `enableCompileCache` **零命中**，
+  上游仍只在进程正常退出时写编译缓存。
+- L1：rc.3 的 `...packaged ? [] : [heapFlag],` 仍在（`lib/index.js:1142`），heapFlag 仍会落 argv[1]；
+  可执行文件守卫仍无（resolveExecutable 的返回值未被校验）。
+- A1：依赖 L1（`requires`），且自身锚点在 rc.3 仍在；`heap flag is still packaged-only` 这条判据需要适配
+  rc.3 的模板字面量形态，已按「捕获上游取值后原样带回」修好，判据口径不放宽。
+- sealed-reasoning-1304：6 个服务端文件的锚点逐条实测全部 1 命中；只有 UI bundle 换了压缩形态。
+
+**方法备注（探针自身修的一处）**：`--only` 此前不传递 `requires` 闭包，导致 `sealed-reasoning-1304`
+单跑时前提补丁 `pi-upstream-streaming-020` 的 6 个 additionalTargets 不在探针根里，被报成
+「前提补丁未打 / check 抛错」——那是探针制造的假失败。现按 `requires` 传递闭包物化并按 registry 顺序施加；
+闭包只扩大施加上下文，不改任何判据。
 
 ## 8. 0.13.7fx-1：web-frontend-index.html 退役（2026-09-11）
 

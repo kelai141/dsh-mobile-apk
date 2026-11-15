@@ -11,7 +11,9 @@ import { FIXTURE_ENGINE, FIXTURES_DIR, versionedFixture } from './lib/fixture.mj
 import { SIDEBAR_REORDER_MARKER, hasSidebarReorder, patchSidebarReorder } from '../data/sidebar-bubble-reorder.mjs'
 const source = readFileSync(versionedFixture('dsh-client-ui-sidebar-right', 'lib', 'client.js'), 'utf8')
 const patched = patchSidebarReorder(source)
-const method = patched.match(/\n[\t ]*reorderIn\(sessionId, tabId, beforeId\) \{[\s\S]+?\n\t\t\t\}/)?.[0]
+// 注入点的缩进随命中形态走：紧凑单行形态的 focus 没有行首缩进，注入的方法也就落在列 0。
+// 因此取方法体时不能写死 \t\t\t，必须按 marker 行的实际缩进回取（0.2.2-rc.3 起 client bundle 被压成单行）。
+const method = patched.match(/\n([\t ]*)\/\/ dsh-mobile sidebar bubble reorder \(B1\)\n\1reorderIn\(sessionId, tabId, beforeId\) \{[\s\S]+?\n\1\}/)?.[0]
 assert.ok(method, 'the patched artifact contains the owner operation')
 const Controller = new Function('return class Controller {' + method + '\n}')()
 function fixture(Owner = Controller) {
@@ -43,7 +45,8 @@ test('B1 patches one current artifact, parses, remains idempotent and rejects da
   assert.ok(hasSidebarReorder(patched))
   assert.equal(patchSidebarReorder(patched), patched)
   new Script(patched)
-  assert.throws(() => patchSidebarReorder(source.replaceAll('actions.focusTab(sessionId, tabId);', 'actions.changedFocus(sessionId, tabId);')), /expected one/)
+  // 紧凑形态里 focus 方法体不带空格：改坏那一处调用，锚点必须彻底失配（0 处）。
+  assert.throws(() => patchSidebarReorder(source.replaceAll('actions.focusTab(sessionId,tabId)}', 'actions.changedFocus(sessionId,tabId)}')), /expected one/)
   assert.throws(() => patchSidebarReorder(patched.replace('store.actions.placeTab(sessionId, tabId, pane.id, index);', 'store.actions.placeTab(sessionId, tabId, pane.id, 0);')), /incompatible existing/)
   assert.equal(patched.split(SIDEBAR_REORDER_MARKER).length - 1, 1)
 })
@@ -119,7 +122,7 @@ test('B1 runs through the registered engine runner and rejects unknown bytes wit
     assert.equal(run('--check').status, 0)
     assert.equal(run('--apply').status, 0)
     assert.equal(readFileSync(target, 'utf8'), patched)
-    const damaged = source.replaceAll('actions.focusTab(sessionId, tabId);', 'actions.unknown(sessionId, tabId);')
+    const damaged = source.replaceAll('actions.focusTab(sessionId,tabId)}', 'actions.unknown(sessionId,tabId)}')
     writeFileSync(target, damaged); result = run('--apply')
     assert.notEqual(result.status, 0, 'unknown input must fail the actual runner')
     assert.equal(readFileSync(target, 'utf8'), damaged, 'failed patch cannot write a partial method')

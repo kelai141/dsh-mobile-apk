@@ -45,7 +45,10 @@ test('真实固定版本三包预检、幂等与语法检查；任一版本漂�
     const checked = spawnSync(process.execPath, ['--check', '--input-type=module'], { input: after, encoding: 'utf8' })
     assert.equal(checked.status, 0, checked.stderr)
   }
-  assert.throws(() => planRequestPreview(file => file.endsWith('package.json') ? files[file].replace(ENGINE_BASELINE, '9.9.9') : files[file]), /requires (?:pinned|0\.2\.2-rc\.1)/)
+  // 版本漂移的判据必须跟着合同走：断言「错误必须点名合同基线」，不在测试里写死某一代版本号
+  // （旧实现写死 0.2.2-rc.1，抬 baseline 后就变成「测试红而补丁是对的」）。
+  assert.throws(() => planRequestPreview(file => file.endsWith('package.json') ? files[file].replace(ENGINE_BASELINE, '9.9.9') : files[file]),
+    new RegExp('requires ' + ENGINE_BASELINE.replaceAll('.', '\\.')))
   assert.throws(() => patchRequestPreview(files[PREVIEW_LOCAL].replace('const REQUEST_IMAGE_TRANSFORM_VERSION', 'const CHANGED'), 'local'), /anchor changed/)
 })
 

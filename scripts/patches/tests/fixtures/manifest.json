@@ -2150,7 +2150,7 @@
       "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-attachment-local-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-attachment-local@0.2.2-rc.1",
       "provenance": {
@@ -2174,10 +2174,11 @@
         "image-expiry-E1",
         "image-request-preview-P1",
         "attach-durable-F2"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-llm-pi-ai-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-llm-pi-ai@0.2.2-rc.1",
       "provenance": {
@@ -2203,10 +2204,11 @@
         "sealed-reasoning-1304",
         "mimo-thinking-toggle-056",
         "custom-endpoint-discovery-960"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-llm-deepseek-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-llm-deepseek@0.2.2-rc.1",
       "provenance": {
@@ -2229,10 +2231,11 @@
       "patchIds": [
         "image-expiry-E1",
         "image-request-preview-P1"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-attachment-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-attachment@0.2.2-rc.1",
       "provenance": {
@@ -2254,10 +2257,11 @@
       },
       "patchIds": [
         "image-request-preview-P1"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-llm-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-llm@0.2.2-rc.1",
       "provenance": {
@@ -2279,10 +2283,11 @@
       },
       "patchIds": [
         "image-history-batch-offload-I1"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-host-webserver-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-host-webserver@0.2.2-rc.1",
       "provenance": {
@@ -2304,10 +2309,11 @@
       },
       "patchIds": [
         "managed-port-bind-EP1"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-app-boot-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-app-boot@0.2.2-rc.1",
       "provenance": {
@@ -2330,10 +2336,11 @@
       "patchIds": [
         "profile-link-skip-PL1",
         "boot-third-party-isolation-G3"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-client-ui-sidebar-right-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-client-ui-sidebar-right@0.2.2-rc.1",
       "provenance": {
@@ -2355,10 +2362,11 @@
       },
       "patchIds": [
         "sidebar-bubble-reorder-B1"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "node-addon-require-builtin-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "node-addon-require-builtin@0.1.9",
       "provenance": {
@@ -2380,10 +2388,11 @@
       },
       "patchIds": [
         "narb-android-N1"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "node-addon-system-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/node-addon-system@0.1.2",
       "provenance": {
@@ -2405,10 +2414,11 @@
       },
       "patchIds": [
         "flock-android-F3"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-session-persistence-jsonl-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-session-persistence-jsonl@0.2.2-rc.1",
       "provenance": {
@@ -2431,10 +2441,11 @@
       "patchIds": [
         "spj-migration-link-F5",
         "publish-exclusive-F7"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-fs-local-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-fs-local@0.2.2-rc.1",
       "provenance": {
@@ -2457,10 +2468,11 @@
       "patchIds": [
         "fs-local-link-F8",
         "fs-local-digest-guard-B"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-client-modules-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-client-modules@0.2.2-rc.1",
       "provenance": {
@@ -2483,10 +2495,11 @@
       "patchIds": [
         "combo-probe-P1",
         "client-registry-scan-C4"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-host-frontend-static-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-host-frontend-static@0.2.2-rc.1",
       "provenance": {
@@ -2508,10 +2521,11 @@
       },
       "patchIds": [
         "client-index-loader-barrier-G2"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-typert-loader-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-typert-loader@0.2.2-rc.1",
       "provenance": {
@@ -2533,10 +2547,11 @@
       },
       "patchIds": [
         "typert-registry-scan-C4"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-root-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh@0.2.2-rc.1",
       "provenance": {
@@ -2558,10 +2573,11 @@
       },
       "patchIds": [
         "perf-compile-cache-flush-N2"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-client-ui-conversation-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-client-ui-conversation@0.2.2-rc.1",
       "provenance": {
@@ -2583,10 +2599,11 @@
       },
       "patchIds": [
         "external-draft-conversation-seam-J1"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-client-resources-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-client-resources@0.2.2-rc.1",
       "provenance": {
@@ -2608,10 +2625,11 @@
       },
       "patchIds": [
         "arkweb-resource-protocol-H1"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-client-ui-reference-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-client-ui-reference@0.2.2-rc.1",
       "provenance": {
@@ -2633,10 +2651,11 @@
       },
       "patchIds": [
         "reference-drill-F6"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "dsh-subprocess-local-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
       "package": "@deepseek-ai/dsh-subprocess-local@0.2.2-rc.1",
       "provenance": {
@@ -2662,11 +2681,869 @@
       "patchIds": [
         "terminal-inspector-android-D1",
         "zsh-fpath-A1"
-      ]
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     },
     "pi-ai-0.2.2-rc.1": {
-      "source": "engine-tgz",
+      "source": "superseded",
       "engine": "0.2.2-rc.1",
+      "package": "@earendil-works/pi-ai@1.3.0",
+      "provenance": {
+        "tarballFile": "earendil-works-pi-ai-1.3.0.tgz",
+        "tarballSha256": "5343e1639bf343bdc3344df3ad6c31c05a50b68bad07ac6bce10890d4b6b8a61",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "dist/api/anthropic-messages.js",
+        "dist/api/bedrock-converse-stream.js",
+        "dist/api/mistral-conversations.js",
+        "dist/api/openai-completions.js",
+        "dist/api/openai-responses-shared.js",
+        "dist/api/pi-messages.js",
+        "dist/api/transform-messages.js",
+        "dist/models.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "dist/api/openai-completions.js": "4b3875e5ec18c5e2d06ce12409feb2554563fd2c392a5c1773af968b265e2bea",
+        "package.json": "4e9ed07b06a91d844485874c251f312b610d015a4a4fd32c78cde58a7862a3f1",
+        "dist/api/anthropic-messages.js": "2a61739aa1e42d42c0351f10fef371b3efd544bc746a97cf6d6f68e4dfc0ef96",
+        "dist/api/bedrock-converse-stream.js": "6ff824a3cda4d34fb18c31a190b5a966b8660d7be3da0bd9e1b419ec6bc4c455",
+        "dist/api/mistral-conversations.js": "14e0acba42f00bcb317ce5d4e1cff40f9e267b047d08b608d3a2e2eb92f9a4f4",
+        "dist/api/openai-responses-shared.js": "aff96f7cf1bbb4ffb1a9c2366620dfbedaa5e8b667a0c5f89d726428e3006d77",
+        "dist/api/pi-messages.js": "33cd3a7adc48775c88474d3c68b51f33791dc6e5b315ab9f3a8fc67eee4d8696",
+        "dist/models.js": "5624951d7fa7c436427b28ef6975051b91690e5e6341d84ab89ad3f1e1adc3d8",
+        "dist/api/transform-messages.js": "5654d81fdacdf3f3e9ca9eb89c4dfa71b742b852163ecd49ba38307f876db63e"
+      },
+      "targets": {
+        "dist/api/openai-completions.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/package.json",
+        "dist/api/anthropic-messages.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js",
+        "dist/api/bedrock-converse-stream.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/bedrock-converse-stream.js",
+        "dist/api/mistral-conversations.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/mistral-conversations.js",
+        "dist/api/openai-responses-shared.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-responses-shared.js",
+        "dist/api/pi-messages.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/pi-messages.js",
+        "dist/models.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/models.js",
+        "dist/api/transform-messages.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/transform-messages.js"
+      },
+      "patchIds": [
+        "pi-upstream-streaming-020",
+        "sealed-reasoning-1304",
+        "mimo-thinking-toggle-056",
+        "pi-toolcall-G2"
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
+    },
+    "dsh-client-ui-chat-0.2.2-rc.1": {
+      "source": "superseded",
+      "engine": "0.2.2-rc.1",
+      "package": "@deepseek-ai/dsh-client-ui-chat@0.2.2-rc.1",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-ui-chat-0.2.2-rc.1.tgz",
+        "tarballSha256": "88456d772de0b4a028dca8c0b9e72013e3934455f210eb0929f7e7f09b8c2a8c",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "b7e645f2461231e8ece31381f026db2df72d058e425eaef19265f215c823d84e",
+        "package.json": "04a6be4e6aaa0dcb616e9c4fcf3e56e310b5b6e48b650663cb0e03821f8b3425"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-chat/package.json"
+      },
+      "patchIds": [
+        "sealed-reasoning-1304"
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
+    },
+    "dsh-ptc-runtime-node-0.2.2-rc.1": {
+      "source": "superseded",
+      "engine": "0.2.2-rc.1",
+      "package": "@deepseek-ai/dsh-ptc-runtime-node@0.2.2-rc.1",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-ptc-runtime-node-0.2.2-rc.1.tgz",
+        "tarballSha256": "8a6b3b16e9c615fae8a6327ff96e15e0fd66b574adb9ceb416827a7f5ad2909c",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "lib/process.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "952ffdd55654ccaedce2a9c004b68028fdcb31085987cc969d02438076260738",
+        "package.json": "6115c18c622bf3ef2259eef9edd0609106e9b45ff8a02f2e7c7530e9ff28d587",
+        "lib/process.js": "e2ceaddf4afea8f11ed3202cfe77b4606e3d03a2efc55f7239fe5d330ab1dec9"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/package.json",
+        "lib/process.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/lib/process.js"
+      },
+      "patchIds": [
+        "ptc-argv-L1",
+        "ptc-android-native-A1"
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
+    },
+    "dsh-client-file-upload-0.2.2-rc.1": {
+      "source": "superseded",
+      "engine": "0.2.2-rc.1",
+      "package": "@deepseek-ai/dsh-client-file-upload@0.2.2-rc.1",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-file-upload-0.2.2-rc.1.tgz",
+        "tarballSha256": "1135b746ddcd86a58af952f179974993a23851d787bab2b091af81e49c1f1645",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "b17e3621ce127ceb4f68919acdeeac64c54cf64c5d42429be8a7a65b5d20bbfe",
+        "package.json": "e0d2f3e8088560ae442142f3d4085ef6a7b10f47c81b1bbb79ae532022e3151b"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-file-upload/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-file-upload/package.json"
+      },
+      "patchIds": [
+        "file-upload-restart-R1"
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
+    },
+    "dsh-client-ui-sidebar-0.2.2-rc.1": {
+      "source": "superseded",
+      "engine": "0.2.2-rc.1",
+      "package": "@deepseek-ai/dsh-client-ui-sidebar@0.2.2-rc.1",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-ui-sidebar-0.2.2-rc.1.tgz",
+        "tarballSha256": "003683cd8044d246f82d2f2e81bc840444589c366b28c0c955960be8daf64db1",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "0a0a32382391acee1a692cf7d2529a2669cc8cc23d4d83b446f6247c3c4562c4",
+        "package.json": "42e506a9b02153231563670e9b68a314c7e2a5bfa0f802cba52de633bf78d880"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/package.json"
+      },
+      "patchIds": [
+        "sidebar-keep-wide-B2"
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
+    },
+    "dsh-experimental-inspector-0.2.2-rc.1": {
+      "source": "superseded",
+      "engine": "0.2.2-rc.1",
+      "package": "@deepseek-ai/dsh-experimental-inspector@0.2.2-rc.1",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-experimental-inspector-0.2.2-rc.1.tgz",
+        "tarballSha256": "28a7217133e7f6147222c5170ea53cbfc76f38b0d205ac1877b2f3102830e208",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "9cd7d04adf9c02caf5bb5d0d645d8f0ff409df6f32dc55b9131547511b1067c2",
+        "package.json": "07f7754ecbcf7dd2466b01d38125d07d2c877dc0595c4ae487c80fab60b851fd"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-inspector/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-inspector/package.json"
+      },
+      "patchIds": [
+        "inspector-worker-expose-internals-472"
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
+    },
+    "dsh-client-ui-settings-account-0.2.2-rc.1": {
+      "source": "superseded",
+      "engine": "0.2.2-rc.1",
+      "package": "@deepseek-ai/dsh-client-ui-settings-account@0.2.2-rc.1",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-ui-settings-account-0.2.2-rc.1.tgz",
+        "tarballSha256": "32536f245e8915e596c4eef72420803f336b04ed93d2d726597332ad789dd41e",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "0482b179466e1aaae6d7ff5738f679a8a62b39a0f1c496bda64bef342eb7b7e0",
+        "package.json": "09e670fef1c333347a107083a8961eb4301272778c46707aa411507612ecc0de"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-account/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-account/package.json"
+      },
+      "patchIds": [
+        "settings-account-feedback-entry"
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
+    },
+    "dsh-api-terminal-controller-0.2.2-rc.1": {
+      "source": "superseded",
+      "engine": "0.2.2-rc.1",
+      "package": "@deepseek-ai/dsh-api-terminal-controller@0.2.2-rc.1",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-api-terminal-controller-0.2.2-rc.1.tgz",
+        "tarballSha256": "adf83a2de59bcfd6357346d1511ccb31ac889daee206ced8d3f10257c3b2b2d9",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "0cefb34efc0cae1da14dfbcdcad6c899422e052add9238d0442a97d71ed98cdf",
+        "package.json": "8e956e8c4aa920314b0d14bafaf6313cd32bd13062119660cc2908caef703255"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-terminal-controller/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-terminal-controller/package.json"
+      },
+      "patchIds": [
+        "terminal-shell-candidates-T1"
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
+    },
+    "dsh-atomic-write-0.2.2-rc.1": {
+      "source": "superseded",
+      "engine": "0.2.2-rc.1",
+      "package": "@deepseek-ai/dsh-atomic-write@0.2.2-rc.1",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-atomic-write-0.2.2-rc.1.tgz",
+        "tarballSha256": "096a2885a9abee69e19d08d86ed2ab8923824a6e26f1321642beb0c5985a5612",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "872d7c1e6e9b267775199bdd3632870f82780d0a5ba047febc93fde94fde53f7",
+        "package.json": "122bdc8a44d3db9978a5a186a7ffcd547c8aca43ee74a0c5f9e4f18fe33d9d1d"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-atomic-write/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-atomic-write/package.json"
+      },
+      "patchIds": [
+        "atomic-stale-lock-F4"
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
+    },
+    "dsh-compaction-image-offload-0.2.2-rc.1": {
+      "source": "superseded",
+      "engine": "0.2.2-rc.1",
+      "package": "@deepseek-ai/dsh-compaction-image-offload@0.2.2-rc.1",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-compaction-image-offload-0.2.2-rc.1.tgz",
+        "tarballSha256": "1cf15cc0de0e1926ef3e20f95a8fa945e53d0e48b72f150c05f8144aa76f4e81",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "6352066e8028a74374f0d6de42ebfeec5125100bb1a32ea98ff7a9fc9f58b940",
+        "package.json": "388917860f2a3387d40bd3eae088fda692e877b9b49dffbe6799cb0969ff085c"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-image-offload/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-image-offload/package.json"
+      },
+      "patchIds": [
+        "image-history-batch-offload-I1"
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
+    },
+    "dsh-client-ui-settings-models-0.2.2-rc.1": {
+      "source": "superseded",
+      "engine": "0.2.2-rc.1",
+      "package": "@deepseek-ai/dsh-client-ui-settings-models@0.2.2-rc.1",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-ui-settings-models-0.2.2-rc.1.tgz",
+        "tarballSha256": "61d2fa34792c20faff957944b2e7fa7ac2a0179ac4cc0ec774eba157f04ead58",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "e111ecefea8262e0426f528864b9681d818068042e93d053bcb0b6884b317278",
+        "package.json": "d55cfe6021fc90d831ebdb15380bab368aee4df63a2e4aff99ded2d18f2fabe0"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/package.json"
+      },
+      "patchIds": [
+        "custom-first-model-row-960",
+        "model-catalog-section-labels-960"
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
+    },
+    "dsh-client-ui-settings-models-0.2.1-rc.3": {
+      "source": "superseded",
+      "engine": "0.2.1-rc.3",
+      "package": "@deepseek-ai/dsh-client-ui-settings-models@0.2.1-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-ui-settings-models-0.2.1-rc.3.tgz",
+        "tarballSha256": "2fa15781b4b03acca4508f52b108008d1c4d31835f271730e9b8a10f26f0248f",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "190498e15358bcd3fe6810fe6368023a20b0403e3ea493bc979eca9bdb593b28",
+        "package.json": "3f073169bea233b479963ec5f6eb8d046ff6336d86121e17a3292b7baecb3992"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/package.json"
+      },
+      "patchIds": [
+        "custom-first-model-row-960",
+        "model-catalog-section-labels-960"
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
+    },
+    "dsh-attachment-local-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-attachment-local@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-attachment-local-0.2.2-rc.3.tgz",
+        "tarballSha256": "2db1f530e5e9a2d7fc798ffed5763341d9e0a73717c4aabf539d060198b2b058",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "ff717f87226b59d6224aff67796b43d5fd72b98d0e74fa91a952affaf3285f9d",
+        "package.json": "161b63a3a1e4fbabbf768d24eab5831ce38023c9128904caada6eeb394be85e7"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/package.json"
+      },
+      "patchIds": [
+        "image-expiry-E1",
+        "image-request-preview-P1",
+        "attach-durable-F2"
+      ]
+    },
+    "dsh-llm-pi-ai-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-llm-pi-ai@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-llm-pi-ai-0.2.2-rc.3.tgz",
+        "tarballSha256": "25602653abc2db6468167621f28000ee0cd3ebf21cbfe745839f9b02fd3efcda",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "e956da3d7300e1426e13e14f47e6f981dd1ca345633a406568ee5058ad93e9d8",
+        "package.json": "fd5daab4b1411afd18197af9372434ab8371b59a73f2871a48930ff0ed892d24"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/package.json"
+      },
+      "patchIds": [
+        "image-expiry-E1",
+        "image-request-preview-P1",
+        "sealed-reasoning-1304",
+        "mimo-thinking-toggle-056",
+        "custom-endpoint-discovery-960"
+      ]
+    },
+    "dsh-llm-deepseek-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-llm-deepseek@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-llm-deepseek-0.2.2-rc.3.tgz",
+        "tarballSha256": "b5c6a94bc0010a41f4ec5e9d9e5bfb90bdcc891cb5c73f8b2aa6b9fec6e3ef77",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "e00c1816c29803ddd02b61e165e0376a62805b0af9873e3bac6daebf958cc137",
+        "package.json": "3f5ddd6bd00c4d37fad257fda1a15ff05c1d46158b4ba4ce8e354e9ddfe7c9ba"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/package.json"
+      },
+      "patchIds": [
+        "image-expiry-E1",
+        "image-request-preview-P1"
+      ]
+    },
+    "dsh-attachment-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-attachment@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-attachment-0.2.2-rc.3.tgz",
+        "tarballSha256": "071fb202b7a213e20bfffc7ba0fc743617ff1b14db5d8d4795fb0323e6f5535f",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "1de6cc47488042638d708ba6c492e2afad3bdaf65ba7e91720d37bac06a9b9dd",
+        "package.json": "85a9cea692ed1919a74cbf2f002d79c65e93ed04d25fd20c9044dbd4d0e21faf"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment/package.json"
+      },
+      "patchIds": [
+        "image-request-preview-P1"
+      ]
+    },
+    "dsh-llm-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-llm@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-llm-0.2.2-rc.3.tgz",
+        "tarballSha256": "48cd5a53263744bb06d3fd87577a8ba92bd3b6a55cd28230a9f4ec1c72fa3ae0",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "6384b5f1e21404e997a41a31a22a079c9533f2ddc1ffd9148e684884ff62eb74",
+        "package.json": "293e6975795eff89d2684d646e720abc7f5f7a59ffa7560b3e78ecf2d1f33d13"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/package.json"
+      },
+      "patchIds": [
+        "image-history-batch-offload-I1"
+      ]
+    },
+    "dsh-host-webserver-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-host-webserver@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-host-webserver-0.2.2-rc.3.tgz",
+        "tarballSha256": "bce6ec1e3e710654993df508d55b72571ac3daeac55bbdf873615d6fbfab8037",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "81a85ab619d8977e090e23124fd4e0e135c944c99b8b199eadea615532f2b2e3",
+        "package.json": "fae0e8234758c3f38b7820b87ee5c6bdbeb8062da97585052ff856ea13b518c1"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/package.json"
+      },
+      "patchIds": [
+        "managed-port-bind-EP1"
+      ]
+    },
+    "dsh-app-boot-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-app-boot@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-app-boot-0.2.2-rc.3.tgz",
+        "tarballSha256": "70a3305648d8766ca92432c7daf424be1fc5eafe809b1bbbd27574e226a8e543",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "a8d2138bb274bd982079df14a615f6c0d5d7589c9faeae81973128a72293b6de",
+        "package.json": "b946fedf8bc8dbbbdeb06af74a78b31331359f6e4be07a93f98a7f14e2b1fcf9"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/package.json"
+      },
+      "patchIds": [
+        "profile-link-skip-PL1",
+        "boot-third-party-isolation-G3"
+      ]
+    },
+    "dsh-client-ui-sidebar-right-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-client-ui-sidebar-right@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-ui-sidebar-right-0.2.2-rc.3.tgz",
+        "tarballSha256": "ec24d29a03ec0e3b0d477ee2d25046e74c16c0b1928ab068d9c54e5848c8edda",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "8d46bbd47ad345dd485c984b7d299d6d401797089548137ecf958e3dd1b007bc",
+        "package.json": "9889be948cf11786690ebbd6e9d032528f39e99665a5c3992fd96cea45101b64"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar-right/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar-right/package.json"
+      },
+      "patchIds": [
+        "sidebar-bubble-reorder-B1"
+      ]
+    },
+    "node-addon-require-builtin-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "node-addon-require-builtin@0.1.9",
+      "provenance": {
+        "tarballFile": "node-addon-require-builtin-0.1.9.tgz",
+        "tarballSha256": "294587fd95a71dced665a11e5e037ac27441e4b0ea710e08474366a03b54a1ef",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "73966bb0f824b021f77b03f02e00905a532554aad3c6c5a14c2a743aeb4a34a9",
+        "package.json": "036dc18faadcc51da0b3704d1d5308a85850077133e4a86281af906eb5e3aad5"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/node-addon-require-builtin/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/node-addon-require-builtin/package.json"
+      },
+      "patchIds": [
+        "narb-android-N1"
+      ]
+    },
+    "node-addon-system-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/node-addon-system@0.1.2",
+      "provenance": {
+        "tarballFile": "deepseek-ai-node-addon-system-0.1.2.tgz",
+        "tarballSha256": "347a0bb0cb1ea1af6eb88f2b72eb3ee41cc7703093971e6b2a58fee19191c36e",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/flock.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/flock.js": "e42af00c298d56322c073bf7cc66485096028318ab645a2e69dc2aa7481ba646",
+        "package.json": "e8aebe0548e3fd3e733b03476a0a6531076ba40678137421ecd7fb191792d50a"
+      },
+      "targets": {
+        "lib/flock.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/node-addon-system/lib/flock.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/node-addon-system/package.json"
+      },
+      "patchIds": [
+        "flock-android-F3"
+      ]
+    },
+    "dsh-session-persistence-jsonl-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-session-persistence-jsonl@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-session-persistence-jsonl-0.2.2-rc.3.tgz",
+        "tarballSha256": "b0942a17002c3e9224b90ec087a6153471348c60201db723fb869c2a8bfe422e",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "69efef5f84dddf947032bc1425067878fa610416c8885acde2ded9b01230c9b7",
+        "package.json": "8eaaba7f1f96781d15aca7ea16396a25af0a0ce4c5e4729c51ff28eceebcdbd2"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/package.json"
+      },
+      "patchIds": [
+        "spj-migration-link-F5",
+        "publish-exclusive-F7"
+      ]
+    },
+    "dsh-fs-local-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-fs-local@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-fs-local-0.2.2-rc.3.tgz",
+        "tarballSha256": "f72916d8bb1820ebf336764be0b801d89233286dd30f0c54c4d1cc2de2c544ab",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "610a3ba3658e55adaa3d8d21e017eb6787860adf317e889fb361e8802c8f5a13",
+        "package.json": "dbee266e09c213519364dcae13e4073a024e701c09cf00ecff7876f702610087"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/package.json"
+      },
+      "patchIds": [
+        "fs-local-link-F8",
+        "fs-local-digest-guard-B"
+      ]
+    },
+    "dsh-client-modules-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-client-modules@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-modules-0.2.2-rc.3.tgz",
+        "tarballSha256": "4b367319b5df14e28a72519d2881c41353d79bb3ba61a3c868609fd285d96ce2",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "a1056961926b9524a3940db3fb1cd84b5880eed54f06b8efaafa7c120b0d7602",
+        "package.json": "05407e71f406b976bc9f6b1290f47ea5c277e11d6f884f3d17656afb490719b5"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/package.json"
+      },
+      "patchIds": [
+        "combo-probe-P1",
+        "client-registry-scan-C4"
+      ]
+    },
+    "dsh-host-frontend-static-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-host-frontend-static@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-host-frontend-static-0.2.2-rc.3.tgz",
+        "tarballSha256": "d6d579318f1274b4ce12334e1326747014cc5e5845d909c7eeb42aa3ad19c586",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "6bb17c239f48fc26d4cf990af3139e7b64ae9f06fc5249bce7b58a3130edaed4",
+        "package.json": "4edab00916ebd368cf10e5d6c6b24f896c077b270c3e885c6f6a77365cd84b61"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-frontend-static/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-frontend-static/package.json"
+      },
+      "patchIds": [
+        "client-index-loader-barrier-G2"
+      ]
+    },
+    "dsh-typert-loader-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-typert-loader@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-typert-loader-0.2.2-rc.3.tgz",
+        "tarballSha256": "e4dd13b42cdaa870c30e4400aa60b6396af49058beb7eced9715ce1da6a77890",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "f04cd2104fe7b577b29bbcc7870634cb3face1176203cb24a03a8959c5ecd127",
+        "package.json": "b508feba6933431ec61f487369139bf8e013b65d38e202eba5a8abdd1326c0d1"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-typert-loader/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-typert-loader/package.json"
+      },
+      "patchIds": [
+        "typert-registry-scan-C4"
+      ]
+    },
+    "dsh-root-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-0.2.2-rc.3.tgz",
+        "tarballSha256": "b8f5a72660270cdded0f4c4fa0cfdc0cf851c261f09bbcf5e2bb56019bab0873",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/bin.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/bin.js": "36f86742e0c3cc1c3b2dbaa6582ee00b0c37bc4f5a190f7531b5303bf3efb6d9",
+        "package.json": "b39b22222238db8168ad1285251088b270fdedc6d11b7bdaf432b8b59d6880c7"
+      },
+      "targets": {
+        "lib/bin.js": "usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/package.json"
+      },
+      "patchIds": [
+        "perf-compile-cache-flush-N2"
+      ]
+    },
+    "dsh-client-ui-conversation-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-client-ui-conversation@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-ui-conversation-0.2.2-rc.3.tgz",
+        "tarballSha256": "a39a01c40e32a2fa0758548cb439c95c27d49eb8850d929cdcdbadd96485df90",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "3d166eab312749bf8c528dd7d26d95340df75a27fec668b3510e4558fe9b343b",
+        "package.json": "764333dba844e733ef0b5d90bff8748c80a2053b5c7090a37161449a2557b2c6"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-conversation/package.json"
+      },
+      "patchIds": [
+        "external-draft-conversation-seam-J1"
+      ]
+    },
+    "dsh-client-resources-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-client-resources@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-resources-0.2.2-rc.3.tgz",
+        "tarballSha256": "45bdd97c1ee32620ffbb2b6ec259421c1ebe2d119059dd47b958e1913e1008de",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "8d5b3495323d68365a81a6c49a066760fb3b7fe6d3e288c5b8855d517022c6f4",
+        "package.json": "936bb2448181d07228440627cab8a83812b21e8def67d75743d8fbc0996dae74"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-resources/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-resources/package.json"
+      },
+      "patchIds": [
+        "arkweb-resource-protocol-H1"
+      ]
+    },
+    "dsh-client-ui-reference-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-client-ui-reference@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-ui-reference-0.2.2-rc.3.tgz",
+        "tarballSha256": "f92735f5c46c488f072b86e45fa5eba0f6a4666de1e5ae429e76da4590d7cef6",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "99bf7db5babf6a7ca517de59f13338afa2e4fac91be84d6f396e9a1f1317fee2",
+        "package.json": "53c95547be7da0980f49b113d7ed6e9774c4d37a33469c6c0a4eee29913b23d6"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-reference/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-reference/package.json"
+      },
+      "patchIds": [
+        "reference-drill-F6"
+      ]
+    },
+    "dsh-subprocess-local-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-subprocess-local@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-subprocess-local-0.2.2-rc.3.tgz",
+        "tarballSha256": "026042712e4f674e7ee159a9a6ed425992966096760bc44be1192da45020c2da",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "lib/runner-launch-CKTiL8M8.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/runner-launch-CKTiL8M8.js": "a6f39eb3036497c1b3add94cf5eba0eb0c4f94689059fb98788de9bbc0fee0da",
+        "package.json": "21ef87354d3070c226aa4167da2a8f0d6d4abdecfdb3f5c1d0088f25a2619910",
+        "lib/index.js": "152b009a77e0b5f846af5a86b25a35346c9aca5f380c82054a35bde722500752"
+      },
+      "targets": {
+        "lib/runner-launch-CKTiL8M8.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-CKTiL8M8.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/package.json",
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js"
+      },
+      "patchIds": [
+        "terminal-inspector-android-D1",
+        "zsh-fpath-A1"
+      ]
+    },
+    "pi-ai-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
       "package": "@earendil-works/pi-ai@1.3.0",
       "provenance": {
         "tarballFile": "earendil-works-pi-ai-1.3.0.tgz",
@@ -2713,13 +3590,13 @@
         "pi-toolcall-G2"
       ]
     },
-    "dsh-client-ui-chat-0.2.2-rc.1": {
+    "dsh-client-ui-chat-0.2.2-rc.3": {
       "source": "engine-tgz",
-      "engine": "0.2.2-rc.1",
-      "package": "@deepseek-ai/dsh-client-ui-chat@0.2.2-rc.1",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-client-ui-chat@0.2.2-rc.3",
       "provenance": {
-        "tarballFile": "deepseek-ai-dsh-client-ui-chat-0.2.2-rc.1.tgz",
-        "tarballSha256": "88456d772de0b4a028dca8c0b9e72013e3934455f210eb0929f7e7f09b8c2a8c",
+        "tarballFile": "deepseek-ai-dsh-client-ui-chat-0.2.2-rc.3.tgz",
+        "tarballSha256": "de9833369a3867615865d3f65082dd1a0a2f6b35f775f948375745ed0c7d819f",
         "inputKind": "published-tarball"
       },
       "files": [
@@ -2727,8 +3604,8 @@
         "package.json"
       ],
       "fileSha256": {
-        "lib/client.js": "b7e645f2461231e8ece31381f026db2df72d058e425eaef19265f215c823d84e",
-        "package.json": "04a6be4e6aaa0dcb616e9c4fcf3e56e310b5b6e48b650663cb0e03821f8b3425"
+        "lib/client.js": "eef53e82b8cd584d2f0e543a4a93395f9d90df3bba1218891bd99d07d788de5c",
+        "package.json": "35c561c87d89eb85cfb1b6400ff59c631f6a986d2444ee1c04b491d376e01ace"
       },
       "targets": {
         "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js",
@@ -2738,13 +3615,13 @@
         "sealed-reasoning-1304"
       ]
     },
-    "dsh-ptc-runtime-node-0.2.2-rc.1": {
+    "dsh-ptc-runtime-node-0.2.2-rc.3": {
       "source": "engine-tgz",
-      "engine": "0.2.2-rc.1",
-      "package": "@deepseek-ai/dsh-ptc-runtime-node@0.2.2-rc.1",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-ptc-runtime-node@0.2.2-rc.3",
       "provenance": {
-        "tarballFile": "deepseek-ai-dsh-ptc-runtime-node-0.2.2-rc.1.tgz",
-        "tarballSha256": "8a6b3b16e9c615fae8a6327ff96e15e0fd66b574adb9ceb416827a7f5ad2909c",
+        "tarballFile": "deepseek-ai-dsh-ptc-runtime-node-0.2.2-rc.3.tgz",
+        "tarballSha256": "78df67b6f4f23bf1152a507b0fbfe1ef02a265083891b45b6fb5aba808212ed2",
         "inputKind": "published-tarball"
       },
       "files": [
@@ -2753,9 +3630,9 @@
         "package.json"
       ],
       "fileSha256": {
-        "lib/index.js": "952ffdd55654ccaedce2a9c004b68028fdcb31085987cc969d02438076260738",
-        "package.json": "6115c18c622bf3ef2259eef9edd0609106e9b45ff8a02f2e7c7530e9ff28d587",
-        "lib/process.js": "e2ceaddf4afea8f11ed3202cfe77b4606e3d03a2efc55f7239fe5d330ab1dec9"
+        "lib/index.js": "2eee67bc472e933cc71f9ee25c04ed266f56be0310b809cadeb31d5d5c804349",
+        "package.json": "813435b9a1529be582d2aed42ba6b5df635089e0e25bd1d007246f05636f70ba",
+        "lib/process.js": "c01308c52fc52d5f13edd2b65008f3bbcf67bd753eb17af5e4bc023216eca6b4"
       },
       "targets": {
         "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/lib/index.js",
@@ -2767,13 +3644,13 @@
         "ptc-android-native-A1"
       ]
     },
-    "dsh-client-file-upload-0.2.2-rc.1": {
+    "dsh-client-file-upload-0.2.2-rc.3": {
       "source": "engine-tgz",
-      "engine": "0.2.2-rc.1",
-      "package": "@deepseek-ai/dsh-client-file-upload@0.2.2-rc.1",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-client-file-upload@0.2.2-rc.3",
       "provenance": {
-        "tarballFile": "deepseek-ai-dsh-client-file-upload-0.2.2-rc.1.tgz",
-        "tarballSha256": "1135b746ddcd86a58af952f179974993a23851d787bab2b091af81e49c1f1645",
+        "tarballFile": "deepseek-ai-dsh-client-file-upload-0.2.2-rc.3.tgz",
+        "tarballSha256": "a2cdfb2c7e4619ecc60b5baae7014575feefb1017cba9d5178ee16dd56f71fc6",
         "inputKind": "published-tarball"
       },
       "files": [
@@ -2782,7 +3659,7 @@
       ],
       "fileSha256": {
         "lib/index.js": "b17e3621ce127ceb4f68919acdeeac64c54cf64c5d42429be8a7a65b5d20bbfe",
-        "package.json": "e0d2f3e8088560ae442142f3d4085ef6a7b10f47c81b1bbb79ae532022e3151b"
+        "package.json": "11714d04716e4f5d6415aa8e4df150564b72e7315bc0e82da4729613a4149741"
       },
       "targets": {
         "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-file-upload/lib/index.js",
@@ -2792,38 +3669,13 @@
         "file-upload-restart-R1"
       ]
     },
-    "dsh-client-ui-sidebar-0.2.2-rc.1": {
+    "dsh-experimental-inspector-0.2.2-rc.3": {
       "source": "engine-tgz",
-      "engine": "0.2.2-rc.1",
-      "package": "@deepseek-ai/dsh-client-ui-sidebar@0.2.2-rc.1",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-experimental-inspector@0.2.2-rc.3",
       "provenance": {
-        "tarballFile": "deepseek-ai-dsh-client-ui-sidebar-0.2.2-rc.1.tgz",
-        "tarballSha256": "003683cd8044d246f82d2f2e81bc840444589c366b28c0c955960be8daf64db1",
-        "inputKind": "published-tarball"
-      },
-      "files": [
-        "lib/client.js",
-        "package.json"
-      ],
-      "fileSha256": {
-        "lib/client.js": "0a0a32382391acee1a692cf7d2529a2669cc8cc23d4d83b446f6247c3c4562c4",
-        "package.json": "42e506a9b02153231563670e9b68a314c7e2a5bfa0f802cba52de633bf78d880"
-      },
-      "targets": {
-        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/client.js",
-        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/package.json"
-      },
-      "patchIds": [
-        "sidebar-keep-wide-B2"
-      ]
-    },
-    "dsh-experimental-inspector-0.2.2-rc.1": {
-      "source": "engine-tgz",
-      "engine": "0.2.2-rc.1",
-      "package": "@deepseek-ai/dsh-experimental-inspector@0.2.2-rc.1",
-      "provenance": {
-        "tarballFile": "deepseek-ai-dsh-experimental-inspector-0.2.2-rc.1.tgz",
-        "tarballSha256": "28a7217133e7f6147222c5170ea53cbfc76f38b0d205ac1877b2f3102830e208",
+        "tarballFile": "deepseek-ai-dsh-experimental-inspector-0.2.2-rc.3.tgz",
+        "tarballSha256": "647553a627ee9e5cbb07888e9bcfc0fa05554fae699951baba822b6474c5a068",
         "inputKind": "published-tarball"
       },
       "files": [
@@ -2831,8 +3683,8 @@
         "package.json"
       ],
       "fileSha256": {
-        "lib/index.js": "9cd7d04adf9c02caf5bb5d0d645d8f0ff409df6f32dc55b9131547511b1067c2",
-        "package.json": "07f7754ecbcf7dd2466b01d38125d07d2c877dc0595c4ae487c80fab60b851fd"
+        "lib/index.js": "720168e663929dea136c2add596245b90a547e20c56d81ccbd3dafac7ea8b762",
+        "package.json": "5735334a242d4f55a0b3f58e8f5a0a73a551a2a9eea39aeb92ab916908d9f333"
       },
       "targets": {
         "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-inspector/lib/index.js",
@@ -2842,13 +3694,13 @@
         "inspector-worker-expose-internals-472"
       ]
     },
-    "dsh-client-ui-settings-account-0.2.2-rc.1": {
+    "dsh-client-ui-settings-account-0.2.2-rc.3": {
       "source": "engine-tgz",
-      "engine": "0.2.2-rc.1",
-      "package": "@deepseek-ai/dsh-client-ui-settings-account@0.2.2-rc.1",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-client-ui-settings-account@0.2.2-rc.3",
       "provenance": {
-        "tarballFile": "deepseek-ai-dsh-client-ui-settings-account-0.2.2-rc.1.tgz",
-        "tarballSha256": "32536f245e8915e596c4eef72420803f336b04ed93d2d726597332ad789dd41e",
+        "tarballFile": "deepseek-ai-dsh-client-ui-settings-account-0.2.2-rc.3.tgz",
+        "tarballSha256": "9a37620c7730c7c7eb6765c1a416b04abc6410e98ba95edf9b001ffdd6dc8695",
         "inputKind": "published-tarball"
       },
       "files": [
@@ -2856,8 +3708,8 @@
         "package.json"
       ],
       "fileSha256": {
-        "lib/client.js": "0482b179466e1aaae6d7ff5738f679a8a62b39a0f1c496bda64bef342eb7b7e0",
-        "package.json": "09e670fef1c333347a107083a8961eb4301272778c46707aa411507612ecc0de"
+        "lib/client.js": "f6bf52810c50c6c1c6afd63babc5458e34e29b166a6fe332e23052a34795c88a",
+        "package.json": "f3c54213ec917eedc0da2b34716505d2d5e864e32f0a4d824d6ccc577b787d50"
       },
       "targets": {
         "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-account/lib/client.js",
@@ -2867,13 +3719,13 @@
         "settings-account-feedback-entry"
       ]
     },
-    "dsh-api-terminal-controller-0.2.2-rc.1": {
+    "dsh-api-terminal-controller-0.2.2-rc.3": {
       "source": "engine-tgz",
-      "engine": "0.2.2-rc.1",
-      "package": "@deepseek-ai/dsh-api-terminal-controller@0.2.2-rc.1",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-api-terminal-controller@0.2.2-rc.3",
       "provenance": {
-        "tarballFile": "deepseek-ai-dsh-api-terminal-controller-0.2.2-rc.1.tgz",
-        "tarballSha256": "adf83a2de59bcfd6357346d1511ccb31ac889daee206ced8d3f10257c3b2b2d9",
+        "tarballFile": "deepseek-ai-dsh-api-terminal-controller-0.2.2-rc.3.tgz",
+        "tarballSha256": "351b37652a1f60ab8de697e3d0fe3855e0b78c21bcd9ea8bd5cbece5e169f63d",
         "inputKind": "published-tarball"
       },
       "files": [
@@ -2881,8 +3733,8 @@
         "package.json"
       ],
       "fileSha256": {
-        "lib/index.js": "0cefb34efc0cae1da14dfbcdcad6c899422e052add9238d0442a97d71ed98cdf",
-        "package.json": "8e956e8c4aa920314b0d14bafaf6313cd32bd13062119660cc2908caef703255"
+        "lib/index.js": "7472d9e5e913590cd85bbaf74c84036bb2516ed7ad45b415d6ecb6fe88cba69d",
+        "package.json": "e2106d0ced35660b33d73ceac1666b3c60536ca2b5d52ed29f4bb4f9d4ef1c8a"
       },
       "targets": {
         "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-terminal-controller/lib/index.js",
@@ -2892,13 +3744,39 @@
         "terminal-shell-candidates-T1"
       ]
     },
-    "dsh-atomic-write-0.2.2-rc.1": {
+    "dsh-client-ui-settings-models-0.2.2-rc.3": {
       "source": "engine-tgz",
-      "engine": "0.2.2-rc.1",
-      "package": "@deepseek-ai/dsh-atomic-write@0.2.2-rc.1",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-client-ui-settings-models@0.2.2-rc.3",
       "provenance": {
-        "tarballFile": "deepseek-ai-dsh-atomic-write-0.2.2-rc.1.tgz",
-        "tarballSha256": "096a2885a9abee69e19d08d86ed2ab8923824a6e26f1321642beb0c5985a5612",
+        "tarballFile": "deepseek-ai-dsh-client-ui-settings-models-0.2.2-rc.3.tgz",
+        "tarballSha256": "0a487c42706ad154aa79b8c00a8c7cff95a07d08a86605d8caff4c31dd9bf408",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "74b45c32a08a6aa367be684bf89212e0a3b7a2c3de1cc95ccbfe82045533ae31",
+        "package.json": "725ab644632fd6e31000cd77a12990351389ab1c5d3a5a423271021caa8cfb39"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/package.json"
+      },
+      "patchIds": [
+        "custom-first-model-row-960",
+        "model-catalog-section-labels-960"
+      ]
+    },
+    "dsh-atomic-write-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-atomic-write@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-atomic-write-0.2.2-rc.3.tgz",
+        "tarballSha256": "ff52a4c86d270861cb572668275610a0cb0329549ef5403ca4f6e602b81322cc",
         "inputKind": "published-tarball"
       },
       "files": [
@@ -2907,7 +3785,7 @@
       ],
       "fileSha256": {
         "lib/index.js": "872d7c1e6e9b267775199bdd3632870f82780d0a5ba047febc93fde94fde53f7",
-        "package.json": "122bdc8a44d3db9978a5a186a7ffcd547c8aca43ee74a0c5f9e4f18fe33d9d1d"
+        "package.json": "9a3a6a9c3274b4251b3a727fd05886071faeef09e14a0dea493104c35796ce82"
       },
       "targets": {
         "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-atomic-write/lib/index.js",
@@ -2917,13 +3795,38 @@
         "atomic-stale-lock-F4"
       ]
     },
-    "dsh-compaction-image-offload-0.2.2-rc.1": {
+    "dsh-client-ui-sidebar-0.2.2-rc.3": {
       "source": "engine-tgz",
-      "engine": "0.2.2-rc.1",
-      "package": "@deepseek-ai/dsh-compaction-image-offload@0.2.2-rc.1",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-client-ui-sidebar@0.2.2-rc.3",
       "provenance": {
-        "tarballFile": "deepseek-ai-dsh-compaction-image-offload-0.2.2-rc.1.tgz",
-        "tarballSha256": "1cf15cc0de0e1926ef3e20f95a8fa945e53d0e48b72f150c05f8144aa76f4e81",
+        "tarballFile": "deepseek-ai-dsh-client-ui-sidebar-0.2.2-rc.3.tgz",
+        "tarballSha256": "e779a82c206559dae06b86efdb30f55f0f274043646c8684f57ddc6b28f04bc6",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "ca42b30e3baf3bb1503d93a35c83ae668a45643c2e51f24b4c01c412b7479b76",
+        "package.json": "5da0b9be343e8888dc371d120a5f06f5b755f71143c2cb59ba156651657b31f3"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/package.json"
+      },
+      "patchIds": [
+        "sidebar-keep-wide-B2"
+      ]
+    },
+    "dsh-compaction-image-offload-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-compaction-image-offload@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-compaction-image-offload-0.2.2-rc.3.tgz",
+        "tarballSha256": "3f0af70c16c46d573195eb0d38daf10abdf1673f25eccf03f88f84b2a02309f2",
         "inputKind": "published-tarball"
       },
       "files": [
@@ -2932,7 +3835,7 @@
       ],
       "fileSha256": {
         "lib/index.js": "6352066e8028a74374f0d6de42ebfeec5125100bb1a32ea98ff7a9fc9f58b940",
-        "package.json": "388917860f2a3387d40bd3eae088fda692e877b9b49dffbe6799cb0969ff085c"
+        "package.json": "9a87a00beec08a3bc2d0df0d549f3c7fcedb6105e5bd3ca854bc33bf1c819469"
       },
       "targets": {
         "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-image-offload/lib/index.js",
@@ -2941,70 +3844,18 @@
       "patchIds": [
         "image-history-batch-offload-I1"
       ]
-    },
-    "dsh-client-ui-settings-models-0.2.2-rc.1": {
-      "source": "engine-tgz",
-      "engine": "0.2.2-rc.1",
-      "package": "@deepseek-ai/dsh-client-ui-settings-models@0.2.2-rc.1",
-      "provenance": {
-        "tarballFile": "deepseek-ai-dsh-client-ui-settings-models-0.2.2-rc.1.tgz",
-        "tarballSha256": "61d2fa34792c20faff957944b2e7fa7ac2a0179ac4cc0ec774eba157f04ead58",
-        "inputKind": "published-tarball"
-      },
-      "files": [
-        "lib/client.js",
-        "package.json"
-      ],
-      "fileSha256": {
-        "lib/client.js": "e111ecefea8262e0426f528864b9681d818068042e93d053bcb0b6884b317278",
-        "package.json": "d55cfe6021fc90d831ebdb15380bab368aee4df63a2e4aff99ded2d18f2fabe0"
-      },
-      "targets": {
-        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js",
-        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/package.json"
-      },
-      "patchIds": [
-        "custom-first-model-row-960",
-        "model-catalog-section-labels-960"
-      ]
-    },
-    "dsh-client-ui-settings-models-0.2.1-rc.3": {
-      "source": "superseded",
-      "engine": "0.2.1-rc.3",
-      "package": "@deepseek-ai/dsh-client-ui-settings-models@0.2.1-rc.3",
-      "provenance": {
-        "tarballFile": "deepseek-ai-dsh-client-ui-settings-models-0.2.1-rc.3.tgz",
-        "tarballSha256": "2fa15781b4b03acca4508f52b108008d1c4d31835f271730e9b8a10f26f0248f",
-        "inputKind": "published-tarball"
-      },
-      "files": [
-        "lib/client.js",
-        "package.json"
-      ],
-      "fileSha256": {
-        "lib/client.js": "190498e15358bcd3fe6810fe6368023a20b0403e3ea493bc979eca9bdb593b28",
-        "package.json": "3f073169bea233b479963ec5f6eb8d046ff6336d86121e17a3292b7baecb3992"
-      },
-      "targets": {
-        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js",
-        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/package.json"
-      },
-      "patchIds": [
-        "custom-first-model-row-960",
-        "model-catalog-section-labels-960"
-      ],
-      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
     }
   },
   "capture": {
-    "engine": "0.2.2-rc.1",
-    "sourceCommit": "66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db",
+    "engine": "0.2.2-rc.3",
+    "sourceCommit": "38a6a5c965aa99ab525161efb7cc5cf1fe62fced",
     "discoveredTargets": {
       "terminal-inspector-android-D1": [
-        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-B2zsQ1Dz.js"
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-CKTiL8M8.js"
       ]
     },
-    "overlaySha256": "6a3f1c92b5341c037f95cf608ec3ef76385c767ce4fdddec4509babd0b771e9d",
-    "registrySha256": "b300d7407c9232e359f1bbf646a0bb6113a0240e57075ae2deb28e80ba9b9b8e"
+    "overlaySha256": "b04c9c2498bb31eca39bb3d062ec98722954d6299d5336525bccc4dc8d3573d0",
+    "registrySha256": "b300d7407c9232e359f1bbf646a0bb6113a0240e57075ae2deb28e80ba9b9b8e",
+    "previousEngine": "0.2.2-rc.1"
   }
 }

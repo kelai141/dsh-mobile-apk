@@ -165,9 +165,19 @@ export function patchRuntimeIndex(text, source = false) {
   const oldLinkerGuard = launch[0].includes('resolved node executable is the system dynamic linker')
   if (launch[0].includes('__dshMobileExecBase') !== oldLinkerGuard) fail('unrecognized legacy executable guard')
   text = replaceMatch(text, launch, launchBlock(launch[1], source, launchShape(launch[0])) + '\n')
-  const nested = /^([\t ]*)if \(packaged\) \{\n\1[\t ]+env\.DSH_PTC_RUNTIME_NODE = (['"])1\2;?\n\1[\t ]+env\.NODE_OPTIONS = heapFlag;?\n\1\};?/m.exec(text)
-  if (nested) text = replaceMatch(text, nested, nested[1] + 'env.NODE_OPTIONS = heapFlag;\n' + nested[1] + 'if (packaged) {\n' + nested[1] + '  env.DSH_PTC_RUNTIME_NODE = "1";\n' + nested[1] + '}')
-  else if (!/env\.NODE_OPTIONS = heapFlag;/.test(text)) fail('owned heap flag anchor absent')
+  // 0.2.2-rc.3：packaged 分支里的 NODE_OPTIONS 取值从裸 heapFlag 变成 `${heapFlag} --experimental-vm-modules`
+  // （embedded 形态的 argv 不带 --experimental-vm-modules，只能靠 env 传；process.js:1399 在缺少该 flag 时
+  // 显式 throw）。锚点接受两种取值，替换口径不变：heap flag 提到无条件位置，packaged 分支原样保留
+  // 上游自己的取值（整段捕获后原样带回，不重写、不吞掉上游 flag）。
+  const nested = /^([\t ]*)if \(packaged\) \{\n\1[\t ]+env\.DSH_PTC_RUNTIME_NODE = (['"])1\2;?\n\1[\t ]+env\.NODE_OPTIONS = (heapFlag|`\$\{heapFlag\}[^`]*`);?\n\1\};?/m.exec(text)
+  if (nested) {
+    const packagedValue = nested[3]
+    text = replaceMatch(text, nested, nested[1] + 'env.NODE_OPTIONS = heapFlag;\n'
+      + nested[1] + 'if (packaged) {\n'
+      + nested[1] + '  env.DSH_PTC_RUNTIME_NODE = "1";\n'
+      + nested[1] + '  env.NODE_OPTIONS = ' + packagedValue + ';\n'
+      + nested[1] + '}')
+  } else if (!/env\.NODE_OPTIONS = heapFlag;/.test(text)) fail('owned heap flag anchor absent')
   const insertion = oneMatch(text, /^const STRIP_PREFIX\s*=/m, 'module helper insertion')
   text = text.slice(0, insertion.index) + helper(source) + '\n' + text.slice(insertion.index)
   assertPolicyGate(text)

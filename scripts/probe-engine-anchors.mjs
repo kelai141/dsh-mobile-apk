@@ -162,7 +162,27 @@ function readTgz(tgzPath, own) {
 }
 
 const registry = JSON.parse(readFileSync(join(ROOT, 'scripts', 'patches', 'registry.json'), 'utf8'))
-const targets = registry.patches.filter((p) => (p.scope ?? 'vendor') === 'engine')
+const enginePatches = registry.patches.filter((p) => (p.scope ?? 'vendor') === 'engine')
+/* --only 必须**传递闭包**地带上被选中补丁的 requires 前提：否则前提补丁的目标文件不在探针根里，
+ * 它的 check 只能 ENOENT，于是依赖补丁被报成「前提补丁未打 / check 抛错」，而这跟锚点漂移毫无关系。
+ * 实锤（0.2.2-rc.3 追版）：sealed-reasoning-1304 requires pi-upstream-streaming-020，而后者有 6 个
+ * additionalTargets；只选 sealed 时探针根里根本没有那 6 个文件。
+ * 闭包只用于**物化**（写进探针根），施加仍严格按 --only：前提补丁的 marker 若不在这批 --only 里，
+ * apply-patches 会如实报「前提补丁未打」，那是真实结论，不是这里要掩盖的东西。 */
+function withRequiredClosure(selectedIds) {
+  if (!selectedIds) return null
+  const byId = new Map(enginePatches.map((p) => [p.id, p]))
+  const out = new Set()
+  const visit = (id) => {
+    if (out.has(id) || !byId.has(id)) return
+    out.add(id)
+    for (const dep of byId.get(id).requires ?? []) visit(dep)
+  }
+  for (const id of selectedIds) visit(id)
+  return out
+}
+const onlyClosure = withRequiredClosure(only)
+const targets = enginePatches.filter((p) => !only || onlyClosure.has(p.id))
 /* 退役条目（registry.retired[]）**不施加补丁**，但**必须继续供夹具**：
  * 退役的前提是「上游已原生满足它」，而这个前提会随上游再次漂移 ⇒ 守卫测试必须直接对上游真产物断言。
  * 此前退役（A3/A5/C3）直接从 patches 删条目，夹具随之停供、守卫测试跑不起来（0.14.2 rc.2 追版实锤）。 */
@@ -207,7 +227,8 @@ function patchTargets(patch) {
   return [target, ...(patch.additionalTargets ?? [])]
 }
 for (const p of [...targets, ...retiredTargets]) {
-  if (only && !only.includes(p.id)) continue
+  // targets 已按 --only 的 requires 闭包过滤过；退役条目仍只在被显式点名时物化。
+  if (only && !onlyClosure.has(p.id)) continue
   try {
     for (const target of patchTargets(p)) materialize(target, p.id)
   } catch (error) { problems.push(p.id + ': ' + error.message) }
@@ -326,7 +347,14 @@ console.log(`引擎 ${overlay.engineVersion} / 复现 ${[...materialized.values(
 // 真矩阵只有施加才能得到：锚点在 → [ok] applied，锚点漂 → [fail] + 精确原因。
 // 落笔对象是 .deploy-tmp 下的探针根（tgz 副本），仓库与 stage 都不碰。
 const cli = [join(HERE, 'patches', 'apply-patches.mjs'), probeRoot, '--scope', 'engine', '--apply']
-if (only) cli.push('--only', only.join(','))
+/* --only 传给 apply-patches 的必须是**闭包**（选中项 + 其 requires 前提），且按 registry 顺序排：
+ * apply-patches 的 requires 判据是「前提的 marker 此刻在不在树上」，只传选中项会让依赖补丁恒报
+ * 「前提补丁未打」——那是探针自己制造的假失败，不是锚点漂移。闭包只扩大「施加上下文」，
+ * 不改变任何判据：前提补丁仍要自己命中锚点才可能被 [ok]，锚点漂了就照样 [fail] 并把依赖项一起判红。 */
+if (only) {
+  const ordered = enginePatches.filter((p) => onlyClosure.has(p.id)).map((p) => p.id)
+  cli.push('--only', ordered.join(','))
+}
 const r = spawnSync(process.execPath, cli, { encoding: 'utf8' })
 process.stdout.write(r.stdout ?? '')
 process.stderr.write(r.stderr ?? '')

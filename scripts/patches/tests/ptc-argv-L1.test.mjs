@@ -13,7 +13,9 @@
 //
 // 本测试对**工厂夹具**（构建期同一批 tgz 写出，与快照引擎树逐字节同源）断言，实测四条反证均判红。
 // 用法：node scripts/patches/tests/ptc-argv-L1.test.mjs
-import { readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { versionedFixture } from './lib/fixture.mjs'
@@ -32,59 +34,31 @@ const MARKER = 'dsh-mobile ptc argv heap via NODE_OPTIONS (L1)'
 const FIXTURE = versionedFixture('dsh-ptc-runtime-node', 'lib', 'index.js')
 const APPLY = readFileSync(join(repoRoot, 'scripts', 'patches', 'apply-patches.mjs'), 'utf8')
 const REGISTRY = JSON.parse(readFileSync(join(repoRoot, 'scripts', 'patches', 'registry.json'), 'utf8'))
+// 目标相对路径取自 registry（补丁产物面唯一真源），不在此另写一份。
+const REL = REGISTRY.patches.find((patch) => patch.id === 'ptc-argv-L1').target
 const RAW = readFileSync(FIXTURE, 'utf8')
 
-// 断言用施加后的结果：直接调用生产 IMPL（不在测试里复刻替换逻辑，避免「测的是副本」）。
-// apply-patches.mjs 是 CLI 脚本，不能整体 import；按其自述的 IMPL 契约在此重放同一次替换，
-// 并断言「改法」本身在场（下面第 ⑥ 组锁 apply-patches 里的锚点与守卫文本）。
+// 断言用施加后的结果：**直接跑生产 CLI**（apply-patches.mjs --apply --only ptc-argv-L1），
+// 不在测试里复刻替换逻辑。
+//
+// 为什么改成这个形态（0.2.2-rc.3）：旧实现在本文件里复刻了一份 OLD/NEW 锚点与替换串，那份副本
+// 就是缺陷来源——rc.3 把 packaged 分支的 NODE_OPTIONS 改成 `${heapFlag} --experimental-vm-modules`，
+// 且 bootstrapArgs 少了一个实参，副本立刻「锚点未命中」，于是测试红而补丁是对的。
+// 跑生产 CLI 之后，断言的对象是**生产施加产物**，实现换代时这里不必跟着抄一遍。
 function applyPatch(text) {
-  const execOld = [
-    '\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, this.controller.signal);',
-    '\t\tif (this.closed) return;',
-  ].join('\n')
-  const argvOld = [
-    '\t\tconst argv = [',
-    '\t\t\texecutable,',
-    '\t\t\t...packaged ? [] : [heapFlag],',
-    '\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes, this.retainsState)',
-    '\t\t];',
-  ].join('\n')
-  const envOld = [
-    '\t\tif (packaged) {',
-    '\t\t\tenv.DSH_PTC_RUNTIME_NODE = "1";',
-    '\t\t\tenv.NODE_OPTIONS = heapFlag;',
-    '\t\t}',
-  ].join('\n')
-  if (!text.includes(execOld) || !text.includes(argvOld) || !text.includes(envOld)) {
-    throw new Error('夹具上锚点未命中——夹具版本与补丁面不同代')
-  }
-  const execNew = [
-    '\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, this.controller.signal);',
-    '\t\t' + MARKER + ': fail loud on an unusable executable.',
-    '\t\tif (typeof executable !== \'string\' || !isAbsolute(executable)) {',
-    '\t\t\tthrow new Error(\'ptc-runtime-node: resolved node executable is not an absolute path\');',
-    '\t\t}',
-    '\t\tconst __dshMobileExecBase = executable.slice(executable.lastIndexOf(\'/\') + 1);',
-    '\t\tif (/^(?:ld\\.so(?:\\.[0-9]+)*|linker(?:64)?)$/.test(__dshMobileExecBase)) {',
-    '\t\t\tthrow new Error(\'ptc-runtime-node: resolved node executable is the system dynamic linker\');',
-    '\t\t}',
-    '\t\tif (this.closed) return;',
-  ].join('\n')
-  const argvNew = [
-    '\t\t// ' + MARKER + ': the heap flag must never sit at argv[1].',
-    '\t\tconst argv = [',
-    '\t\t\texecutable,',
-    '\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes, this.retainsState)',
-    '\t\t];',
-  ].join('\n')
-  const envNew = [
-    '\t\t// ' + MARKER + ': set for every spawn, not only packaged runs.',
-    '\t\tenv.NODE_OPTIONS = heapFlag;',
-    '\t\tif (packaged) {',
-    '\t\t\tenv.DSH_PTC_RUNTIME_NODE = "1";',
-    '\t\t}',
-  ].join('\n')
-  return text.replace(execOld, execNew).replace(argvOld, argvNew).replace(envOld, envNew)
+  const root = mkdtempSync(join(tmpdir(), 'dsh-l1-'))
+  const file = join(root, REL)
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, text)
+  try {
+    const applied = spawnSync(process.execPath,
+      [join(repoRoot, 'scripts', 'patches', 'apply-patches.mjs'), root, '--apply', '--scope', 'engine', '--only', 'ptc-argv-L1'],
+      { encoding: 'utf8' })
+    if (applied.status !== 0) {
+      throw new Error('生产 CLI 施加失败：' + (applied.stdout || '') + (applied.stderr || ''))
+    }
+    return readFileSync(file, 'utf8')
+  } finally { rmSync(root, { recursive: true, force: true }) }
 }
 
 // ── (a) 旧形态必须真实存在于夹具里（证明锚点不是空转）───────────────────────
@@ -136,6 +110,15 @@ check('apply-patches 里 IMPL 的 OLD 锚点含旧 argv 项', APPLY.includes('..
 check('apply-patches 锚点未命中时抛可执行指引',
   APPLY.includes('ptc-argv 锚点未命中') && APPLY.includes('引擎升级后请人工核对'))
 check('apply-patches 写回后自查 marker', APPLY.includes("if (!s.includes('" + MARKER + "')) throw new Error('ptc-argv 复核失败"))
+
+// ── (g) 负控：锚点真缺时生产 CLI 必须判红，且不写回 ──────────────────────
+// 把 argv 项改坏一个字节：既不是「已施加」（marker 不在），锚点也不命中。
+// 若这里静默通过，上面所有 PASS 都可能是「零改动」的假绿。
+const DAMAGED = RAW.replace('...packaged ? [] : [heapFlag],', '...packaged ? [] : [heapFlag,],')
+check('负控前提：改坏后锚点确实不再命中', DAMAGED !== RAW && !DAMAGED.includes('...packaged ? [] : [heapFlag],'))
+let damagedThrew = false
+try { applyPatch(DAMAGED) } catch { damagedThrew = true }
+check('负控：锚点缺失时生产 CLI 判红（不是静默零改动）', damagedThrew)
 
 console.log(failures.length === 0 ? '\nALL PASS' : '\nFAILED ' + failures.length + ': ' + failures.join('; '))
 process.exit(failures.length === 0 ? 0 : 1)

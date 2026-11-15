@@ -831,27 +831,22 @@ const IMPLS = {
     scope: 'engine',
     check: (s) => s.includes('__dshContactUs'),
     apply: (s) => {
-      const ITEM = '{\n\t\t\t\t\t\t\t\tid: "contact",\n\t\t\t\t\t\t\t\tlabel: t("contactUs"),\n'
-        + '\t\t\t\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPaperPlaneOutlineMedium, { size: 16 })\n'
-        + '\t\t\t\t\t\t\t},'
-      const ANCHOR = '\t\t\t};\n\t\t\tif (desktop) {'
-      const EXPOSE = '\t\t\t};\n'
-        + '\t\t\tif (typeof globalThis !== "undefined") {\n'
-        + '\t\t\t\tglobalThis.__dshContactUs = () => {\n'
-        + '\t\t\t\t\ttry {\n'
-        + '\t\t\t\t\t\toperations.contactUs();\n'
-        + '\t\t\t\t\t} catch (_error) {\n'
-        + '\t\t\t\t\t}\n'
-        + '\t\t\t\t};\n'
-        + '\t\t\t}\n'
-        + '\t\t\tif (desktop) {'
+      // 2026-11 追版 0.2.2-rc.3 重锚：0.2.2-rc.2 起上游把 client bundle 压成紧凑单行——换行、缩进
+      // 与字符串双引号都被抹平（对象字面量的字符串键改写成模板串）。旧锚点按行缩进 + "contact"
+      // 书写，在 rc.3 上两处都命中不了。这里改写成同一段菜单项在紧凑形态下的真字节。
+      // 判据没动：仍走 replaceOnce，菜单项与 operations 尾部各必须恰好出现 1 次，否则 throw。
+      const ITEM = '{id:`contact`,label:t(`contactUs`),icon:(0,react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPaperPlaneOutlineMedium,{size:16})},'
+      const ANCHOR = 'throw result.error}};if(desktop){const controller=new DesktopOnboardingController('
+      const EXPOSE = 'throw result.error}};/* dsh-mobile __dshContactUs: 意见反馈入口搬到「设置 -> 通用」最下方后，由通用设置调用。 */'
+        + 'if(typeof globalThis!==`undefined`){globalThis.__dshContactUs=()=>{try{operations.contactUs()}catch(_error){}}}'
+        + 'if(desktop){const controller=new DesktopOnboardingController('
       if (!s.includes(ITEM)) throw new Error('settings-account 菜单项锚点未命中——上游客户端包已变，请人工核对')
       if (!s.includes(ANCHOR)) throw new Error('settings-account operations 尾部锚点未命中')
       s = replaceOnce(
-        replaceOnce(s, ITEM, '', 'inspector-worker item'),
-        ANCHOR, EXPOSE, 'inspector-worker anchor',
+        replaceOnce(s, ITEM, '', 'settings-account contact menu item'),
+        ANCHOR, EXPOSE, 'settings-account operations tail',
       )
-      if (!s.includes('__dshContactUs') || s.includes('id: "contact"')) throw new Error('settings-account 复核失败——不写回')
+      if (!s.includes('__dshContactUs') || s.includes('id:`contact`')) throw new Error('settings-account 复核失败——不写回')
       return s
     },
   },
@@ -1373,26 +1368,26 @@ const IMPLS = {
   // 0.14.2-fx-1 只把 profile 的 ptc-runtime.nodeExecutable 钉成绝对路径，**没有改 argv 构造**，
   // 所以 worker spawn bug 原封留在 rc.2 产物上（本补丁的锚点就是那一行）。
   //
-  // 真因链（逐段可核对）：
-  //   ① 产物 index.js:944 heapFlag = `--max-old-space-size=${maxOldGenerationSizeMb}`；
-  //   ② :947 `...packaged ? [] : [heapFlag],` ⇒ packaged===false 时 heapFlag 落在 argv[1]；
-  //   ③ executable 来自 :941 resolveExecutable(config.nodeExecutable)；direct exec 被拒时壳侧改走
+  // 真因链（逐段可核对；行号按 0.2.2-rc.3 产物 lib/index.js 现数）：
+  //   ① :1139 heapFlag = `--max-old-space-size=${maxOldGenerationSizeMb}`；
+  //   ② :1142 `...packaged ? [] : [heapFlag],` ⇒ packaged===false 时 heapFlag 落在 argv[1]；
+  //   ③ executable 来自 :1136 resolveExecutable(config.launch.executable)；direct exec 被拒时壳侧改走
   //      系统链接器，于是它可能是 /apex/com.android.runtime/bin/linker64（process.execPath 亦被污染）；
   //   ④ linker64 把**第一个非选项参数**当程序路径，而 heapFlag 正好排在它前面 ⇒ linker64 自己报
   //      expected absolute path 并退出，Node 根本没被加载。
   //
   // 修法两条：
-  //   1) 结构修复：heapFlag **永不进 argv**（删掉 :947 那一项），改由 env.NODE_OPTIONS 传给子 node；
+  //   1) 结构修复：heapFlag **永不进 argv**（删掉 :1142 那一项），改由 env.NODE_OPTIONS 传给子 node；
   //      env.NODE_OPTIONS 移出 `if (packaged)` 无条件设置（DSH_PTC_RUNTIME_NODE 仍只在 packaged 下）。
   //   2) 守卫（fails loud，不静默回退、不猜替代路径）：executable 必须是绝对路径字符串；
   //      且不得是安卓系统动态链接器（basename = linker / linker64 / ld.so / ld.so.N）。
   //
   // NODE_OPTIONS 为什么在这里安全（已实证，不是推断）：PTC 子进程自己的 bootstrap（同包 lib/process.js）
   // 启动时把 STARTUP_ENVIRONMENT_NAMES 之外的 env 键全部删除、并把 process.env 换成 null 原型空对象：
-  //   process.js:1063  for (const key of Object.keys(processState.env)) if (!STARTUP_ENVIRONMENT_NAMES.has(key.toUpperCase())) Reflect.deleteProperty(processState.env, key);
-  //   process.js:1064  processState.env = Object.create(null);
-  //   process.js:1134  runNodeMain(openInheritedControlChannel(), Number(process.argv[2]), process);  ← 传的是全局 process
-  // 白名单只有 PATH/PATHEXT/SYSTEMROOT/WINDIR/TEMP/TMP（process.js:1044-1051），NODE_OPTIONS 不在其中 ⇒
+  //   process.js:1128  for (const key of Object.keys(state.env)) if (!STARTUP_ENVIRONMENT_NAMES.has(key.toUpperCase())) Reflect.deleteProperty(state.env, key);
+  //   process.js:1129  state.env = Object.create(null);
+  //   process.js:7396  runNodeMain(openInheritedControlChannel(), Number(process.argv[2]), process);  ← 传的是全局 process
+  // 白名单只有 PATH/PATHEXT/SYSTEMROOT/WINDIR/TEMP/TMP（process.js:1113-1120），NODE_OPTIONS 不在其中 ⇒
   // 被 delete 掉，孙进程读不到。行为实证（本机 node v24.17）：按同序执行「设 NODE_OPTIONS → delete →
   // process.env = Object.create(null) → spawnSync 孙进程」，孙进程 NODE_OPTIONS = undefined。
   //
@@ -1400,7 +1395,7 @@ const IMPLS = {
   // undefined」改成「恰为我们的 heap flag」，不是新开继承面——上游 subprocess-local 的 childEnv() 是
   // {...scrubbedParentEnv(), ...spec.env}（spawn.ts:44-54 posix），targetEnvironment() 再 filter 掉
   // 值为 undefined 的项（runner-launch.ts:300-314），而现有代码那份 env 先把非启动项全部 tombstone
-  // 成 undefined（index.js:956）。代价（如实登记）：引擎自己若设了 NODE_OPTIONS 会被我们覆盖，
+  // 成 undefined（index.js:1151）。代价（如实登记）：引擎自己若设了 NODE_OPTIONS 会被我们覆盖，
   // 但既有行为里子进程本就看不到它，故不构成回归。
   'ptc-argv-L1': {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/lib/index.js',
@@ -1408,6 +1403,16 @@ const IMPLS = {
     check: (s) => s.includes('dsh-mobile ptc argv heap via NODE_OPTIONS (L1)'),
     apply: (s) => {
       if (s.includes('dsh-mobile ptc argv heap via NODE_OPTIONS (L1)')) return s
+      // 0.2.2-rc.3 变了三处，三处都只是**顺序**与**参数面**的位移，语义没变：
+      //   ① packaged / heapFlag 两条声明从 executable 之前挪到之后（连同 if (this.closed) return; 之间）；
+      //   ② bootstrapArgs 少了第 4 个实参 this.retainsState（持久 PTC 已被拆到 persistent-process.js）；
+      //   ③ env.NODE_OPTIONS 在 packaged 分支里多拼了 --experimental-vm-modules（rc.3 起
+      //      node-script 形态自己把该 flag 放进 bootstrapArgs:38，packaged 形态只能走 env）。
+      // 因此三个锚按 rc.3 实字节重排，注入语义逐条不变：
+      //   ① 可执行文件守卫仍紧跟在 resolveExecutable 之后、argv 构造之前（executable 尚未被用）；
+      //   ② heapFlag 仍永不进 argv，改由无条件 env.NODE_OPTIONS 承载；
+      //   ③ 无条件 env.NODE_OPTIONS 必须保留上游自己拼的 --experimental-vm-modules，否则 packaged
+      //      PTC 会在 vm.SyntheticModule 缺失处崩（process.js:1399 的显式判据）。
       const OLD_EXEC = [
         "\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, this.controller.signal);",
         "\t\tif (this.closed) return;",
@@ -1432,23 +1437,23 @@ const IMPLS = {
 "\t\tconst argv = [",
 "\t\t\texecutable,",
 "\t\t\t...packaged ? [] : [heapFlag],",
-"\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes, this.retainsState)",
+"\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)",
 "\t\t];",
       ].join('\n')
       const NEW_ARGV = [
-"\t\t\t// dsh-mobile ptc argv heap via NODE_OPTIONS (L1): the heap flag must never sit at argv[1].",
-"\t\t\t// The system linker (used when direct exec of an app-data ELF is denied) treats the first",
-"\t\t\t// non-option argument as the program path, so a leading --max-old-space-size would be read",
-"\t\t\t// as that path and the child would die before Node loads. It travels via env instead.",
+"\t\t// dsh-mobile ptc argv heap via NODE_OPTIONS (L1): the heap flag must never sit at argv[1].",
+"\t\t// The system linker (used when direct exec of an app-data ELF is denied) treats the first",
+"\t\t// non-option argument as the program path, so a leading --max-old-space-size would be read",
+"\t\t// as that path and the child would die before Node loads. It travels via env instead.",
 "\t\tconst argv = [",
 "\t\t\texecutable,",
-"\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes, this.retainsState)",
+"\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)",
 "\t\t];",
       ].join('\n')
       const OLD_ENV = [
 "\t\tif (packaged) {",
 "\t\t\tenv.DSH_PTC_RUNTIME_NODE = \"1\";",
-"\t\t\tenv.NODE_OPTIONS = heapFlag;",
+"\t\t\tenv.NODE_OPTIONS = `${heapFlag} --experimental-vm-modules`;",
 "\t\t}",
       ].join('\n')
       const NEW_ENV = [
@@ -1465,6 +1470,10 @@ const IMPLS = {
 "\t\t\tenv.NODE_OPTIONS = heapFlag;",
 "\t\tif (packaged) {",
 "\t\t\tenv.DSH_PTC_RUNTIME_NODE = \"1\";",
+"\t\t\t// Upstream 0.2.2-rc.3 appends this flag for the packaged path (embedded launches get no argv",
+"\t\t\t// flag from bootstrapArgs); dropping it would fail closed in the child bootstrap",
+"\t\t\t// (process.js 需要 vm.SourceTextModule / vm.SyntheticModule).",
+"\t\t\tenv.NODE_OPTIONS = `${heapFlag} --experimental-vm-modules`;",
 "\t\t}",
       ].join('\n')
       for (const pair of [[OLD_EXEC, 'executable 解析行'], [OLD_ARGV, 'argv 构造块'], [OLD_ENV, 'env 赋值块']]) {
@@ -1895,22 +1904,24 @@ const IMPLS = {
     check: (s) => s.includes('dsh-mobile external draft addFiles seam (J1)'),
     apply: (s) => {
       if (s.includes('dsh-mobile external draft addFiles seam (J1)')) return s
-      const anchor = '\t\t\t/**\n\t\t\t* Restart one failed file or image upload.'
-      if (!s.includes(anchor)) throw new Error('external draft seam 锚点未命中：ui-conversation createDrafts 后续注释已变')
-      const method = [
-        '\t\t\t/** dsh-mobile external draft addFiles seam (J1): reuse the normal composer attachment path. */',
-        '\t\t\taddFiles(sessionId, files) {',
-        '\t\t\t\tconst shell = this.input.shell(sessionId);',
-        '\t\t\t\tconst drafts = this.createDrafts(sessionId, files);',
-        '\t\t\t\tif (shell.addAttachments(drafts.map((draft) => draft.id)) === false) {',
-        '\t\t\t\t\tthis.releaseDraftAttachments(drafts);',
-        '\t\t\t\t\treturn false;',
-        '\t\t\t\t}',
-        '\t\t\t\treturn true;',
-        '\t\t\t}',
-        '',
-      ].join('\n')
-      const out = replaceOnce(s, anchor, method + anchor)
+      // 2026-11 追版 0.2.2-rc.3 重锚：上游把 client bundle 压成紧凑单行——换行与缩进被整段抹掉，
+      // 注释也被打包器剥掉了，于是旧锚点（createDrafts 之后那段 "Restart one failed file or image
+      // upload" JSDoc）在 rc.3 里一处都找不到。锚点改钉 createDrafts 方法体的收尾 + retryFileUpload
+      // 的开头（两段都是标识符，压缩后仍在），语义仍是「紧跟 createDrafts 之后插入」。
+      // 判据没动：仍走 replaceOnce，出现次数必须恰好 1，0 处/多处一律 throw。
+      // 锚点落在 createDrafts 方法体的收尾（return attachment})}）之后、retryFileUpload 之前，
+      // 因此插入点在类体上而不在方法体内：addFiles 与方法平级。
+      const anchor = 'return attachment})}retryFileUpload(sessionId,id){const attachment=this.draftAttachments.get(id);if(attachment===void 0)return;'
+      if (!s.includes(anchor)) throw new Error('external draft seam 锚点未命中：ui-conversation createDrafts 后续已变')
+      const method = '/* dsh-mobile external draft addFiles seam (J1): reuse the normal composer attachment path. */'
+        + 'addFiles(sessionId,files){'
+        + 'const shell=this.input.shell(sessionId);'
+        + 'const drafts=this.createDrafts(sessionId,files);'
+        + 'if(shell.addAttachments(drafts.map(draft=>draft.id))===false){this.releaseDraftAttachments(drafts);return false}'
+        + 'return true}'
+      // 插在 "return attachment})" 与 "retryFileUpload" 之间：把 createDrafts 的收尾与 retryFileUpload 的开头
+      // 拆开重排，方法落在这两个成员之间的类体上。
+      const out = replaceOnce(s, anchor, 'return attachment})}' + method + 'retryFileUpload(sessionId,id){const attachment=this.draftAttachments.get(id);if(attachment===void 0)return;')
       if (!out.includes('dsh-mobile external draft addFiles seam (J1)') || !out.includes('this.input.shell(sessionId)')) {
         throw new Error('external draft seam 复核失败——不写回')
       }
@@ -1928,15 +1939,20 @@ const IMPLS = {
     check: (s) => s.includes('dsh-mobile ArkWeb resource authority fallback (H1)'),
     apply: (s) => {
       if (s.includes('dsh-mobile ArkWeb resource authority fallback (H1)')) return s
-      const ORIGINAL = /(if \(parsed\.protocol !== `dsh-resource:`\) return void 0;)(\r?\n)([ \t]*)return parsed\.hostname === "" \? void 0 : parsed\.hostname\.toLowerCase\(\);/
+      // 2026-11 追版 0.2.2-rc.3 重锚：0.2.2-rc.2 起上游把 client bundle 压成紧凑单行——换行与缩进
+      // 被整段抹掉（标识符与模板串都没改名）。旧锚点靠 \r?\n + 行首缩进把「协议判定」与「hostname
+      // 返回」分成三段，在 rc.3 上匹配不到。新锚点仍是同两段代码，只是按紧凑形态写在同一条正则里：
+      // 分组 1 = 协议判定，分组 2 = hostname 返回语句，两者之间的 `` 是 dsh-resource 与空串字面量。
+      // 判据没动：仍走 replaceOnceRe，匹配次数必须恰好 1，0 处/多处一律 throw。
+      const ORIGINAL = /(if\(parsed\.protocol!==`\$\{`dsh-resource`\}:`\)return void 0;)(return parsed\.hostname===``\?void 0:parsed\.hostname\.toLowerCase\(\))/
       if (!ORIGINAL.test(s)) throw new Error('arkweb-resource-protocol 锚点未命中：protocolOf hostname 返回语句已变')
-      s = replaceOnceRe(s, ORIGINAL, (_whole, protocolCheck, eol, indent) => [
+      s = replaceOnceRe(s, ORIGINAL, (_whole, protocolCheck, hostReturn) => [
         protocolCheck,
-        indent + 'if (parsed.hostname !== "") return parsed.hostname.toLowerCase();',
-        indent + '// dsh-mobile ArkWeb resource authority fallback (H1): ArkWeb loses the non-special-scheme hostname.',
-        indent + 'const authority = /^dsh-resource:\\/\\/([A-Za-z][A-Za-z0-9-]*)(?:[/?#]|$)/i.exec(address);',
-        indent + 'return authority === null ? void 0 : authority[1].toLowerCase();',
-      ].join(eol), 'arkweb-resource-protocol protocolOf hostname 返回语句')
+        'if(parsed.hostname!==``)return parsed.hostname.toLowerCase();',
+        '/* dsh-mobile ArkWeb resource authority fallback (H1): ArkWeb loses the non-special-scheme hostname. */',
+        'const authority=/^dsh-resource:\\/\\/([A-Za-z][A-Za-z0-9-]*)(?:[/?#]|$)/i.exec(address);',
+        'return authority===null?void 0:authority[1].toLowerCase();',
+      ].join(''), 'arkweb-resource-protocol protocolOf hostname 返回语句')
       if (!s.includes('dsh-mobile ArkWeb resource authority fallback (H1)')) throw new Error('arkweb-resource-protocol 复核失败——不写回')
       return s
     },
@@ -1953,13 +1969,16 @@ const IMPLS = {
     check: (s) => s.includes('dsh-mobile mobile-folder-drill (F6)'),
     apply: (s) => {
       if (s.includes('dsh-mobile mobile-folder-drill (F6)')) return s
-      const OLD = 'if (value.fileKind === "directory" && action === "drill") return {'
-      const NEW = [
-        '/* dsh-mobile mobile-folder-drill (F6): on the phone form a directory row settles into the folder',
-        ' * instead of referencing it — the trailing chevron and Tab keep drilling, and the multi-select',
-        ' * checkbox is owned by the responsive layer. Desktop (no form marker) is untouched. */',
-        'if (value.fileKind === "directory" && (action === "drill" || document.documentElement.hasAttribute("data-dsh-mobile-form"))) return {',
-      ].join('\n')
+      // 2026-11 追版 0.2.2-rc.3 重锚：0.2.2-rc.2 起上游把 client bundle 压成紧凑单行——换行与缩进
+      // 被整段抹掉，字符串常量也换成模板串（"directory" -> `directory`）。旧锚点按行 + 双引号书写，
+      // 在 rc.3 上一处都命中不了。新锚点仍是 onPick 里那条 directory/drill 判定，只是按紧凑形态写，
+      // 并带上它后面的 return{（少了这一段就不是同一个落定分支）。
+      // 判据没动：仍走 replaceOnce，出现次数必须恰好 1，0 处/多处一律 throw。
+      const OLD = 'if(value.fileKind===`directory`&&action===`drill`)return{'
+      const NEW = '/* dsh-mobile mobile-folder-drill (F6): on the phone form a directory row settles into the folder'
+        + ' instead of referencing it — the trailing chevron and Tab keep drilling, and the multi-select'
+        + ' checkbox is owned by the responsive layer. Desktop (no form marker) is untouched. */'
+        + 'if(value.fileKind===`directory`&&(action===`drill`||document.documentElement.hasAttribute("data-dsh-mobile-form")))return{'
       if (!s.includes(OLD)) throw new Error('reference-drill 锚点未命中：onPick 的 directory/drill 判定')
       s = replaceOnce(s, OLD, NEW)
       if (!s.includes('dsh-mobile mobile-folder-drill (F6)')) throw new Error('reference-drill 复核失败——不写回')
@@ -2836,10 +2855,13 @@ const MAP_OLD = [
     check: (s) => s.includes('dsh-mobile compile cache flush (N2)') && s.includes('dshMobileFlushCompileCacheQuietly'),
     apply: (s) => {
       if (s.includes('dsh-mobile compile cache flush (N2)') && s.includes('dshMobileFlushCompileCacheQuietly')) return s
-      // 锚 = bin.js 的最后一条顶层 import（rc.1 起 node:util 那行；此前是 node:fs 的 readFileSync，
-      // 上游把根包改成只用 fs/promises 后旧锚逐字符消失）。插在 import 之后、`//#region` 之前，
-      // 保证定时器与 exit 兜底在任何命令逻辑跑起来之前就注册。
-      const IMPORT_OLD = 'import { inspect } from "node:util";'
+      // 锚 = bin.js 的最后一条顶层 import。0.2.2-rc.3 起根包自己被拆成两层：lib/bin.js 只剩
+      // shebang + 两条 node: 内置 import（realpathSync / pathToFileURL），真正的 CLI 在
+      // ./bin-CwxESKe-.js 里按需动态 import。所以「node:util 的 inspect」这条锚在 rc.3 逐字符消失
+      // （它不是被压缩掉的，是根包入口换了形态），当前末条顶层 import 是 node:url 那行。
+      // 插在 import 段之后、首个 `//#region` 之前，保证定时器与 exit 兜底在任何命令逻辑
+      // （含 if (import.meta.main) 的 runCli 分派）跑起来之前就注册。
+      const IMPORT_OLD = 'import { pathToFileURL } from "node:url";'
       const BLOCK = [
         'import { flushCompileCache as dshMobileFlushCompileCache } from "node:module";',
         '/* dsh-mobile compile cache flush (N2): Node persists NODE_COMPILE_CACHE entries only when the',

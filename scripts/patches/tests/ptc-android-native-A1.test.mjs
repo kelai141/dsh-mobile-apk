@@ -164,7 +164,10 @@ test('embedded launch keeps its shipped marker while the heap flag moves into th
   assert.deepEqual(run.calls.resolved, [embedded])
   const spec = run.calls.spawn[0]
   assert.deepEqual(Array.from(spec.argv), [embedded, '1234'])
-  assert.equal(spec.env.NODE_OPTIONS, '--max-old-space-size=512')
+  // 0.2.2-rc.3：上游在 packaged 分支里自己拼了 --experimental-vm-modules（embedded 形态的 argv 不带
+  // 该 flag，process.js 缺少它会在 vm.SyntheticModule 处 fail closed）。补丁原样保留上游取值，
+  // 只把 heap flag 提到无条件位置 ⇒ 这里必须断言**含 flag 的完整取值**，而不是只断 heap flag。
+  assert.equal(spec.env.NODE_OPTIONS, '--max-old-space-size=512 --experimental-vm-modules')
   assert.equal(spec.env.DSH_PTC_RUNTIME_NODE, '1')
   // 0.2.1 的 packaged 判据改为 launch.kind === "embedded"（旧判据 'pkg' in process 已不存在）。
   assert.deepEqual(run.calls.bootstrap[0].launch, { kind: 'embedded', executable: embedded })
@@ -197,7 +200,10 @@ test('published child retains only native OS values while the model-facing proce
   const clearing = /^function clearProgramEnvironment\(state\) \{\n[\s\S]*?\n\}/m.exec(child)?.[0]
   assert.ok(clearing, 'published child contains its startup environment clearing boundary')
   assert.match(child, /clearProgramEnvironment\(processState\);/, 'startup clears the child program environment before evaluating code')
-  runInNewContext(clearing + '\nclearProgramEnvironment(processState);', { processState, STARTUP_ENVIRONMENT_NAMES: environmentSet('android') })
+  // 0.2.2-rc.3 的清环境体末尾多一句 syncBuiltinESMExports()（把被删除的 NODE_OPTIONS 同步进 ESM 内建）。
+  // 求值只跑函数体语义，那一句是 node:module 的副作用，替身里给成空实现；其余字节照原样求值。
+  runInNewContext(clearing + '\nclearProgramEnvironment(processState);',
+    { processState, STARTUP_ENVIRONMENT_NAMES: environmentSet('android'), syncBuiltinESMExports: () => {} })
   assert.deepEqual(Object.keys(processState.env), [])
   assert.equal(Object.getPrototypeOf(processState.env), null)
   for (const key of ANDROID_ENV_NAMES) assert.equal(osEnv[key], native[key])
@@ -221,9 +227,12 @@ test('anchor, marker, heap placement, and sandbox-policy drift are rejected', ()
   assert.throws(() => assertPolicyGate(rawIndex.replace('policy.mode === "danger-full-access"', 'policy.mode === "workspace-write"')), /expected reviewed anchors/)
   assert.throws(() => assertPolicyGate(index + '\nconst unrevisedSpawn = () => this.ctx.sandbox.confine(argv, {});\n'), /every sandbox spawn path/)
   assert.throws(() => patchRuntimeIndex(rawIndex.replace('const packaged = this.config.launch.kind === "embedded";', 'const packaged = "pkg" in process && this.config.launch.bootstrapPath === void 0;')), /launch block differs from reviewed upstream/)
-  // 0.2.2-rc.1 起 bootstrapArgs 多传一个 this.retainsState；负控替换要带上它，
-  // 否则替换根本不发生，测到的是「锚点没匹配」而不是「审阅条件生效」。
-  assert.throws(() => patchRuntimeIndex(rawIndex.replace('bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes, this.retainsState)', 'bootstrapArgs(this.ctx.fs, this.config, this.config.maxMessageBytes, this.retainsState)')), /launch block differs from reviewed upstream/)
+  // 0.2.2-rc.3 起持久 PTC 被拆到 persistent-process.js，bootstrapArgs 回到三个实参（不再带 retainsState）。
+  // 负控替换必须与新形态逐字节一致，否则替换根本不发生，测到的是「锚点没匹配」而不是「审阅条件生效」。
+  const bootstrapReal = 'bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)'
+  const rewordedBootstrap = rawIndex.replace(bootstrapReal, 'bootstrapArgs(this.ctx.fs, this.config, this.config.maxMessageBytes)')
+  assert.notEqual(rewordedBootstrap, rawIndex, '负控替换必须真的发生')
+  assert.throws(() => patchRuntimeIndex(rewordedBootstrap), /launch block differs from reviewed upstream/)
   assert.throws(() => patchRuntimeIndex(index.replace('...launchPrefix,', '...launchPrefix, heapFlag,')))
   assert.throws(() => assertChildClearing(child.replace('state.env = Object.create(null)', 'state.env = {}')))
 })
@@ -238,11 +247,32 @@ test('old published artifact is rejected by the version preflight; both compiled
   // 不能因为锚点仍能命中就把别的产物当成本代施加（代弃夹具本身不再被测试引用）。
   const manifest = JSON.parse(read('package.json'))
   assert.equal(manifest.version, ENGINE_BASELINE)
+  // read 替身必须**逐文件**给回该文件的字节：旧实现对所有非 package.json 的路径都回 original，
+  // 于是 lib/process.js 拿到的是 index.js 的内容 —— drift 循环只断言 throw，永远走不到那一步，
+  // 这个缺陷被掩盖了；下面要断言「基线可接受」，就会在 assertChildClearing 处以误报形式炸出来。
   const plan = (version, original = rawIndex) => () => planPatch(fileURLToPath(fixture), false,
-    name => name === 'package.json' ? JSON.stringify({ ...manifest, version }) : original)
-  for (const version of ['0.2.1-rc.2', '0.2.1-rc.1', '0.2.1', '0.2.2-rc.3', '1.0.0']) {
+    name => name === 'package.json' ? JSON.stringify({ ...manifest, version })
+      : name === 'lib/process.js' ? rawChild : original)
+  // 漂移集合必须**覆盖面固定、版本由基线派生**：旧实现把上一代版本号写死在列表里，
+  // 其中还包含当时「比基线更新」的那一代；抬版后那一项变成了基线本身，于是「必须判红」的
+  // 用例开始判绿 —— 测试红而补丁是对的。
+  // 这里改为由 ENGINE_BASELINE 现算三个方向，判据强度不降：
+  //   ① 上一代已知版本（回归：老产物不得冒充本代）；
+  //   ② 比基线更新的版本（回归：预检不是「只挡旧版本」）；
+  //   ③ 完全无关的版本（回归：未知版本一律拒）。
+  const nextRc = ENGINE_BASELINE.replace(/rc\.(\d+)$/, (_, n) => 'rc.' + (Number(n) + 1))
+  assert.notEqual(nextRc, ENGINE_BASELINE, '必须能由基线派生出一个更新版本')
+  const drift = ['0.2.1-rc.2', '0.2.1-rc.1', '0.2.1', '0.2.2-rc.1', nextRc, '1.0.0']
+  for (const version of drift) {
+    assert.notEqual(version, ENGINE_BASELINE, '漂移集合不得包含当前基线：' + version)
     assert.throws(plan(version), new RegExp('requires @deepseek-ai/dsh-ptc-runtime-node@' + ENGINE_BASELINE.replaceAll('.', '\\.')), version)
   }
+  // 反证的另一半：基线本身必须被接受（否则上面的「凡是 != 基线都抛」是空转 ——
+  // 一个「永远抛」的实现能让 drift 循环全绿）。
+  // 注意 plan() 的 read 替身只覆盖 package.json 与 index.js，process.js 仍从夹具读；
+  // 因此这里必须传原始 rawIndex，不能落到默认参数以外的东西。
+  const accepted = plan(ENGINE_BASELINE)()
+  assert.equal(accepted.length, 2, '当前基线必须通过版本预检并给出两个文件的计划')
   // 编译产物里同一条 launch 段有 void 0 与 undefined 两种写法；A1 必须归一成同一份补丁产物。
   // 0.2.2-rc.1：第三实参是 this.controller.signal（不再有裸 signal），两处都要按新形态写。
   const reworded = rawIndex.replace(

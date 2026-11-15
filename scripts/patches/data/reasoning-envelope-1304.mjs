@@ -421,21 +421,99 @@ export function patchReasoningTransform(source) {
   return source
 }
 
+/**
+ * 0.2.2-rc.2 起 dsh-client-ui-chat/lib/client.js 是**紧凑单行** bundle（rc.1 是 5,784 行格式化文本，
+ * rc.2/rc.3 是 3 行、每行 4 万字符）。标识符没有改名混淆（blockIsVisible / inlineReasoning /
+ * assistant-step 全在），失配的只是换行与缩进。所以这里对两代形态各给一条锚，用**同一份语义**：
+ * 命中哪代用哪代，两代都命中或都不命中都判红（不静默跳过）。
+ *   - pretty：格式化文本，锚点带缩进与空格（rc.1 及源码构建）
+ *   - compact：单行 bundle，锚点抹掉所有空白（rc.2 / rc.3 及以后的压缩产物）
+ * 判据口径不变：注入的是「空摘要仍然保留一条正常推理披露」，四条锚各自仍是唯一命中。
+ */
+const UI_ANCHORS = [
+  // ① 空摘要不得 break（否则空 summary 的推理块整条消失）
+  {
+    label: 'empty summary break',
+    pretty: {
+      before: 'if (block.text.trim() === "") break;',
+      after: '// Empty summaries still own a normal reasoning disclosure (1304).',
+    },
+    compact: {
+      before: 'if(block.text.trim()===``)break;',
+      after: '/* Empty summaries still own a normal reasoning disclosure (1304). */',
+    },
+  },
+  // ② 可见性判据：reasoning 块无条件可见（空摘要也占一行披露）
+  {
+    label: 'blockIsVisible',
+    pretty: {
+      before: 'function blockIsVisible(block) {\n\t\t\tif (block === void 0 || block.kind === "tool-call") return false;',
+      after: 'function blockIsVisible(block) {\n\t\t\tif (block?.kind === "reasoning") return true;\n\t\t\tif (block === void 0 || block.kind === "tool-call") return false;',
+    },
+    compact: {
+      before: 'function blockIsVisible(block){if(block===void 0||block.kind===`tool-call`)return false;',
+      after: 'function blockIsVisible(block){if(block?.kind===`reasoning`)return true;if(block===void 0||block.kind===`tool-call`)return false;',
+    },
+  },
+  // ③ 流式 block-start：reasoning 起始也要算可见
+  {
+    label: 'block-start visibility',
+    pretty: {
+      before: 'if (chunk.type === "block-start") return chunk.blockType !== "text" && chunk.blockType !== "reasoning" && chunk.blockType !== "tool-call";',
+      after: 'if (chunk.type === "block-start") return chunk.blockType === "reasoning" || (chunk.blockType !== "text" && chunk.blockType !== "tool-call");',
+    },
+    compact: {
+      before: 'if(chunk.type===`block-start`)return chunk.blockType!==`text`&&chunk.blockType!==`reasoning`&&chunk.blockType!==`tool-call`;',
+      after: 'if(chunk.type===`block-start`)return chunk.blockType===`reasoning`||(chunk.blockType!==`text`&&chunk.blockType!==`tool-call`);',
+    },
+  },
+  // ④ 行内推理：只要有 reasoning 块就展开披露，不再要求非空正文
+  {
+    label: 'inlineReasoning',
+    pretty: {
+      before: 'const inlineReasoning = answer.blocks.some((block) => block.kind === "reasoning" && block.text.trim() !== "");',
+      after: 'const inlineReasoning = answer.blocks.some((block) => block.kind === "reasoning");',
+    },
+    compact: {
+      before: 'const inlineReasoning=answer.blocks.some(block=>block.kind===`reasoning`&&block.text.trim()!==``);',
+      after: 'const inlineReasoning=answer.blocks.some(block=>block.kind===`reasoning`);',
+    },
+  },
+  // ⑤ 过程行判据：assistant-step 只要有 reasoning 块就计入非回复过程
+  {
+    label: 'assistant-step reasoning',
+    pretty: {
+      before: 'return node.kind === "assistant-step" && node.data.blocks.some((block) => block.kind === "reasoning" && block.text.trim() !== "");',
+      after: 'return node.kind === "assistant-step" && node.data.blocks.some((block) => block.kind === "reasoning");',
+    },
+    compact: {
+      before: 'function reasoning(node){return node.kind===`assistant-step`&&node.data.blocks.some(block=>block.kind===`reasoning`&&block.text.trim()!==``)}',
+      after: 'function reasoning(node){return node.kind===`assistant-step`&&node.data.blocks.some(block=>block.kind===`reasoning`)}',
+    },
+  },
+]
+
+/** 单一形态施加：两条锚必须一命中一缺席（幂等），否则判漂移。 */
+function applyUiAnchor(source, anchor) {
+  const { before, after } = anchor
+  const hits = source.split(before).length - 1
+  const applied = source.split(after).length - 1
+  if (hits === 1 && applied === 0) return source.replace(before, after)
+  if (hits === 0 && applied === 1) return source
+  throw new Error(`reasoning-1304: UI contract drift (${anchor.label}: before=${hits}, after=${applied})`)
+}
+
 export function patchReasoningUi(source) {
-  let out = replace(source, 'if (block.text.trim() === "") break;',
-    '// Empty summaries still own a normal reasoning disclosure (1304).')
-  // Published and source-built bundles differ in indentation. Match these exact two
-  // statements with indentation ignored; still reject missing or duplicate semantic anchors.
-  const visible = /function blockIsVisible\(block\) \{\r?\n[\t ]*if \(block === void 0 \|\| block.kind === "tool-call"\) return false;/g
-  const matches = [...out.matchAll(visible)]
-  if (matches.length !== 1) throw new Error('reasoning-1304: UI visibility contract drift')
-  out = out.replace(visible, 'function blockIsVisible(block) {\n\t\t\tif (block?.kind === "reasoning") return true;\n\t\t\tif (block === void 0 || block.kind === "tool-call") return false;')
-  out = replace(out, 'if (chunk.type === "block-start") return chunk.blockType !== "text" && chunk.blockType !== "reasoning" && chunk.blockType !== "tool-call";',
-    'if (chunk.type === "block-start") return chunk.blockType === "reasoning" || (chunk.blockType !== "text" && chunk.blockType !== "tool-call");')
-  out = replace(out, 'const inlineReasoning = answer.blocks.some((block) => block.kind === "reasoning" && block.text.trim() !== "");',
-    'const inlineReasoning = answer.blocks.some((block) => block.kind === "reasoning");')
-  out = replace(out, 'return node.kind === "assistant-step" && node.data.blocks.some((block) => block.kind === "reasoning" && block.text.trim() !== "");',
-    'return node.kind === "assistant-step" && node.data.blocks.some((block) => block.kind === "reasoning");')
+  let out = source
+  for (const anchor of UI_ANCHORS) {
+    // 形态选择只看「before 或 after 在哪一代在场」：两代都不在场 = 上游真漂移，判红。
+    const prettyPresent = out.includes(anchor.pretty.before) || out.includes(anchor.pretty.after)
+    const compactPresent = out.includes(anchor.compact.before) || out.includes(anchor.compact.after)
+    if (prettyPresent === compactPresent) {
+      throw new Error(`reasoning-1304: UI visibility contract drift (${anchor.label}: pretty=${prettyPresent}, compact=${compactPresent})`)
+    }
+    out = applyUiAnchor(out, prettyPresent ? anchor.pretty : anchor.compact)
+  }
   return out
 }
 
@@ -455,8 +533,13 @@ const CONTRACTS = [
     'copilotAssistantParts(msg.content, assistantMsg)', 'copilotToolRuns(params)', 'sealedBlock.dshSealed = JSON.stringify'],
   // transform-messages：pi-ai 1.3.0 上游已自行丢弃跨模型可读思考，本补丁不再注入，故无契约 token。
   [],
-  ['// Empty summaries still own a normal reasoning disclosure (1304).', 'if (block?.kind === "reasoning") return true;',
-    'const inlineReasoning = answer.blocks.some((block) => block.kind === "reasoning");'],
+  // 形态无关的 marker 判据：同一个语义在两代 bundle 里字节不同（pretty 有空格/换行，compact 没有），
+  // 所以下面每个元素都可以是**任一形态**的数组——至少命中一个即算该语义在场。
+  [['// Empty summaries still own a normal reasoning disclosure (1304).',
+    '/* Empty summaries still own a normal reasoning disclosure (1304). */'],
+    ['block?.kind===`reasoning`)return true;', 'block?.kind === "reasoning") return true;'],
+    ['answer.blocks.some(block=>block.kind===`reasoning`)', 'answer.blocks.some((block) => block.kind === "reasoning")'],
+    ['chunk.blockType===`reasoning`||', 'chunk.blockType === "reasoning" ||']],
 ]
 
 /** Exact anchors, no version whitelist: compatible upgrades work, drift blocks injection atomically. */
@@ -464,7 +547,10 @@ export function planReasoning(read) {
   return REASONING_FILES.map((file, index) => {
     const before = read(file)
     if (before.includes('// ' + REASONING_MARKER)) {
-      if (!CONTRACTS[index].every(token => before.includes(token)))
+      // 契约 token 允许是数组：同一语义在不同 bundle 形态（pretty / compact）里字节不同，
+      // 数组内**任一**在场即算该语义在场；字符串元素仍是「必须逐字符在场」。
+      const present = token => Array.isArray(token) ? token.some(one => before.includes(one)) : before.includes(token)
+      if (!CONTRACTS[index].every(present))
         throw new Error('reasoning-1304: incomplete installed patch: ' + file)
       return { file, before, after: before }
     }

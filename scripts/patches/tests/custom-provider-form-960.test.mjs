@@ -66,6 +66,9 @@ export const getBuiltinModels = (id) => (id === provider.id ? provider.models : 
 export const getAllBuiltinModels = (id) => (id === provider.id ? provider.models : [])
 `,
     '@earendil-works/pi-ai/api/anthropic-messages.lazy': 'export const anthropicMessagesApi = {}',
+    // 0.2.2-rc.3 起适配器多导入一条 google-generative-ai.lazy（pi-ai 1.3.0 的第四家 API）。
+    // 替身必须与真产物的导入面一一对应：漏一条就是 ERR_MODULE_NOT_FOUND，而不是判据变红。
+    '@earendil-works/pi-ai/api/google-generative-ai.lazy': 'export const googleGenerativeAIApi = {}',
     '@earendil-works/pi-ai/api/openai-completions.lazy': 'export const openAICompletionsApi = {}',
     '@earendil-works/pi-ai/api/openai-responses.lazy': 'export const openAIResponsesApi = {}',
     '@earendil-works/pi-ai/utils/overflow': 'export const isContextOverflow = () => false',
@@ -271,20 +274,23 @@ test('B: 初态就有一行模型输入，占位空行不进采纳结果', () =>
   assert.throws(() => patchCustomFirstModelRow('no anchor here'), /锚点未命中/)
   new Script(patched, { filename: 'dsh-client-ui-settings-models/client.js' })
   assert.match(patched, /useState\)\(\[\{ id: "" \}\]\)/, '初值必须给出一行')
-  assert.match(patched, /textOf\(model, "id"\)\.trim\(\)\.length > 0/, '采纳必须过滤占位空行')
-  assert.match(patched, /if \(id\.trim\(\)\.length === 0 \|\| listed\.has\(id\) && !isPicked\(id\)\) removedRows\.add\(at\)/, '候选采纳必须通过 removedRows 删除空行及其编辑状态')
+  // 断言按**紧凑形态**写（0.2.2-rc.2 起客户端 bundle 被压成单行，空格不参与语义）：
+  // 过滤谓词与 removedRows 删除这两句在真产物里就是无空格形态。
+  assert.match(patched, /models\.filter\(model=>textOf\$1\(model,`id`\)\.trim\(\)\.length>0\)/, '采纳必须过滤占位空行')
+  assert.match(patched, /if\(id\.trim\(\)\.length===0\|\|listed\.has\(id\)&&!isPicked\(id\)\)removedRows\.add\(at\)/, '候选采纳必须通过 removedRows 删除空行及其编辑状态')
 })
 
 test('B: 可升级旧版完整补丁，仍拒绝半补丁与采纳锚点漂移', () => {
   const fixed = patchCustomFirstModelRow(SM())
-  const pickerNew = '\t\t\t\t/* dsh-mobile custom first model row (#960): 采纳时删除空占位，并同步清理该行编辑状态。 */\n'
-    + '\t\t\t\tif (id.trim().length === 0 || listed.has(id) && !isPicked(id)) removedRows.add(at);'
-  const pickerOld = '\t\t\t\tif (listed.has(id) && !isPicked(id)) removedRows.add(at);'
+  // 形态按 0.2.2-rc.3 的紧凑单行写（与 apply-patches 侧同一份真字节）。
+  const pickerNew = '/* dsh-mobile custom first model row (#960): 采纳时删除空占位，并同步清理该行编辑状态。 */'
+    + 'if(id.trim().length===0||listed.has(id)&&!isPicked(id))removedRows.add(at)'
+  const pickerOld = 'if(listed.has(id)&&!isPicked(id))removedRows.add(at)'
   const legacy = fixed.replace(pickerNew, pickerOld)
   assert.notEqual(legacy, fixed)
   assert.equal(hasCustomFirstModelRow(legacy), false, '旧补丁不能再冒充采纳完整')
   assert.equal(patchCustomFirstModelRow(legacy), fixed)
-  const partial = legacy.replace('models.filter((model) => textOf(model, "id").trim().length > 0)', 'models')
+  const partial = legacy.replace('models.filter(model=>textOf$1(model,`id`).trim().length>0)', 'models')
   assert.throws(() => patchCustomFirstModelRow(partial), /半补丁/)
   assert.throws(() => patchCustomFirstModelRow(legacy.replace(pickerOld, 'picker changed upstream')), /采纳锚点/)
 })
@@ -304,17 +310,19 @@ test('C: 每个目录区 label 唯一且带归属，隐藏面板移出无障碍�
   assert.equal(patchModelCatalogSectionLabels(patched), patched, '重复施加必须字节不变')
   assert.throws(() => patchModelCatalogSectionLabels('no anchor here'), /锚点未命中/)
   new Script(patched, { filename: 'dsh-client-ui-settings-models/client.js' })
-  assert.match(patched, /"data-dsh-model-catalog"/, '每个目录区必须带归属标识')
-  assert.match(patched, /"aria-hidden": mode !== "catalog"/, '隐藏面板必须移出无障碍树')
-  assert.equal(/"aria-label": t\("models"\),/.test(patched), false, 'label 不能再是裸的共用词条')
+  // 断言按紧凑形态写（0.2.2-rc.2 起客户端 bundle 被压成单行，空格与双引号都不参与语义：
+  // 真产物里就是 "data-dsh-model-catalog":probe.provider===void 0?"custom":probe.provider）。
+  assert.match(patched, /"data-dsh-model-catalog":probe\.provider===void 0\?"custom":probe\.provider,/, '每个目录区必须带归属标识')
+  assert.match(patched, /"aria-hidden":mode!==`catalog`,/, '隐藏面板必须移出无障碍树')
+  assert.equal(/"aria-label":t\(`models`\),/.test(patched), false, 'label 不能再是裸的共用词条')
 })
 
 test('C 负控：退回裸 t("models") 后，三个目录区 label 完全相同', () => {
   const patched = patchModelCatalogSectionLabels(SM())
   const broken = patched
-    .replace('"aria-label": t("models") + " · " + (probe.provider === void 0 ? t("customTag") : probe.provider),', '"aria-label": t("models"),')
-    .replace('\t\t\t\t"data-dsh-model-catalog": probe.provider === void 0 ? "custom" : probe.provider,\n', '')
+    .replace('"aria-label":t(`models`)+" · "+(probe.provider===void 0?t(`customTag`):probe.provider),', '"aria-label":t(`models`),')
+    .replace('"data-dsh-model-catalog":probe.provider===void 0?"custom":probe.provider,', '')
   assert.notEqual(broken, patched, '负控必须真的改到字节')
-  assert.equal(/"aria-label": t\("models"\),/.test(broken), true, '负控：label 退回裸共用词条')
+  assert.equal(/"aria-label":t\(`models`\),/.test(broken), true, '负控：label 退回裸共用词条')
   assert.equal(broken.includes('"data-dsh-model-catalog"'), false, '负控：归属标识消失')
 })
