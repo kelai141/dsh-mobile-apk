@@ -1,0 +1,285 @@
+# 构建ARM 64调试包 — 云端一键产出一个可直接装机的调试包（dev）。
+#
+# 产物形态（由 scripts/build-apk-debug.mjs 保证，不是本文件拼出来的）：
+#   versionName = <当前树 gradle 的 versionName 基线>-<随机 8 位 ASCII 字母数字>-dev
+#                 例：0.15.0-x7K2mQ9z-dev
+#   versionCode = 当前已发布 release 绑定的 versionCode + 1
+#                 （绑定值 = 该 release tag 那份 app/build.gradle.kts 的 versionCode 默认值；
+#                  v0.14.11 绑 70 ⇒ 调试包 71，故可覆盖安装已发布版）
+#   Gradle 任务 = :app:assembleDebug（application-debuggable 是本产物的**期望值**）
+#
+# 为什么另起两条 workflow 而不是给 build-apk.yml 加个开关：
+#   build-apk.yml 走发布链（assembleRelease + 产物形态门禁「不得含 application-debuggable」），
+#   那条判据与调试包要的东西方向相反。塞进同一个 workflow 的同一组 if 里，最可能的结局是某次
+#   改动把发布链的形态门禁绕过去——那正是 0.14.9 的事故形态（发布产物就是 debug 变体）。分成
+#   两条之后，发布链的判据一行都不用动，调试链的判据也能单独被审。
+#
+# 与 build-apk.yml 的**共享**部分（刻意不复制实现，只复制准备步骤）：
+#   快照构建（build-snapshot-013.mjs）、插件注入与注入后门禁（build-apk.mjs --emit-snapshot）、
+#   终端组装阶段（build-apk-engine.mjs 的 assembleApk）、签名门禁（check-apk-signatures.mjs）
+#   全部复用同一份脚本。「调试包里的插件树」与「发布包里的插件树」因此是同一条装配路径。
+#
+# 门禁（本链自己的判据，任一不满足即不出包）：
+#   ① elf-check：快照内 usr/bin/node 的 e_machine 必须与 --abi 一致。错 ABI 的包能装上、能
+#      am start -W 报 Status: ok，引擎却 CANNOT LINK EXECUTABLE 起不来（AGENTS.md §6 雷点 1）。
+#   ② check-snapshot-packages：快照与 engine-overlay/插件登记对账（仅「本 commit 构建的快照」档；
+#      已发布 release 的快照必然早于 main 的登记，该判据在那档只会假红，脚本会打印理由）。
+#   ③ check-apk-signatures：v1/v2/v3 与仓库 keystore 身份（与发布链同一份锚，不自证）。
+#   ④ 产物形态**反向断言**：badging 必须含 application-debuggable，且 versionName/versionCode/包名
+#      逐字等于本次声明值。拿不到 badging（无 aapt2 / 非 0 退出 / 空输出）一律判红，不得当成通过。
+#   ⑤ -PnativeControlAbis 由 --abi 单点派生（arm64 -> arm64-v8a），本文件不写第二份 ABI 表。
+#
+# 未做设备验证：本链只产包，不装设备。装机后的验收按 AGENTS.md §2.1 三层自行执行。
+name: 构建ARM 64调试包
+
+on:
+  # 只保留手动触发：调试包带随机段，任何 push 触发都会让「同一 commit 每次编出不同版本号」
+  # 变成常态，也会与发布链抢 runner。
+  workflow_dispatch:
+    inputs:
+      suffix:
+        description: '指定 8 位随机段（留空 = 自动随机；仅在需要复现同名产物时填）'
+        type: string
+        default: ''
+      version_code:
+        description: '指定 versionCode（留空 = release 绑定值 + 1）'
+        type: string
+        default: ''
+      snapshot_source:
+        description: '快照来源：tree = 本 commit 从源构建（默认）；release = 取已发布 release 的快照'
+        type: choice
+        options: [tree, release]
+        default: tree
+      release_tag:
+        description: '版本号绑定与快照来源的 release 标签（留空 = 最新已发布 release）'
+        type: string
+        default: ''
+      publish:
+        description: '构建成功后把 APK 附到该 Release（默认只上传 Actions 产物）'
+        type: boolean
+        default: false
+
+concurrency:
+  # 同一 ABI 同时只跑一条：两条链都在写 out/ 与 .deploy-tmp/，并行会互相踩产物。
+  group: debug-apk-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # 与 build-apk.yml 同量级：从源构建快照是重活（历史实测 23-47 分钟），调试链多一段注入 + Gradle，
+    # 取 90 分钟留足余量；平台默认 360 分钟会让卡死的一次白烧 6 小时 runner。
+    timeout-minutes: 90
+    env:
+      # build-apk.mjs / build-apk-debug.mjs 依赖本仓库顶层 scripts/plugins/vendor/base。
+      DSH_APK_DIR: ${{ github.workspace }}
+    outputs:
+      version_name: ${{ steps.build.outputs.version_name }}
+      version_code: ${{ steps.build.outputs.version_code }}
+      release_tag: ${{ steps.build.outputs.release_tag }}
+      artifact_name: ${{ steps.build.outputs.artifact_name }}
+      apk_path: ${{ steps.build.outputs.apk_path }}
+      apk_sha256: ${{ steps.build.outputs.apk_sha256 }}
+    steps:
+      - name: 检出本仓库（不含 LFS 归档；底座下方按需拉取）
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          # fetch-depth: 0 + tag：versionCode 的绑定值来自 release tag 那份 app/build.gradle.kts，
+          # 浅检出或没有 tag 都会让「绑定值」退化成猜测。
+          fetch-depth: 0
+          lfs: false
+      - name: 缓存底座归档（命中则跳过 LFS 拉取）
+        id: lfs-base
+        uses: actions/cache@v4
+        with:
+          path: base
+          key: lfsbase-arm64-${{ hashFiles('base/base-dsh.tar.xz', 'base/base-usr-arm64.tar.xz') }}
+      - name: 按需拉取 LFS 底座（仅本 ABI，未命中缓存时）
+        if: steps.lfs-base.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git lfs install --local
+          git lfs pull --include="base/base-usr-arm64.tar.xz,base/base-dsh.tar.xz"
+      - name: 断言底座确实已落地（拒绝 LFS pointer 冒充文件）
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/require-lfs-materialized.mjs "base/base-usr-arm64.tar.xz" "base/base-dsh.tar.xz"
+
+      - name: 准备运行时（node 24）
+        uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: python -> python3（脚本用 python）
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y python3 python-is-python3 || sudo ln -sf /usr/bin/python3 /usr/bin/python
+          python --version
+      - name: 准备 Java（gradle 需要）
+        uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+
+      - name: 准备 Rust 与 Android NDK（原生库的必需件，版本取自仓内真源）
+        env:
+          ABI: arm64
+        run: |
+          set -euo pipefail
+          # 版本一律读 native/phone-control-core/build-config.json（--print-facts 就是它的读端）：
+          # 把 rustc/NDK/target 抄一份进本文件，改动时就会表现为「runner 装了没人用的 target，
+          # 真正要的那个缺席」，而报错点落在 cargo 里，离真因很远。
+          FACTS="$(node scripts/build-apk-debug.mjs --abi "$ABI" --print-facts)"
+          export FACTS
+          RUSTC_VERSION="$(node -p 'JSON.parse(process.env.FACTS).rustcVersion')"
+          NDK_VERSION="$(node -p 'JSON.parse(process.env.FACTS).ndkVersion')"
+          RUST_TARGET="$(node -p 'JSON.parse(process.env.FACTS).rustTarget')"
+          echo "rustc=$RUSTC_VERSION ndk=$NDK_VERSION target=$RUST_TARGET"
+          rustup toolchain install "$RUSTC_VERSION" --profile minimal --target "$RUST_TARGET"
+          rustup run "$RUSTC_VERSION" rustc --version
+          # NDK 已预装时跳过 sdkmanager（省 1-2 分钟）；缺了才装。
+          # 刻意不写 `yes | sdkmanager`：set -o pipefail 下 yes 被 SIGPIPE 终止会返回 141，
+          # 整条管道判失败 —— 装了却报错，报错点还落在 sdkmanager 之外。runner 上许可早已接受。
+          NDK_READELF="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          if [[ ! -x "$NDK_READELF" ]]; then
+            sudo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION"
+          fi
+          test -x "$NDK_READELF"
+
+      - name: 检出合同钉定的上游源码供打包门禁核对
+        shell: bash
+        run: |
+          set -euo pipefail
+          UPSTREAM=$(node -p 'require("./scripts/contract.json").upstreamRepo')
+          COMMIT=$(node -p 'require("./scripts/contract.json").upstream.commit')
+          TAG=$(node -p 'require("./scripts/contract.json").upstream.tag')
+          test -n "$COMMIT" && test -n "$TAG"
+          if [[ ! -d "$UPSTREAM/.git" ]]; then
+            git clone --filter=blob:none --single-branch --branch "$TAG" --depth=1 \
+              https://github.com/deepseek-ai/deepseek-harness.git "$UPSTREAM"
+          fi
+          test "$(git -C "$UPSTREAM" rev-parse HEAD)" = "$COMMIT"
+          node scripts/check-dead-tokens.mjs --require
+
+      - name: 生成本次构建的 Kotlin 单测结果
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          # 注入链里的 check-kotlin-test-count 要求结果在场且新鲜：先跑一遍单测是它的前置条件，
+          # 不是额外加的门禁。
+          ./gradlew :app:testDebugUnitTest --no-daemon --console=plain
+
+      - name: 准备并构建插件（统一清单、锁解析与单次构建）
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 清单保证 termux 先于 linux-env；host-web-compat 使用登记的发布产物。
+          mapfile -t plugin_dirs < <(node -e "const fs=require('node:fs'); const {dirs}=require('./scripts/plugin-dirs.json'); console.log(dirs.filter(d=>JSON.parse(fs.readFileSync(d+'/package.json','utf8')).scripts?.build).join('\n'))")
+          test "${#plugin_dirs[@]}" -gt 0
+          for d in "${plugin_dirs[@]}"; do
+            node scripts/source-build/install-project-dependencies.mjs "$d" .deploy-tmp/source-build/plugin-lock-resolution-build.json
+            (cd "$d" && npm run build)
+          done
+
+      - name: 从本 commit 构建快照（snapshot_source=tree 时）
+        if: inputs.snapshot_source != 'release'
+        shell: bash
+        env:
+          ABI: arm64
+        run: |
+          set -euo pipefail
+          if [ "$ABI" = "arm64" ]; then bdir="arm64-base"; else bdir="x64-base"; fi
+          mkdir -p ".deploy-tmp/${bdir}"
+          [ -f "base/base-usr-${ABI}.tar.xz" ] || { echo "::error::缺 base/base-usr-${ABI}.tar.xz"; exit 1; }
+          cp "base/base-usr-${ABI}.tar.xz" ".deploy-tmp/${bdir}/base-usr.tar.xz"
+          [ -f "base/base-dsh.tar.xz" ] && cp "base/base-dsh.tar.xz" ".deploy-tmp/${bdir}/base-dsh.tar.xz"
+          du -sh ".deploy-tmp/${bdir}"
+          node scripts/build-snapshot-013.mjs "$ABI"
+
+      - name: 构建调试包（注入 + 门禁 + assembleDebug + 反向形态断言）
+        id: build
+        shell: bash
+        # issue #1614 的纪律：workflow_dispatch 的自由文本一律走 env，run 里只引用 "$VAR"。
+        # 内插进 run 会被 shell 二次求值（$(id)、反引号、引号都能逃出引号，$ 会被吃掉）。
+        env:
+          ABI: arm64
+          INPUT_SUFFIX: ${{ inputs.suffix }}
+          INPUT_VERSION_CODE: ${{ inputs.version_code }}
+          INPUT_SNAPSHOT_SOURCE: ${{ inputs.snapshot_source }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          # gh release download/view 需要令牌；写在 env 而不是 run 的内联字符串里。
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          args=(--abi "$ABI")
+          if [[ "$INPUT_SNAPSHOT_SOURCE" == "release" ]]; then
+            if [[ -n "$INPUT_RELEASE_TAG" ]]; then
+              args+=(--from-release "$INPUT_RELEASE_TAG")
+            else
+              args+=(--from-release)
+            fi
+          fi
+          if [[ -n "$INPUT_RELEASE_TAG" ]]; then args+=(--release-tag "$INPUT_RELEASE_TAG"); fi
+          if [[ -n "$INPUT_SUFFIX" ]]; then args+=(--suffix "$INPUT_SUFFIX"); fi
+          if [[ -n "$INPUT_VERSION_CODE" ]]; then args+=(--version-code "$INPUT_VERSION_CODE"); fi
+          node scripts/build-apk-debug.mjs "${args[@]}"
+
+      - name: 复核最终产物（签名 + 摘要）
+        shell: bash
+        env:
+          APK: ${{ steps.build.outputs.apk_path }}
+          APK_SHA256: ${{ steps.build.outputs.apk_sha256 }}
+        run: |
+          set -euo pipefail
+          test -f "$APK" || { echo "::error::产物不在场：$APK"; exit 1; }
+          ls -l "$APK"
+          # 摘要与脚本自报值对账：上传的字节必须就是被验过的那份字节。
+          actual="$(sha256sum "$APK" | cut -d' ' -f1)"
+          test "$actual" = "$APK_SHA256" || { echo "::error::APK 摘要与构建期声明不一致：$actual vs $APK_SHA256"; exit 1; }
+          node scripts/check-apk-signatures.mjs --self-test
+          # keystore 凭据必须显式声明（issue #1031：门禁不再回落到 androiddebugkey/android）。
+          node scripts/check-apk-signatures.mjs --apk "$APK" --keystore keystore/debug.keystore \
+            --keystore-alias androiddebugkey --keystore-pass android
+
+      - name: 上传调试包产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk-arm64-${{ steps.build.outputs.version_name }}
+          path: |
+            ${{ steps.build.outputs.apk_path }}
+            ${{ steps.build.outputs.report_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: build
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # 只有这一步需要写权限；build job 保持 contents: read。
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: debug-apk-arm64-${{ needs.build.outputs.version_name }}
+          path: dist
+      - name: 附到 Release（调试包，不被应用内更新当成正式版）
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+          FALLBACK_TAG: ${{ needs.build.outputs.release_tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="${TAG:-${FALLBACK_TAG}}"
+          test -n "$tag" || { echo "::error::解析不到要附着的 Release 标签"; exit 1; }
+          ls -l dist
+          # 资产名形如 dsh-mobile-apk-v0.15.0-x7K2mQ9z-dev-arm64.apk：多出 -<段>-dev 一段，
+          # UpdateChecker.assetNameCandidates 产出的 dsh-mobile-apk-v<tag>-<abi>.apk 不会命中它，
+          # 故应用内更新不会把调试包当正式版推给任何设备。
+          gh release upload "$tag" dist/*.apk --clobber --repo "$REPO"
