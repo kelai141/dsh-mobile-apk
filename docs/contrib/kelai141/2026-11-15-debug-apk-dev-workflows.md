@@ -35,3 +35,19 @@
 - `node scripts/check-workflow-input-injection.mjs`（15 份 workflow PASS）、`check-release-gates`（48 项声明门禁）、`check-retired-plugins`、`check-build-chain-abort` 全 PASS。
 - `check-code-map.mjs`：在我改动的文件面上**零新增失败**（干净检出里 pristine HEAD 15 项 → 加改动 15 项，逐项 diff 为空）。
 - **未做设备验证**：本链只产包不装设备。首次真机跑装后按 AGENTS.md §2.1 三层自行验收。
+
+## 顺带修掉的两处既有门禁漂移（调试链第一次跑通前必须清）
+
+`snapshot_source=tree` 档要跑发布链的 `build-apk.mjs --emit-snapshot`，而它的门禁集里有 `check-code-map.mjs`。当时的实况：
+
+```
+CHECK-CODE-MAP FAILED（15 项）：全部是 scripts/build-apk-013.ps1 的 bad-anchor-content
+```
+
+`build-apk-013.ps1` 在某个 commit 里整体上移了 4 行（`:43→:47`、`:148→:152`、`:181→:185`、`:189→:193`、`:213→:217`、`:218→:222`、`:236→:240`、`:238→:242`、`:245→:249`、`:429→:433`、`:514→:518`、`:618→:622`、`:739→:745`），而执行地图里的行号锚点没跟着动。判据是「去缩进后的规范化前缀」：行号错位即 `bad-anchor-content`，与预期文本对不对无关。
+
+另一处是 `[uncovered] 未被任何查点覆盖：scripts/verify-sidebar-drawer.mjs` —— 那个脚本进了仓却没在执行地图的覆盖账本里登记。
+
+两处都不是本改动造成的（干净检出 `origin/main` 上同样 15 项 + 1 项），但它们是 `tree` 档的硬阻断：不清掉，调试链的「从本 commit 构建快照」这条路永远跑不到 Gradle。修法是照实重钉锚点 + 把 `verify-sidebar-drawer.mjs` 补进账本，判据本身一字未改。复验：`check-code-map.mjs` -> `PASSED（覆盖完整、锚点有效、编号一致）`。
+
+**为什么值得单独记一笔**：这两处漂移在 `build-apk.yml`（云端发布链）里也会撞，只是那条链最近没被跑到。看到「门禁红但预期文本明明在文件里」时，先确认是**行号**错位而不是内容缺失 —— 两者的报错长得一样。
