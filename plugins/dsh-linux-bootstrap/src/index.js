@@ -447,6 +447,13 @@ export function createMobileBootstrap(options = {}) {
         }
       }
       if (!enable) throw new Error('Runtime plugin activation requires explicit confirmation')
+      // Record the manifest this install actually used, before activation touches
+      // anything. The settings page prepares assets from the *persisted* copy
+      // (GET /manifest reads state, never the network), so a manifest that only
+      // lived in memory would make the next attempt prepare one release's assets
+      // while install asks for another's sha256 — a mismatch the host rejects as
+      // "no prepared asset", with no hint that the two sides disagree.
+      state.availableManifest = publicManifest(manifest)
       // Once the host has loaded the plugin, a later failure (manager
       // provisioning, health status, or persistence) rolls the host back.
       // Keep the in-memory view at the pre-activation value as well, so a

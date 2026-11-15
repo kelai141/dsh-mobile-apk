@@ -246,6 +246,17 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
       if (!reinstall) {
         setPhase('manifest')
         setProgress({ stage: 'manifest' })
+        // Refresh the persisted manifest first: GET /manifest reads state and
+        // never touches the network, so a release published since the last check
+        // would otherwise leave us preparing one version's assets while the
+        // engine installs another's. A failure here is not fatal — the cached
+        // manifest is still installable, and install() has its own fallback.
+        try {
+          await checkForUpdates()
+        } catch {
+          // Keep going on the persisted manifest.
+        }
+        await refresh()
         const manifest = await fetchManifest()
         const { runtime, specs } = assetsFor(manifest, {
           runtimeId: selectedRuntime !== '' ? selectedRuntime : undefined,
