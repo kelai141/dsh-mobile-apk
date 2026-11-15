@@ -378,9 +378,23 @@ export interface RegisterOptions {
 }
 
 /** 注册两条 exact 路由：取活（POST，带令牌）与回填（POST，带令牌）。 */
-export function registerControlRoutes(webServer: { register(route: unknown): void }, options: RegisterOptions): void {
+/**
+ * 注册无障碍控制队列的两条 exact 路由。
+ *
+ * issue #1595：**返回一个 disposer**，由调用方挂在 `ctx.effect` 上。此前返回 void 且丢弃了
+ * `webServer.register` 的返回值 ⇒ 插件卸载（HMR / 禁用）后两条路由仍留在 webServer 的路由表里：
+ * 卸载后照旧应答（壳侧继续从一条「已停的插件」取活/回填），再装载时同名二次注册抛
+ * duplicate exact route，插件整条挂掉。
+ *
+ * @returns 逆序摘除两条路由的 disposer；调用方可直接 `return` 给 `ctx.effect`。
+ */
+export function registerControlRoutes(webServer: { register(route: unknown): void }, options: RegisterOptions): () => void {
   const { queue, token, logger } = options
-  webServer.register({
+  const registered: Array<() => void> = []
+  const keep = (disposer: unknown): void => {
+    if (typeof disposer === 'function') registered.push(disposer as () => void)
+  }
+  keep(webServer.register({
     kind: 'exact',
     path: '/api/android/ui/pending',
     handler: async (req: RouteRequest, res: RouteResponse) => {
@@ -399,8 +413,8 @@ export function registerControlRoutes(webServer: { register(route: unknown): voi
       const request = await queue.waitForWork(Number.isFinite(Number(body.waitMs)) ? Math.min(Math.max(Number(body.waitMs), 0), 30_000) : 5000)
       sendJson(res, 200, { ok: true, req: request, pollHintMs: queue.pollHintMs })
     },
-  })
-  webServer.register({
+  }))
+  keep(webServer.register({
     kind: 'exact',
     path: '/api/android/ui/result',
     handler: async (req: RouteRequest, res: RouteResponse) => {
@@ -434,5 +448,7 @@ export function registerControlRoutes(webServer: { register(route: unknown): voi
       if (!accepted) logger?.warn?.(`control/result: rejected (409, reqId=${reqId})`)
       sendJson(res, accepted ? 200 : 409, { ok: accepted, reason: accepted ? 'settled' : 'unknown-or-stale-reqId' })
     },
-  })
+  }))
+  // 逆序摘除（后注册的先摘），与 cordis 的 effect 卸载时序一致。
+  return () => { for (let i = registered.length - 1; i >= 0; i -= 1) registered[i]() }
 }

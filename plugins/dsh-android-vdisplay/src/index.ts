@@ -413,7 +413,8 @@ export function apply(ctx: Context): void {
   // "状态源不可达 → blocked"，不影响引擎启动，也不假装可用。
   // 可选服务一律走 ctx.get（不 inject）：属性访问 ctx.webServer 在未声明 inject 时会抛
   // cannot get property "webServer" without inject——与 tools 同一条 cordis 规则（坑 82）。
-  const wsvc = ctx.get('webServer') as { register(r: unknown): void } | undefined
+  // `register` 返回 disposer（真 WebServer 返回 unsubscribe）；如实声明返回类型才能交给 ctx.effect（#1595）。
+  const wsvc = ctx.get('webServer') as { register(r: unknown): (() => void) | undefined } | undefined
   if (!wsvc) {
     ctx.logger?.('dsh-android-vdisplay')?.warn?.('webServer 服务缺席——状态端点未注册（面板将显示 blocked）')
     return
@@ -425,7 +426,10 @@ export function apply(ctx: Context): void {
       return undefined
     }
   })()
-  wsvc.register({
+  // issue #1595：注册必须取 `ctx.effect` 的返回，否则插件卸载（HMR / 禁用）后旧 handler 仍留在
+  // webServer 路由表里——卸载后照旧应答（状态面报旧数据），再装载时同名 (kind, path) 二次注册
+  // 触发 webserver 的 duplicate exact route，插件整条挂掉。
+  ctx.effect?.(() => wsvc.register({
     kind: 'exact',
     path: VD_STATUS_PATH,
     handler: async (req: WsReq, res: WsRes) => {
@@ -446,5 +450,5 @@ export function apply(ctx: Context): void {
       // 缓存由真正该走队列的入口填充（android_vdisplay_status 工具 / 建屏 / 任意 vd* op 的回执）。
       sendJson(res, 200, readVdCachedSnapshot(faceOf()))
     },
-  })
+  }) ?? (() => {}))
 }

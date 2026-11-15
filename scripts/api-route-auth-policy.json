@@ -406,8 +406,8 @@
       "registration": "path: VD_STATUS_PATH",
       "endpointSource": "plugins/dsh-android-vdisplay/src/status.ts",
       "access": "public",
-      "publicResponseMarker": "sendJson(res, 200, await readVdToolSnapshot(faceOf()))",
-      "rationale": "Only fail-closed VirtualDisplay readiness metadata is returned. It contains no pixels, UI tree, input, task command, shell output, path, or credential."
+      "publicResponseMarker": "sendJson(res, 200, readVdCachedSnapshot(faceOf()))",
+      "rationale": "Only fail-closed VirtualDisplay readiness metadata is read from the cached receipt of a previous vdInfo settle (issue #1604: the route never drives the single-slot control queue, so an unauthenticated GET cannot make real tool calls fail). It contains no pixels, UI tree, input, task command, shell output, path, or credential."
     },
     {
       "id": "runtime-cache-scan",

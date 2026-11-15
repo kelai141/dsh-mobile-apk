@@ -2432,7 +2432,9 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
   // 状态端点（浏览端面/设置页查询与展示）。**只读**：无任何写面——授权变更经
   // window.androidBridge.setAdbAllow/setAdbPair/revokeAdbPair 由壳侧原生 AdbState 执行
   // （Shizuku 对照：被提权方不得自改授权；引擎侧不设 POST 写端点）。
-  const wsvc = (ctx as unknown as { webServer?: { register(r: unknown): void } }).webServer
+  // `register` 返回 disposer（真 WebServer 返回 unsubscribe）；这里如实声明返回类型，
+  // 才能把它交给 `ctx.effect` 作为卸载动作（#1595）。
+  const wsvc = (ctx as unknown as { webServer?: { register(r: unknown): (() => void) | undefined } }).webServer
   if (wsvc) {
     // review C12：公开只读状态路由补回环栅栏（connection 的 Host/Origin 判定优先；缺服务时退化为回环白名单）。
     const publicRouteConnection = (() => {
@@ -2442,7 +2444,13 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
         return undefined
       }
     })()
-    wsvc.register({
+    // issue #1595：路由注册必须取 `ctx.effect` 的返回（disposer），否则插件卸载（HMR 热重载 /
+    // 禁用）之后旧 handler 仍留在 webServer 的路由表里，有两种表现：
+    //   · 卸载后路由照样应答——用户以为插件已停，状态面却还在报旧数据；
+    //   · 再装载时同名 (kind, path) 二次注册 → webserver 抛 duplicate exact route，插件整条挂掉。
+    // 兜底 `?? (() => {})`：老 WebServer 可能不返回 disposer。那种情况退化成「没有可摘的东西」，
+    // 而不是让 ctx.effect 收到 undefined 直接崩——卸载纪律的缺口不该变成新的运行时异常。
+    ctx.effect?.(() => wsvc.register({
       kind: 'exact',
       path: '/api/android/privilege/status',
       handler: async (req: WsReq, res: WsRes) => {
@@ -2471,12 +2479,13 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
         // 这比「任何本机应用都能让工具调用失败」便宜得多，且三态语义本来就是为了不把未知当未就绪。
         sendJson(res, 200, buildPrivilegeStatusPayload(svc, controlToken() !== undefined))
       },
-    })
+    }) ?? (() => {}))
     // 0.13.5 W4：无障碍控制队列两条 exact 路由（自带共享令牌；壳侧轮询取活/回填）。
-    registerControlRoutes(wsvc, {
+    // #1595：同一纪律——三条 exact 路由的注册都取 effect 的返回，卸载即成组摘掉。
+    ctx.effect?.(() => registerControlRoutes(wsvc, {
       queue: controlQueue,
       token: controlToken,
       logger: ctx.logger?.('dsh-android-bridge'),
-    })
+    }))
   }
 }
