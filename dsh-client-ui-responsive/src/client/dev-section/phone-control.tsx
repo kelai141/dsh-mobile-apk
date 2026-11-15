@@ -1217,6 +1217,19 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
     >{message}</p>
   )
 
+  /**
+   * 一行「手机控制」入口。
+   *
+   * 真因（用户实报 C：右侧状态 + 箭头那块点不动）：旧结构是 `<div class="dsh-pc-row">` 里放一个
+   * `<button class="dsh-pc-row-main">`（只装左侧标题/说明）+ 一个纯展示的 `<span class="dsh-pc-side">`
+   * （状态文案 + 箭头）。**可点区域就是那个 button 的盒子**，右侧那半截根本不在命中面上——它不是被
+   * 谁挡住了，而是从来就不是控件。所以修法不是「给右侧补一个 click」（那会变成同一行两个命中面，
+   * 中间还有一段仍然点不动），而是**把整行收敛成一个按钮**：整块都是命中面，一次语义、一个焦点。
+   *
+   * 副作用与取舍：旧结构允许在行内嵌一个次级按钮（inline 动作），而按钮不能嵌套按钮。该能力
+   * 在本文件里**从未有过调用点**（`inlineLabel/onInline` 只有定义），故随本次收敛一并删除，
+   * 需要行内次要动作时另起一行或放在右侧之外的独立控件里。
+   */
   const row = (
     title: string,
     description: string,
@@ -1224,23 +1237,20 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
     action: () => void,
     options: {
       titleId?: string
-      inlineLabel?: string
-      inlineDisabled?: boolean
-      onInline?: () => void
       unreadable?: boolean
       dataCode?: string
     } = {},
   ) => (
-    <div className="dsh-pc-row">
-      <button
-        type="button"
-        className="dsh-pc-row-main"
-        onClick={action}
-        {...(options.titleId === undefined ? {} : { id: options.titleId })}
-      >
+    <button
+      type="button"
+      className="dsh-pc-row"
+      onClick={action}
+      {...(options.titleId === undefined ? {} : { id: options.titleId })}
+    >
+      <span className="dsh-pc-row-main">
         <span className="dsh-gs-title">{title}</span>
         <span className="dsh-gs-desc">{description}</span>
-      </button>
+      </span>
       <span className="dsh-pc-side">
         {state === undefined ? null : (
           <span
@@ -1249,40 +1259,76 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
             {...(options.dataCode === undefined ? {} : { 'data-code': options.dataCode })}
           >{state}</span>
         )}
-        {options.inlineLabel === undefined || options.onInline === undefined ? null : (
-          <button
-            type="button"
-            className="dsh-pc-inline"
-            disabled={options.inlineDisabled === true}
-            onClick={options.onInline}
-          >{options.inlineLabel}</button>
-        )}
         <span className="dsh-pc-chevron" aria-hidden="true">›</span>
       </span>
+    </button>
+  )
+
+  /**
+   * 「手机控制」的下一级页眉（无障碍通道 / Shizuku 授权 / 虚拟屏设置 / 高级设置 / Root）。
+   *
+   * 真因（用户实报 A：设置页出现两个返回按钮 / B：第三层系统返回直接跳回第一层）：
+   * 这一层此前只存在于本分区自己的 `view` 状态里，设置中心的分层容器（`mobile/settings-nav.ts`）
+   * 完全看不见它——它仍然认为自己在「二级页」，于是系统返回被它按「二级页 -> 首页」处理，
+   * 一口气跳过本页；同时它自己的顶部条也画一个返回箭头，与本页眉这个箭头并排 → 两个返回。
+   *
+   * 修法：本页眉把「我是一层下级」这件事**显式登记到 DOM 上**（`data-dsh-settings-sublayer` +
+   * 自己的返回控件与标题），由分层容器接管返回与标题：手机形态下它用顶部条那个唯一的返回箭头
+   * 弹本层（样式表把本页眉的箭头藏掉，避免两个出口），横屏/无分层容器时本页眉的箭头仍在。
+   */
+  const subhead = (title: string) => (
+    <div className="dsh-pc-subhead">
+      <button
+        type="button"
+        className="dsh-pc-back"
+        data-dsh-settings-sublayer-back=""
+        onClick={() => setView('home')}
+      >
+        <span aria-hidden="true">‹</span>{tr('手机控制', 'Phone control')}
+      </button>
+      <strong data-dsh-settings-sublayer-title="">{title}</strong>
     </div>
   )
 
-  const back = (title: string) => (
-    <div className="dsh-pc-subhead">
-      <button type="button" className="dsh-pc-back" onClick={() => setView('home')}>
-        <span aria-hidden="true">‹</span>{tr('手机控制', 'Phone control')}
-      </button>
-      <strong>{title}</strong>
-    </div>
-  )
+  /**
+   * 分层容器请本页退出下级层：监听它派发在那个登记节点上的可取消事件。
+   *
+   * 为什么不是「让容器点本页眉那个返回按钮」：手机形态下本页眉的箭头被样式表隐藏
+   * （一屏只能有一个返回出口），而全局激活护栏会拦掉落在隐藏控件上的程序化点击，
+   * 于是容器「点它」在真机上等于什么都没发生（设备实测：系统返回后仍停在第三层）。
+   * 契约因此改成事件：容器只管说「退一层」，怎么退由本页自己决定。
+   */
+  useEffect(() => {
+    if (view === 'home') return
+    const node = document.querySelector('[data-dsh-settings-sublayer]')
+    if (node === null) return
+    const onPop = (event: Event): void => {
+      event.preventDefault()
+      setView('home')
+    }
+    node.addEventListener('dsh-settings-sublayer-pop', onPop)
+    return () => { node.removeEventListener('dsh-settings-sublayer-pop', onPop) }
+  }, [view])
+
+  /** 当前下级页的标题（上游注册名之外的本页自造名，中英各一份）。 */
+  const viewTitle = view === 'a11y' ? tr('无障碍通道', 'Accessibility channel')
+    : view === 'shizuku' ? tr('Shizuku 授权', 'Shizuku access')
+      : view === 'vdisplay' ? tr('虚拟屏设置', 'Virtual screen settings')
+        : view === 'advanced' ? tr('高级设置与诊断', 'Advanced and diagnostics')
+          : tr('Root 权限', 'Root access')
 
   if (view !== 'home') return (
     <div
       data-plugin="dev-phone-control"
       data-native-control-protected=""
+      /* 登记「本分区自己还有一层下级页」：分层容器（mobile/settings-nav.ts）读这两个属性决定
+         系统返回弹本层还是直接退到设置首页。属性缺席 = 停在「手机控制」这一层。 */
+      data-dsh-settings-sublayer=""
+      data-dsh-settings-sublayer-title={viewTitle}
       {...(vdisplay.displayId === undefined ? {} : { 'data-display-id': String(vdisplay.displayId) })}
     >
       <style>{PHONE_CONTROL_CSS}</style>
-      {back(view === 'a11y' ? tr('无障碍通道', 'Accessibility channel')
-        : view === 'shizuku' ? tr('Shizuku 授权', 'Shizuku access')
-          : view === 'vdisplay' ? tr('虚拟屏设置', 'Virtual screen settings')
-            : view === 'advanced' ? tr('高级设置与诊断', 'Advanced and diagnostics')
-              : tr('Root 权限', 'Root access'))}
+      {subhead(viewTitle)}
       {view === 'a11y' ? (
         <>
           <div className="dsh-gs-row">
