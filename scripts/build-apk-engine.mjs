@@ -138,6 +138,17 @@ export function assembleApk(options, runner = spawnSync) {
     signatureGate = join(SCRIPT_DIR, 'check-apk-signatures.mjs'),
     /** 交付前是否验签（默认 true）。关掉只有一种正当理由：分阶段构建里签名由别处负全责。 */
     verifySignatures = true,
+    /**
+     * 交付前是否跑**发布链的产物形态门禁**（默认 true；判据 = 不得含 application-debuggable）。
+     *
+     * 关掉只有一种正当理由：buildType 就是 'debug' —— 此时「含 application-debuggable」是**期望值**
+     * 而不是缺陷，跑发布链判据必然恒红。调用方仍须自己做反向断言（构建类型被改回 debug 时，
+     * 发布链的判据必须真的红 —— 那条反证由 build-apk-engine.test.mjs 钉住，不受本开关影响）。
+     *
+     * 与 verifySignatures 分开的原因：签名判据对两个变体都成立（debug 也是 repoDebug 签的），
+     * 形态判据只对 release 成立。合成一个开关会让「调试包也该验签」这件事失去执行点。
+     */
+    verifyForm = true,
     /** per-ABI glibc loader 门禁脚本；供测试注入。 */
     nativeLoaderGate = join(SCRIPT_DIR, 'check-native-linux-loader.mjs'),
   } = options
@@ -257,6 +268,12 @@ export function assembleApk(options, runner = spawnSync) {
       // 调用方各自会跑 --self-test（本地/portable/发布三路都跑过），这里不重复。
       selfTest: false,
       log,
+      // debug 变体跳过发布链的形态判据（理由见 verifyForm 的注释）；签名判据照跑。
+      //
+      // 只有**显式** false 才算关：CLI 的 `--verify-form <值>` 会把它变成字符串（"false" 是真值），
+      // 若按真值判断，写 `--verify-form false` 的人以为关掉了、实际没关 —— 那种误解放过的是
+      // 一条安全判据，代价比严格档高。故两种写法都认，其余一律当严格。
+      skipForm: verifyForm === false || String(verifyForm).toLowerCase() === 'false',
     }, runner)
   }
   // 产物档 loader 断言（issue #1705）：必须在**拷进交付目录之前**跑，理由与验签完全相同
@@ -322,7 +339,7 @@ export function resolveEngineKeystoreCredentials({ keystoreAlias, keystorePass, 
   }
 }
 
-export function verifyApks({ directories = [], files = [], signatureGate = join(SCRIPT_DIR, 'check-apk-signatures.mjs'), formGate = join(SCRIPT_DIR, 'check-apk-form.mjs'), keystore = join(SCRIPT_DIR, '..', 'keystore', 'debug.keystore'), keystoreAlias, keystorePass, selfTest = true, log = console.log }, runner = spawnSync) {
+export function verifyApks({ directories = [], files = [], signatureGate = join(SCRIPT_DIR, 'check-apk-signatures.mjs'), formGate = join(SCRIPT_DIR, 'check-apk-form.mjs'), keystore = join(SCRIPT_DIR, '..', 'keystore', 'debug.keystore'), keystoreAlias, keystorePass, selfTest = true, skipForm = false, log = console.log }, runner = spawnSync) {
   const targets = [...directories.flatMap((directory) => ['--dir', resolve(directory)]),
     ...files.flatMap((file) => ['--apk', resolve(file)])]
   if (!targets.length) throw new Error('signature verification requires at least one directory or APK')
@@ -333,6 +350,16 @@ export function verifyApks({ directories = [], files = [], signatureGate = join(
   if (selfTest) execute(process.execPath, [signatureGate, '--self-test'], { cwd: SCRIPT_DIR }, runner)
   execute(process.execPath, [signatureGate, ...targets, '--keystore', resolve(keystore),
     '--keystore-alias', alias, '--keystore-pass', pass], { cwd: SCRIPT_DIR }, runner)
+  // 形态判据只对 release 变体成立（判据本身是 release 的判据）。
+  //
+  // 为什么要保留这一步而不是整体删掉：0.14.9 的事故形态正是「构建类型被静默改回 debug」，
+  // 而那件事只能由这条判据抓住。debug 变体的正确做法是**调用方反向断言**（必须含
+  // application-debuggable），不是让这条判据变绿 —— 故这里只跳过，不改判据。
+  if (skipForm) {
+    log('跳过发布链的产物形态门禁（buildType=debug：application-debuggable 是这个变体的期望值；'
+      + '调用方须自行反向断言）')
+    return
+  }
   log('验证最终输出 APK 的产物形态（不得含 application-debuggable）…')
   if (selfTest) execute(process.execPath, [formGate, '--self-test'], { cwd: SCRIPT_DIR }, runner)
   execute(process.execPath, [formGate, ...targets, '--require'], { cwd: SCRIPT_DIR }, runner)

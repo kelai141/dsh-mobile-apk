@@ -526,6 +526,11 @@ function main(argv) {
     abi,
     fingerprintGate: gate('check-snapshot-fingerprint.mjs'),
     signatureGate: gate('check-apk-signatures.mjs'),
+    // 引擎默认会在交付前跑发布链的产物形态门禁（判据 = **不得**含 application-debuggable）。
+    // 对 debug 变体那条判据恒红，而恒红的正确处置不是删判据、也不是让判据变绿：是**反向断言**。
+    // 这里关掉发布链那一档，紧接着（下面 ---- 5. ----）自己断言「必须含 application-debuggable，
+    // 且 versionName/versionCode/包名逐字相符」。签名门禁不关 —— debug 与 release 同一把 key。
+    verifyForm: false,
     log,
   }, (cmd, argv2, opts) => spawnSync(cmd, argv2, { cwd: ROOT, encoding: 'utf8', stdio: 'inherit', ...opts }))
 
