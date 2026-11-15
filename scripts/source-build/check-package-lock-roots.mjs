@@ -8,6 +8,41 @@ function normalized(value) {
   return JSON.stringify(Object.entries(value ?? {}).sort(([left], [right]) => left.localeCompare(right)))
 }
 
+/**
+ * 锁条目「跑到包目录外面」的判据（issue 见下方注释）。
+ *
+ * 病灶形态：在**协调仓**里跑 npm，而 `apk/dsh-shell-termux` 在那侧是指向本仓的符号链接，
+ * npm 于是把每个依赖键都写成相对**协调仓根**的路径（`../../apk/dsh-shell-termux/node_modules/...`），
+ * 顶层 `version` 也被写成 `file:../../apk/dsh-shell-termux`。这份 lock 提交进仓后，
+ * 在真正的包目录里 `npm ci` 直接 EUSAGE ——「Missing: @deepseek-ai/cordis@4.1.0 from lock file」，
+ * 一个包都装不上（实测 55 个键全部越界）。
+ *
+ * 为什么这条判据是必要的：包自己的 `node_modules` 键**不可能**以 `../` 开头。唯二合法的越界键
+ * 是 `file:`/`link:` 依赖（npm 把它们写成相对条目，如 `plugins/dsh-android-linux-env` 的
+ * `../dsh-android-bridge`）。于是判据 = 「越界键的包名必须在 manifest 里以 file:/link: 声明」，
+ * 两者都要，缺一即判红——这既能抓「换目录跑 npm」，也不会误伤合法的 file: 依赖。
+ */
+const OUTSIDE = '../'
+
+export function lockOutsidePackageProblem(directory, manifest, lock) {
+  const declared = new Set()
+  for (const field of dependencyFields) {
+    for (const [name, spec] of Object.entries(manifest?.[field] ?? {})) {
+      if (String(spec).startsWith('file:') || String(spec).startsWith('link:')) declared.add(name)
+    }
+  }
+  const outside = Object.entries(lock?.packages ?? {})
+    .filter(([key]) => key.startsWith(OUTSIDE))
+  const stray = outside.filter(([, meta]) => !declared.has(String(meta?.name ?? '')))
+  if (stray.length === 0) return []
+  const sample = stray.slice(0, 5).map(([key]) => key)
+  return [`${directory}: ${stray.length} 条锁条目越出包目录且不是 file:/link: 依赖（`
+    + sample.join(', ') + (stray.length > 5 ? ' ...' : '')
+    + '）。这份 lock 是在**别的目录布局**里跑 npm 生成的（典型：协调仓里 apk/ 是符号链接），'
+    + '在本目录跑 npm ci 会 EUSAGE 一个包都装不上。'
+    + '修法：在本包目录里用 npm install --package-lock-only --ignore-scripts 重新生成并提交。']
+}
+
 export function checkPackageLockRoot(directory) {
   const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'))
   const lock = JSON.parse(fs.readFileSync(path.join(directory, 'package-lock.json'), 'utf8'))
@@ -25,6 +60,14 @@ export function checkPackageLockRoot(directory) {
       errors.push(`${directory}: ${field} 与 package-lock.json 根声明不一致`)
     }
   }
+  // 顶层 name/version 也抄自 package.json，而根声明检查（packages[""]）看不到这一层：
+  // 上面那次事故里 packages[""].version 是好的 0.2.0，坏的是顶层 version（file:../../apk/...）。
+  for (const field of ['name', 'version']) {
+    if (lock[field] !== undefined && lock[field] !== manifest[field]) {
+      errors.push(`${directory}: 锁文件顶层 ${field} 与 package.json 不一致（${lock[field]} != ${manifest[field]}）`)
+    }
+  }
+  errors.push(...lockOutsidePackageProblem(directory, manifest, lock))
   return errors
 }
 

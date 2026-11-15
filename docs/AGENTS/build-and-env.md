@@ -121,6 +121,8 @@ Harness按固定0.2.0-rc.2源码完成全仓构建；prepare-harness-vendor-over
 
 来源构建还会从本仓九个带 `package-lock.json` 的插件/组件目录执行 `npm ci`。`check-package-lock-roots.mjs` 在来源构建的早期步骤核对各目录 `package.json` 与锁文件根声明中的名称、版本及四类依赖，发现镜像后的旧声明就立即报错，避免完成 Harness 和 Termux 构建后才在插件安装阶段失败（坑 196）。锁文件更新后还应对受影响目录运行 `npm ci --dry-run --ignore-scripts --no-audit --no-fund`，因为根声明一致不能证明整份依赖图有效。
 
+**锁条目不得越出包目录（0.15.0 实锤）**：`check-package-lock-roots.mjs` 另有一条判据——锁的 `packages` 键**不可能**以 `../` 开头，唯二合法的是 `file:`/`link:` 依赖（npm 把它们写成相对条目，如 `plugins/dsh-android-linux-env` 的 `../dsh-android-bridge`）。`15ac3f86` 把 `dsh-shell-termux/package-lock.json` 的 55 条键全写成 `../../apk/dsh-shell-termux/node_modules/...`、顶层 `version` 写成 `file:../../apk/dsh-shell-termux`，原因是在**协调仓**里跑了 npm 而 `apk/dsh-shell-termux` 在那边是指向本仓的符号链接。后果不是「不够快」而是**一个包都装不上**：在本包目录 `npm ci` 直接 `EUSAGE / Missing: @deepseek-ai/cordis@4.1.0 from lock file`。而当时的门禁只查根声明（`packages[""]`），顶层 `version` 是好的 `0.2.0`，于是全绿——直到云端 `build-apk.yml` 在插件安装步撞上 `install-project-dependencies.mjs` 的 lock 重写判据（issue #1615）才暴露，报的还是「提交的 lock 不完整（缺 resolved/integrity）」，与真因（目录布局错）相距很远。故判据补两条：顶层 `name`/`version` 与 `package.json` 一致 + 越界条目必须是 `file:`/`link:` 依赖，且报错里直接给出「在本包目录重跑 `npm install --package-lock-only --ignore-scripts`」的修法。
+
 `check-android-native-runtime-packages.mjs` 对部署树中的 `.node` / `.node.wasm` 逐文件计数、取哈希，并只接受已审计包族。固定 Harness 当前依赖图还带入 trycua、ubjs、sherpa-onnx 与 node-addon-require-builtin 的 Linux GNU 原生文件；它们作为跨平台部署的外平台 payload 记录，不视为 Android 绑定。新增版本、不同架构路径或未知包族继续拒绝；匹配用例仍在来源构建入口运行，不再作为本仓 PR static 步骤（坑 197）。
 
 快照构建器沿用boot-pending标签调用当前dsh-app-boot的auditStartupEntries回归，required pending/failed致命、optional第三方告警；该构建内置检查不是本轮外部验收。当前验收证据见协调仓重构台账；该内置检查不替代设备三层验收。
