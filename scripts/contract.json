@@ -177,7 +177,8 @@
       "sidebar.right.pane.tab.title",
       "sidebar.right.tab.menu.item",
       "android.dock.conversation",
-      "settings.models.provider-card"
+      "settings.models.provider-card",
+      "sidebar.right.tab.document.unpreviewable"
     ],
     "rowId": "ui-layout",
     "enabledRow": "ui-layout",
@@ -238,6 +239,13 @@
         "kind": "keyed",
         "scope": "root",
         "why": "模型提供商卡片的扩展座位，承载「列表来自内置目录」提示（#976/#960 文案止损）。上游实测 kind=keyed + scope=root（按卡片所属 provider 键控）。它是 slots 里已消费但此前未进 declarations 的一条：上游若改 kind/scope，提示会挂错卡片或整块落空，而界面只是少一行小字、§4b 声明面也盯不住它；本登记即为该事故的判据。"
+      },
+      {
+        "slot": "sidebar.right.tab.document.unpreviewable",
+        "file": "packages/client/ui-sidebar-documentpreview/src/client/index.ts",
+        "kind": "list",
+        "scope": "session",
+        "why": "「文档无法预览」时在右栏标签页里并列新增外部打开按钮的座位（#1762）。上游实测 kind=list + scope=session，声明在 ui-sidebar-documentpreview 的 children 里（与 sidebar.right.tab.document[keyed/session]、.actions[list/session] 同级，见该文件 :108-110）。它是 slots 里已消费但此前未进 declarations 的一条：上游若把它改成 keyed 或换 scope，外部打开按钮会静默不出现 —— 而界面只是少一个按钮，用户只会觉得「这个文件打不开」，§4b 声明面也盯不住它。本登记即为该事故的判据。"
       }
     ],
     "upstreamUniverse": {

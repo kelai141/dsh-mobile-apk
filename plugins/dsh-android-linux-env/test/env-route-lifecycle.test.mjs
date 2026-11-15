@@ -6,6 +6,8 @@
 // 判据全部是行为：跑一遍收集到的 disposer 看路由还在不在；让 cwd 抛错看请求会不会挂住。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, mkdir, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -74,12 +76,31 @@ test('判据 2：process.cwd() 抛错时请求必须仍有响应（不得 reject
 })
 
 test('判据 3：builder 抛错时必须是 500 + 结构化 error，而不是 unhandled rejection', async () => {
-  const { routes } = harness({ androidPrivilege: { status: () => { throw new Error('tier exploded') } } })
-  const res = fakeRes()
-  await routes.get('/api/android/env/status')(req, res)
-  assert.equal(res.state.status, 500)
-  const body = JSON.parse(res.state.body)
-  assert.equal(body.ok, false)
-  assert.equal(body.error, 'env-route-failed')
-  assert.match(String(body.detail), /tier exploded/)
+  // 原生链路重构（#1730）之后本插件不再注入 androidPrivilege，档位改由
+  // nativeSharedBridge 的 statusAsync 异步读，且 readTier 自己会 catch（读不到就是
+  // unknown，不抛）。旧用例靠 androidPrivilege.status 抛错来制造 builder 失败，
+  // 在这之后永远不触发 —— 实测返回 200 而判据要 500，就成了「判据还在、但它已经
+  // 测不到东西」的假绿。
+  //
+  // 换一个仍在场的失败源：toolchainStatus 里 dpkg status 的 readFileSync 没有 try/catch
+  // （文件存在但不可读 = EISDIR）。这里把 prefix 指到一棵 status 是目录的假树，
+  // 走的就是生产代码里那条真实的抛错路径，不是给测试开的后门。
+  const dir = await mkdtemp(join(tmpdir(), 'env-route-boom-'))
+  const previous = process.env.TERMUX__PREFIX
+  process.env.TERMUX__PREFIX = dir
+  await mkdir(join(dir, 'var', 'lib', 'dpkg', 'status'), { recursive: true })
+  try {
+    const { routes } = harness()
+    const res = fakeRes()
+    await routes.get('/api/android/env/status')(req, res)
+    assert.equal(res.state.status, 500)
+    const body = JSON.parse(res.state.body)
+    assert.equal(body.ok, false)
+    assert.equal(body.error, 'env-route-failed')
+    assert.match(String(body.detail), /EISDIR|EACCES|EPERM|illegal operation/i)
+  } finally {
+    if (previous === undefined) delete process.env.TERMUX__PREFIX
+    else process.env.TERMUX__PREFIX = previous
+    await rm(dir, { recursive: true, force: true })
+  }
 })

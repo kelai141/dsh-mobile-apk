@@ -42,7 +42,12 @@ test('the actual host publishes bootstrap after its parent fiber activates', asy
   const fibers = []
   ctx.on('internal/plugin', fiber => { fibers.push(fiber) })
   ctx.provide('webServer', { register: () => () => {} })
-  ctx.provide('androidPrivilege', { status: () => ({ tier: 'T0' }) })
+  // #1730 原生链路重构后本插件的 inject 面变了：androidPrivilege 退役，换成
+  // sandboxPolicy 与 sessions（见 src/index.ts 的 export const inject）。
+  // 少一个注入依赖，Cordis 就不激活这个 fiber——现场表现是
+  // 「bootstrap is absent; parent state=0」，而测试看起来像是在验 bootstrap 逻辑。
+  ctx.provide('sandboxPolicy', { defaultMode: 'workspace-write', resolve: () => undefined })
+  ctx.provide('sessions', {})
   try {
     const fiber = ctx.plugin(host)
     await fiber
