@@ -28,6 +28,18 @@ const SIDEBAR_COLLAPSED_ATTR = 'data-sidebar-collapsed'
 const NAV_DISMISS_DELAY_MS = 260
 /** 抽屉在屏上的判据：左抽屉右缘越过这个像素数就算还开着。 */
 const DRAWER_ON_SCREEN_MIN_RIGHT = 8
+/**
+ * 「打开一个弹出层」的控件，不是导航（issue 侧边栏点三个点误收起）。
+ *
+ * 上游会话行的「三个点」是 primitives Menu 的锚点按钮，实际属性只有
+ * `data-context-menu-trigger`（**没有** aria-haspopup、也没有 aria-expanded）：
+ * 真机实测 innerHTML 片段 —— `<button type="button" data-context-menu-trigger=""
+ * aria-label="会话“…”的操作">`。同一形态也出现在工作区行的「…」上。
+ *
+ * 旧判据只排除 `[aria-expanded]`（展开器），于是这条按钮被当成导航：
+ * 点它会收起抽屉，而用户只是想看该会话的菜单。
+ */
+const POPUP_TRIGGER_SELECTOR = '[aria-haspopup], [data-context-menu-trigger], [data-trigger-menu]'
 
 /** The frame facts this behaviour reads. */
 export interface PanelNavDrawerDeps {
@@ -110,6 +122,8 @@ export class PanelNavDrawer {
     if (target.closest('button, a, [role="button"], [role="menuitem"]') === null) return
     // 展开器（aria-expanded）只改树形结构，不是导航。
     if (target.closest('[aria-expanded]') !== null) return
+    // 弹层锚点（三个点 / 右键菜单触发器）只开菜单，不是导航 —— 点它必须保持抽屉张开。
+    if (target.closest(POPUP_TRIGGER_SELECTOR) !== null) return
     window.setTimeout(() => {
       const live = this.deps.frame() ?? document.querySelector(FRAME_SELECTOR)
       if (live !== null) this.dismiss(live)
