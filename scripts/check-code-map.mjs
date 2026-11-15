@@ -671,9 +671,35 @@ function deriveSymbolAnchor(lines, line, contentHash) {
   return { ok: true, symbol: ownerClass + '.' + symbol, hash: contentHash, line: symbolLine + 1, kind: 'disambiguated' }
 }
 
-/** 行内容的短哈希（sha256 前 8 位），用于 `@hash` 判据。 */
+/**
+ * 行内容的短哈希（sha256 前 8 位），用于 `@hash` 判据。
+ *
+ * **归一化必须与 normalizedSymbolBody 同一口径**（issue #1782）。
+ *
+ * 修的是什么：旧实现只 `text.trim()`（去首尾空白），而 `classifySymbolHashAnchor` 拿到的
+ * 是 `normalizedSymbolBody` —— 那里每行都经过 `replace(/\s+/g, ' ').trim()`，**中间连续空白
+ * 已被压成一个空格**。于是任何含「行内连续空白」的源码行（对齐的注释续行 `*   ① …`、
+ * 对齐的类成员、缩进对齐的 KDoc），推导侧算的是原串哈希、校验侧算的是压空白后的哈希，两个值
+ * 永不相等 ⇒ 该行的 `@hash` 锚点**在两个方向上都必错**：
+ *   · 推导 → 立刻报「推出的锚点内容不在符号体内（不写基线）」（--only/--derive-anchors 恒失败）；
+ *   · 手写 → 校验侧恒判 symbol-content-drift。
+ *
+ * 实测（2026-11-15，main b5df6250）：`--only --write` 的 24 个文件失败项里，OverlayService.kt
+ * `#OverlayService@5dcf6835`、OverlayLiveFeed.kt `#drainLive@c66f3dc4`、
+ * android-bridge.ts `#AndroidShellBridge@7cb31de4` 三条都是这个成因（原串哈希 5dcf6835，
+ * 压空白后 c3f2a8b5）。这正是本文件里 #988 已经写过的那句话的第二次复发：
+ * **判据分叉的根因不是「哪边写错了」，而是「有两份」**。所以此处只留一份归一化。
+ *
+ * 为什么不是「放宽判据」：判据仍是「该行内容（规范化后）在符号体内恰好出现一次」，
+ * 强度不变；变的只是**两侧算的是不是同一个东西**。收紧方向也没动：
+ * 空行仍是 null、重复仍是 ambiguous。
+ *
+ * 兼容性（实测）：存量基线 130 条 symbolHashes 里，目标行「原串哈希 ≠ 规范化哈希」的有 **0 条**
+ * ——改动不会让任何已登记锚点失效（它们的原串本来就没有行内连续空白）。
+ */
 function contentHashOf(text) {
-  const t = text.trim()
+  // 与 normalizedSymbolBody 逐字同口径：连续空白压成一个空格，再去首尾空白。
+  const t = text.replace(/\s+/g, ' ').trim()
   // 空行不能当内容锚：空串的 sha256 恒为 e3b0c442…，任何空行都会「匹配」，
   // 等于把判据废掉（实测迁移 ShellOps.kt 时产出过 #ShellOps@e3b0c442 这种无效锚点）。
   if (t === '') return null
@@ -1644,6 +1670,37 @@ function selfTest() {
       rDup.issues.some((i) => i.kind === 'symbol-content-ambiguous')])
     driftCases.push(['AMB #807 内容唯一不得误红（含耦合边证据不受影响）',
       !rUno.issues.some((i) => i.kind === 'symbol-content-ambiguous')])
+  }
+
+  // ── issue #1782：推导侧与校验侧的哈希归一化必须同一口径 ─────────────
+  //
+  // 判据形态：取一行**含行内连续空白**的源码（对齐的注释续行是最常见的真实样本），
+  // 依次做三件事，三件都必须成立：
+  //   ① contentHashOf 与「压空白后再哈希」一致（归一化口径）；
+  //   ② 该哈希能被 classifySymbolHashAnchor 在符号体里认出来（verdict=exact）——
+  //      旧实现里 ① 用的是原串、② 用的是压空白串，这一步必红；
+  //   ③ 对照组：把同一行改成一字之差，哈希必须不再命中（防止「哈希恒命中」的假绿）。
+  //
+  // 为什么必须钉在这里：这是 #988「两份实现必然分叉」的同形第二次复发。只改实现不加断言，
+  // 下一个人把 contentHashOf 改回 trim() 时，--only 会在 24 个文件上重新恒失败，
+  // 而 --self-test 依旧全绿（因为它不覆盖这条）。
+  {
+    const cjk = String.fromCharCode(0x2460)   // ①：与真实样本的字符分布一致
+    const wsLine = '   *  ' + cjk + ' spacing   runs  here'
+    const body = ['fun f() {', wsLine, '}'].join(String.fromCharCode(10))
+    const normalizedOnly = wsLine.replace(/\s+/g, ' ').trim()
+    const h = contentHashOf(wsLine)
+    driftCases.push(['HASH #1782 行内连续空白：contentHashOf 与压空白口径一致',
+      h !== null && h === contentHashOf(normalizedOnly)])
+    driftCases.push(['HASH #1782 行内连续空白：该哈希能在符号体内唯一定位（旧实现恒 missing）',
+      classifySymbolHashAnchor(normalizedOnly, h).verdict === 'exact'])
+    const other = contentHashOf(wsLine.replace('here', 'herE'))
+    driftCases.push(['HASH #1782 负控：一字之差必须换哈希（不是恒命中）',
+      other !== null && other !== h
+      && classifySymbolHashAnchor(normalizedOnly, other).verdict === 'missing'])
+    // 空行仍必须是 null（不得因为压空白而把空行洗成合法内容锚）。
+    driftCases.push(['HASH #1782 空行仍是 null（压空白不得让空行变成内容锚）',
+      contentHashOf('') === null && contentHashOf('   ') === null])
   }
 
   // ── #1022 全域口径（app/src 收「产物源/接口」，不收资源与资产）────────────
