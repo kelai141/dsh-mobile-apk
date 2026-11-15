@@ -147,6 +147,13 @@ jobs:
             sudo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION"
           fi
           test -x "$NDK_READELF"
+          # runner 镜像预装的是另一版 NDK，并把它写进 ANDROID_NDK_HOME。scripts/build-phone-control-native.mjs
+          # 的 resolveNdk() 里 ANDROID_NDK_HOME **优先于** SDK 根下的钉定版本，于是 cargo 会拿 27.3 去编
+          # 而 build-config.json 钉的是 27.0.12077973 —— 判据在 source.properties 那一步判红，
+          # 报错却是「NDK at .../ndk/27.3.x reports version 27.3.x, expected 27.0.12077973」，
+          # 看着像「钉定版本没装」，实际是装了但被环境变量挡住。这里显式指到钉定的那一份。
+          # （build-apk.yml / release.yml 不受影响：它们不装 NDK，走 runner 预装的那版。）
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
       - name: 检出合同钉定的上游源码供打包门禁核对
         shell: bash
