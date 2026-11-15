@@ -1,5 +1,6 @@
 /**
- * 手机竖屏设置中心的容器层：**设置首页（分类）→ 二级页（可操作设置）**（0.14.7-B）。
+ * 手机竖屏设置中心的容器层：**设置首页（分类）→ 二级页（可操作设置）→ 三级页（分区自己的下级页）**
+ * （0.14.7-B 两级；0.15.0 补第三级）。
  *
  * 为什么落在容器层：设置外壳是上游只读 checkout（`ui-settings-general/SettingsRoot`），而竖屏此前是
  * 「横向标签行 + 内容同屏」——宽标签会被裁掉（设备实测「手机控…」被截断），且一级分类与二级内容同屏
@@ -32,6 +33,23 @@ const PANEL_SELECTOR = '[data-dsh-settings-dialog]'
 const LEVEL_ATTR = 'data-dsh-settings-level'
 const LEVEL_HOME = 'home'
 const LEVEL_DETAIL = 'detail'
+/**
+ * 三级页：分区**自己**还有一层下级页（「手机控制 → 无障碍通道 / Shizuku 授权 …」）。
+ *
+ * 真因（用户实报 B：第三层按系统返回直接跳回设置首页）：分层模型原先只有 home/detail 两级，
+ * 分区内部的下级页在 DOM 上完全不可见 ⇒ 用户进到第三层时本模块仍认为自己在 detail，
+ * 系统返回（= 点蒙层）走 goBack 的 detail 分支 ⇒ 直接退到设置首页，中间那一层被跳过。
+ *
+ * 判据不做成「再猜一层」：分区**自己**把下级层登记到 DOM 上（data-dsh-settings-sublayer +
+ * data-dsh-settings-sublayer-title + 自己的返回控件 data-dsh-settings-sublayer-back），
+ * 本模块只读这三个事实。分区没登记 = 它就停在二级页，行为与改动前一致（零回归面）。
+ */
+/** 三级页深度：0 = 停在二级页，1 = 分区内部还有一层（系统返回先弹这一层）。 */
+const SUBDEPTH_ATTR = 'data-dsh-settings-depth'
+/** 分区登记下级层的三个钩子（由分区自己渲染，见 dev-section/phone-control.tsx 的 subhead）。 */
+const SUBLAYER_ATTR = 'data-dsh-settings-sublayer'
+const SUBLAYER_TITLE_ATTR = 'data-dsh-settings-sublayer-title'
+const SUBLAYER_BACK_ATTR = 'data-dsh-settings-sublayer-back'
 /** 返回控件（首页 = 关设置，二级页 = 回首页）。 */
 const BACK_ATTR = 'data-dsh-settings-back'
 /** 「刚打开、用户还没动」的临时标记：只用于压掉默认选中行的背景。 */
@@ -283,6 +301,19 @@ function maskOf(panel: Element): HTMLElement | null {
   return panel.parentElement?.querySelector<HTMLElement>(':scope > [aria-hidden="true"]') ?? null
 }
 
+/**
+ * 当前分区是否登记了一层下级页，以及它的标题。
+ *
+ * @param panel - 设置面板（下级层节点在面板内的内容列里）。
+ * @returns 标题非空时表示有下级层；没有则 null。
+ */
+function resolveSublayer(panel: HTMLElement): string | null {
+  const node = panel.querySelector<HTMLElement>('[' + SUBLAYER_ATTR + ']')
+  if (node === null) return null
+  const title = (node.getAttribute(SUBLAYER_TITLE_ATTR) ?? '').trim()
+  return title === '' ? null : title
+}
+
 /** 派发一次真实点击（带 mousedown：蒙层的关闭路径两种事件都有订阅者）。 */
 function dispatchClick(target: Element): void {
   target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
@@ -303,6 +334,13 @@ export class MobileSettingsNav {
   /** 当前追踪的面板；换面板（React 重建）时复位到首页。 */
   private panel: HTMLElement | null = null
   private level: string = LEVEL_HOME
+  /**
+   * 当前是否停在分区的下级层（= 三级页）。
+   *
+   * 与 [level] 分开存：**进入**下级层是分区自己的点击决定的（本模块看不见那次点击的内部 state），
+   * 只能从 DOM 事实推出来；而 [level] 还要表达 home/detail 的返回语义。
+   */
+  private inSublayer = false
   /** 当前二级页对应的分区名（上游 aria-current 的事实）。 */
   private currentLabel: string | null = null
   /** 上一个二级页分区名：返回键据此回到「上一页」而不是一路退回列表。 */
@@ -364,6 +402,7 @@ export class MobileSettingsNav {
     for (const node of document.querySelectorAll('[' + ROW_ATTR + ']')) node.removeAttribute(ROW_ATTR)
     this.panel = null
     this.level = LEVEL_HOME
+    this.inSublayer = false
     this.pendingTitle = null
     this.focusTarget = null
   }
@@ -387,6 +426,10 @@ export class MobileSettingsNav {
         this.goBack(panel)
         return
       }
+
+      // 分区自己登记的下级层返回控件：点它等价于弹这一层（分区自己实现，本模块只让出事件）。
+      // 不 preventDefault：那是分区自己的 onClick，本模块只负责不把它当成「一级行点击」。
+      if (target.closest('[' + SUBLAYER_BACK_ATTR + ']') !== null) return
 
       // 一级分类：进入二级页。这里**不能**拦事件——真正切分区的仍是上游 onSelect。
       // 任何一次触碰都算「用户动过了」：撤掉 fresh，恢复上游的选中外观。
@@ -441,8 +484,14 @@ export class MobileSettingsNav {
     this.goBack(panel)
   }
 
-  /** 返回键：二级页先回「上一页」，没有再回首页；首页关设置。 */
+  /** 返回键：三级页先弹回二级页；二级页先回「上一页」，没有再回首页；首页关设置。 */
   private goBack(panel: HTMLElement): void {
+    // 三级页的判据是 [inSublayer]（由分区登记的 DOM 事实推出），不是 [level]：
+    // level 只表达首页/二级页两级，第三层是**二级页内部**再往下的一层。
+    if (this.inSublayer) {
+      this.popSublayer(panel)
+      return
+    }
     if (this.level === LEVEL_DETAIL) {
       // 分区之间也能跳（如「通用 → 关于」），返回应回到跳转前那一页而不是直接回列表。
       const previous = this.previousLabel
@@ -465,6 +514,23 @@ export class MobileSettingsNav {
     const mask = maskOf(panel)
     if (mask !== null) dispatchClick(mask)
     else panel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+  }
+
+  /**
+   * 弹回分区自己的下级层：点分区登记的返回控件。
+   *
+   * 控件找不到（分区换实现 / 该层被卸载）时退回二级页——总比把返回吞掉好：吞掉会让
+   * 「返回键没反应」，而退回二级页至少是一步可解释的动作。
+   */
+  private popSublayer(panel: HTMLElement): void {
+    const back = panel.querySelector<HTMLElement>('[' + SUBLAYER_BACK_ATTR + ']')
+    if (back !== null) {
+      back.click()
+      return
+    }
+    this.inSublayer = false
+    this.focusTarget = 'back'
+    this.sync()
   }
 
   /** 是否点在设置面板的蒙层上（蒙层是面板的兄弟节点，本模块按下标定位它）。 */
@@ -527,7 +593,17 @@ export class MobileSettingsNav {
         this.pendingTitle = null
         this.freshPanel = true
       }
+      // 三级页的事实由分区自己登记（见 SUBLAYER_ATTR）：detail 之下还有一层时，深度写在面板上。
+      //
+      // 为什么深度不复用 data-dsh-settings-level：那张属性驱动整张样式表（列表/内容两套布局），
+      // 再加一个取值要把每一条 detail 规则都改成 :is(detail, sub)，收益为零、回归面却是一整屏。
+      // 第三层是**二级页内部**再往下的一层，单独一个深度属性既准确又不动布局。
+      // 判据只读 DOM，不猜分区内部 state —— 分区没登记就没有第三层，与改动前完全一致。
+      const sublayerTitle = this.level === LEVEL_DETAIL ? resolveSublayer(panel) : null
+      this.inSublayer = sublayerTitle !== null
       if (panel.getAttribute(LEVEL_ATTR) !== this.level) panel.setAttribute(LEVEL_ATTR, this.level)
+      const depth = this.inSublayer ? '1' : '0'
+      if (panel.getAttribute(SUBDEPTH_ATTR) !== depth) panel.setAttribute(SUBDEPTH_ATTR, depth)
       // 刚打开时上游默认把第一行标成 aria-current，看着像「已经选中了通用设置」（用户反馈）。
       // 只压**外观**：给面板打 fresh 标记，用户第一次触碰就撤掉；aria-current 一律不动
       // ——返回时的焦点定位与标题跟随都依赖它，之前删标记的做法把这两件事弄坏了。
@@ -548,6 +624,7 @@ export class MobileSettingsNav {
     this.release(this.panel)
     this.panel = null
     this.level = LEVEL_HOME
+    this.inSublayer = false
     this.pendingTitle = null
     this.focusTarget = null
   }
@@ -559,6 +636,7 @@ export class MobileSettingsNav {
   private release(panel: HTMLElement | null): void {
     if (panel === null) return
     panel.removeAttribute(LEVEL_ATTR)
+    panel.removeAttribute(SUBDEPTH_ATTR)
     for (const node of panel.querySelectorAll('[' + BAR_ATTR + '], [' + DESC_ATTR + '], [' + CHEVRON_ATTR + '], [' + ICON_ATTR + ']')) {
       node.remove()
     }
@@ -770,6 +848,13 @@ export class MobileSettingsNav {
       // 首页：外壳标题（「设置」）。上游对 active 的兜底选择会选中第一行，用它当标题是错的。
       this.pendingTitle = null
       this.writeTitle(title, resolveNavTitle(panel)?.textContent ?? '')
+      return
+    }
+    if (this.inSublayer) {
+      // 三级页：标题取分区登记的那一层名字（「无障碍通道」…）。
+      // 上游这里没有任何一层可读（分区内部页不是上游注册项），所以只能读分区的登记。
+      this.pendingTitle = null
+      this.writeTitle(title, resolveSublayer(panel) ?? '')
       return
     }
     const activeLabel = rowLabel(panel.querySelector(ACTIVE_ROW_SELECTOR) ?? panel.ownerDocument.createElement('span'))

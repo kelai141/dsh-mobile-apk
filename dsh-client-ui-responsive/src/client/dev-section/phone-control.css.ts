@@ -85,6 +85,13 @@ export const PHONE_CONTROL_CSS: string = `
   overflow-wrap: anywhere;
 }
 
+/* 整行就是一个按钮（用户实报 C：右侧状态 + 箭头那块点不动）。
+ *
+ * 真因：旧结构是 div.dsh-pc-row 里放 button.dsh-pc-row-main（只装左侧文字）+ 纯展示的
+ * span.dsh-pc-side（状态 + 箭头）。可点面 = 那个 button 的盒子，右半截**从来不是控件**，
+ * 不是被谁挡住。所以这里把命中面收敛到整行：.dsh-pc-row 是 button，.dsh-pc-row-main 退化成
+ * 只负责左侧文字的 span。样式只需保证「按钮的默认外观被抹掉、整行等高可点」。 */
+button[data-plugin='dev-phone-control'] .dsh-pc-row,
 [data-plugin='dev-phone-control'] .dsh-pc-row {
   box-sizing: border-box;
   display: flex;
@@ -97,11 +104,11 @@ export const PHONE_CONTROL_CSS: string = `
   border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   background: transparent;
   color: inherit;
+  font: inherit;
   text-align: left;
-}
-
-button.dsh-pc-row {
   cursor: pointer;
+  /* 整行的命中面必须连右侧状态/箭头一起算：它们是行内的展示子节点，不单独接事件。 */
+  -webkit-tap-highlight-color: transparent;
 }
 
 [data-plugin='dev-phone-control'] .dsh-pc-row-main {
@@ -115,7 +122,6 @@ button.dsh-pc-row {
   background: transparent;
   color: inherit;
   text-align: left;
-  cursor: pointer;
 }
 
 [data-plugin='dev-phone-control'] .dsh-pc-text {
@@ -209,6 +215,33 @@ button.dsh-pc-row {
 [data-plugin='dev-phone-control'] .dsh-pc-back > span {
   font-size: 18px;
   line-height: 18px;
+}
+
+/* 手机形态下本页眉的返回箭头让位给设置中心的顶部条（用户实报 A：一屏两个返回按钮）。
+ *
+ * 真因：本分区有自己的下级页，页眉于是画了「‹ 手机控制」；而设置中心的分层容器
+ * （mobile/settings-nav.ts）也为每个页画一条顶部条（含它自己的返回箭头）。两层各画一个，
+ * 于是「手机控制 → 无障碍通道」这一页有两个返回控件，且上面那个只回设置首页（比下面那个
+ * 退得更远）—— 用户看到的是两个语义不同的返回并排。
+ *
+ * 修法：手机形态下**只保留顶部条那一个**，且它已被接管为「弹回本页的上一层」
+ * （settings-nav 的 goBack 读 data-dsh-settings-sublayer 后点本页眉登记的那个控件）。
+ * 横屏（无 data-dsh-mobile-form）不装配分层容器，本页眉箭头仍是唯一出口，故不隐藏。 */
+html[data-dsh-mobile-form] [data-plugin='dev-phone-control'] .dsh-pc-back {
+  display: none;
+}
+
+/* 顶部条已显示分区名时，页眉里那份标题是同一句话的第二份。留标题语义（aria）不留重复视觉。 */
+html[data-dsh-mobile-form] [data-plugin='dev-phone-control'] .dsh-pc-subhead > strong {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 [data-plugin='dev-phone-control'] .dsh-pc-actions {

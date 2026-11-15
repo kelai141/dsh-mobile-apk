@@ -684,3 +684,97 @@ describe('一级行的图标（只装饰我方自有分区）', () => {
     expect(row.querySelector('svg'), '上游 svg 必须仍在行里').not.toBeNull()
   })
 })
+/**
+ * 三级页（用户实报 B：第三层按系统返回直接跳回设置首页）。
+ *
+ * 缺陷形态：分层模型只有 home/detail 两级，分区（这里是「手机控制」）内部的下级页在 DOM 上
+ * 完全不可见 ⇒ 进到第三层时本模块仍认为自己在 detail，系统返回（= 点蒙层）走
+ * 「detail -> home」，中间那一层被整段跳过。
+ *
+ * 修法：分区自己把下级层登记到 DOM 上（data-dsh-settings-sublayer + 标题 + 自己的返回控件），
+ * 本模块读这三个事实把深度记成 1，返回先弹这一层。判据是**行为**判据：蒙层点击 / Escape /
+ * 顶部条返回三条入口都必须只退一层。
+ */
+describe('三级页：分区自报的下级层（系统返回只退一层）', () => {
+  /** 在内容列里放一个「手机控制」的下级页：登记属性 + 自己的返回控件。 */
+  function mountSublayer(handle: PanelHandle, title: string): { back: HTMLButtonElement; calls: () => number } {
+    let calls = 0
+    const node = document.createElement('div')
+    node.setAttribute('data-plugin', 'dev-phone-control')
+    node.setAttribute('data-dsh-settings-sublayer', '')
+    node.setAttribute('data-dsh-settings-sublayer-title', title)
+    const back = document.createElement('button')
+    back.type = 'button'
+    back.setAttribute('data-dsh-settings-sublayer-back', '')
+    back.textContent = '‹ 手机控制'
+    back.addEventListener('click', () => {
+      calls += 1
+      node.remove()
+    })
+    node.appendChild(back)
+    handle.content.appendChild(node)
+    return { back, calls: () => calls }
+  }
+
+  it('进入三级页后点蒙层（系统返回）：只弹回二级页，不跳设置首页', async () => {
+    const handle = buildPanel(['通用设置', '手机控制'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    handle.rows.get('手机控制')!.click()
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
+
+    const layer = mountSublayer(handle, '无障碍通道')
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-depth'), '三级页深度必须为 1').toBe('1')
+    expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('无障碍通道')
+
+    handle.mask.click()
+    await settle()
+    expect(layer.calls(), '蒙层点击必须只弹三级页').toBe(1)
+    expect(handle.panel.getAttribute('data-dsh-settings-level'), '必须仍在二级页（不得跳设置首页）')
+      .toBe('detail')
+    expect(handle.panel.getAttribute('data-dsh-settings-depth')).toBe('0')
+  })
+
+  it('三级页里按 Escape：同样只弹回二级页', async () => {
+    const handle = buildPanel(['通用设置', '手机控制'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    handle.rows.get('手机控制')!.click()
+    await settle()
+    const layer = mountSublayer(handle, 'Shizuku 授权')
+    await settle()
+    handle.panel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await settle()
+    expect(layer.calls()).toBe(1)
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
+  })
+
+  it('三级页里点顶部条返回：先弹三级页，再按一次才轮到二级页的返回语义', async () => {
+    const handle = buildPanel(['通用设置', '手机控制'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    handle.rows.get('手机控制')!.click()
+    await settle()
+    const layer = mountSublayer(handle, 'Root 权限')
+    await settle()
+    back(handle.panel).click()
+    await settle()
+    expect(layer.calls(), '第一次返回只弹三级页').toBe(1)
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
+    back(handle.panel).click()
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('home')
+  })
+
+  it('反证：分区没有登记下级层时深度恒 0（没登记的页面不会被多算一层）', async () => {
+    const handle = buildPanel(['通用设置', '手机控制'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    handle.rows.get('手机控制')!.click()
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-depth')).toBe('0')
+    expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('手机控制')
+  })
+})

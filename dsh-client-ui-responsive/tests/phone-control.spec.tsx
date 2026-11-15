@@ -59,7 +59,7 @@ async function unmount(): Promise<void> {
 
 /** Enter a secondary view through the same row a person taps. */
 async function enter(el: HTMLElement, title: string): Promise<void> {
-  const row = [...el.querySelectorAll('button.dsh-pc-row-main')]
+  const row = [...el.querySelectorAll('button.dsh-pc-row')]
     .find((item) => item.textContent?.startsWith(title))
   expect(row, '入口行「' + title + '」必须在场').toBeTruthy()
   await act(async () => { (row as HTMLButtonElement).click() })
@@ -146,7 +146,7 @@ describe('PhoneControlSection（手机控制设置页）', () => {
       a11yStatus: () => JSON.stringify({ enabled: true }),
       rootGrantState: () => rootGrantJson(),
     })
-    const rows = [...el.querySelectorAll('button.dsh-pc-row-main')].map((node) => node.textContent ?? '')
+    const rows = [...el.querySelectorAll('button.dsh-pc-row')].map((node) => node.textContent ?? '')
     expect(rows).toHaveLength(5)
     expect(rows[0]).toContain('无障碍通道')
     expect(rows[1]).toContain('Shizuku 授权')
@@ -1569,7 +1569,7 @@ describe('手机控制页即时语言与首屏收敛', () => {
     const buttons = [...el.querySelectorAll('button')]
     expect(buttons).toHaveLength(8)
     expect(el.querySelectorAll('.dsh-pc-segment button')).toHaveLength(3)
-    expect(el.querySelectorAll('.dsh-pc-row-main')).toHaveLength(5)
+    expect(el.querySelectorAll('button.dsh-pc-row')).toHaveLength(5)
     expect(el.querySelectorAll('details')).toHaveLength(0)
     expect(el.textContent).not.toContain('解锁受限设置')
     expect(el.textContent).not.toContain('修复文件属主')
@@ -1584,7 +1584,7 @@ describe('手机控制页即时语言与首屏收敛', () => {
       rootGrantState: () => rootGrantJson({ channelUid: -1, channelRoot: false, rootGranted: false }),
       rootAccessState: () => rootAccessJson({ state: 'no-su', suExists: false }),
     })
-    const rows = [...el.querySelectorAll('button.dsh-pc-row-main')]
+    const rows = [...el.querySelectorAll('button.dsh-pc-row')]
     expect(rows[rows.length - 1]!.textContent).toContain('Root 权限')
     expect(rows[rows.length - 1]!.textContent).toContain('本机不可用')
     expect(el.textContent).not.toContain('无法在未 root 的设备上赋予该权限')
@@ -1611,5 +1611,89 @@ describe('手机控制页即时语言与首屏收敛', () => {
       expect(requestShizukuPermission).not.toHaveBeenCalled()
       await unmount()
     }
+  })
+})
+
+/**
+ * 整行可点（用户实报 C：「手机控制」列表里右侧状态文案 + 箭头那块点不动）。
+ *
+ * 缺陷形态：一行原本是 `div.dsh-pc-row` 里放 `button.dsh-pc-row-main`（只装左侧标题/说明）
+ * 加一个纯展示的 `span.dsh-pc-side`（状态 + 箭头）。**可点区域就是那个 button 的盒子**，
+ * 右半截从布局上就不在命中面里 —— 不是被谁挡住，也从来不是控件。
+ *
+ * 判据不能只看「点文字能进」：那在缺陷态下也成立。必须**点在右侧那块**并断言进了二级页，
+ * 且断言「页面里装行的元素本身就是一个按钮」（可点面 = 整行，而不是行里的一块）。
+ */
+describe('整行可点（用户实报 C：右侧状态与箭头那块点不动）', () => {
+  const liveBridge = () => ({
+    getScreenScope: () => 'virtual-only',
+    getVdisplayScale: () => 0.75,
+    getVdisplayFloatEnabled: () => true,
+    shizukuStatus: () => shizukuJson(),
+    a11yStatus: () => JSON.stringify({ enabled: true }),
+    rootGrantState: () => rootGrantJson(),
+    rootAccessState: () => rootAccessJson(),
+  })
+  it('每一行本身就是一个按钮：整行都是命中面，不是行里嵌的一块', async () => {
+    const el = await render(liveBridge())
+    const rows = [...el.querySelectorAll<HTMLElement>('.dsh-pc-row')]
+    expect(rows.length).toBe(5)
+    for (const row of rows) {
+      expect(row.tagName, '整行必须是 button（否则右半截不在命中面）').toBe('BUTTON')
+      // 右侧状态/箭头必须仍在这一行内部（视觉不变），而不是被挪到行外的兄弟节点。
+      expect(row.querySelector('.dsh-pc-side'), '状态与箭头必须仍是行的子节点').not.toBeNull()
+      // 行内不得再有第二个 button：那种「左按钮 + 右补一个 click」的修法会留下中间一段点不动，
+      // 并且同一行出现两个语义、两个焦点。
+      expect(row.querySelectorAll('button'), '行内不得再嵌按钮').toHaveLength(0)
+    }
+  })
+
+  it('点右侧（状态 + 箭头）也能进入二级页', async () => {
+    const el = await render(liveBridge())
+    const row = [...el.querySelectorAll<HTMLButtonElement>('button.dsh-pc-row')]
+      .find((item) => item.textContent?.startsWith('无障碍通道'))!
+    expect(row, '入口行必须在场').toBeTruthy()
+    const side = row.querySelector<HTMLElement>('.dsh-pc-side')
+    expect(side, '状态区必须在场（缺陷就在这块）').not.toBeNull()
+    // 真实点击派发在**状态区**上：命中面若只覆盖左侧，这里什么都不会发生。
+    await act(async () => { side!.click() })
+    expect(el.textContent, '点右侧必须进入「无障碍通道」页')
+      .toContain('语义读取、点击与输入已可用。')
+    expect(el.querySelectorAll('button.dsh-pc-row'), '进入二级页后首页行必须退场').toHaveLength(0)
+  })
+})
+
+/**
+ * 下级页登记（用户实报 A/B 的页面侧那一半）。
+ *
+ * 「手机控制」的每个下级页必须把「我是一层下级」这件事登记到 DOM 上，设置中心的分层容器
+ * （mobile/settings-nav.ts）才看得见第三层：标题交给容器读、返回由容器接管。
+ */
+describe('下级页向下级层登记（手机控制 -> 无障碍 / Shizuku / 虚拟屏 / 高级 / Root）', () => {
+  const liveBridge = () => ({
+    getScreenScope: () => 'virtual-only',
+    getVdisplayScale: () => 0.75,
+    getVdisplayFloatEnabled: () => true,
+    shizukuStatus: () => shizukuJson(),
+    a11yStatus: () => JSON.stringify({ enabled: true }),
+    rootGrantState: () => rootGrantJson(),
+    rootAccessState: () => rootAccessJson(),
+  })
+  for (const title of ['无障碍通道', 'Shizuku 授权', '虚拟屏设置', '高级设置与诊断', 'Root 权限']) {
+    it('进入「' + title + '」后登记下级层与它的标题', async () => {
+      const el = await render(liveBridge())
+      await enter(el, title)
+      const node = el.querySelector<HTMLElement>('[data-dsh-settings-sublayer]')
+      expect(node, '下级页必须自我登记（否则第三层对分层容器不可见）').not.toBeNull()
+      expect(node!.getAttribute('data-dsh-settings-sublayer-title')).toBe(title)
+      // 返回控件由分区自己渲染、由分层容器接管点击（容器读这个属性找它）。
+      expect(node!.querySelector('[data-dsh-settings-sublayer-back]'),
+        '下级页必须登记自己的返回控件').not.toBeNull()
+    })
+  }
+
+  it('反证：停在「手机控制」首页时不登记下级层（不会被多算一层）', async () => {
+    const el = await render(liveBridge())
+    expect(el.querySelector('[data-dsh-settings-sublayer]')).toBeNull()
   })
 })
