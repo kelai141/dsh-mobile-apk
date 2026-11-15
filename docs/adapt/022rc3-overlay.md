@@ -11,7 +11,7 @@
 | 项 | 值 |
 |---|---|
 | 文件 | `scripts/snapshot-config/engine-overlay.json` |
-| 工作树字节 / sha256 | 36,106 / `08ea7ccbf72ac761306c21d9fe4cf73cc4206f010f0e9a11a10a5b269cb1c771` |
+| 工作树字节 / sha256 | 36,453 / `b4879d2af734c9d7b95b4daeb2d1b632436826b3ce12b3d387c366af50200b06` |
 | engineVersion / rootPackage | `0.2.2-rc.3` / `@deepseek-ai/dsh@0.2.2-rc.3` |
 | packages / vendorTop / pins / nested 主机 / nested 子项 / keepUnpublished / extraPresent | 380 / **78** / 1 / 10 / 24 / 4 / 7 |
 | 顶层键数（与 rc.1 同序） | 20 |
@@ -166,7 +166,7 @@
 
 | 判据 | 结论 |
 |---|---|
-| **上游下限高过钉值** | **0 条**。全 78 条里只有 2 条的引用方 range 不接受当前钉值：`@anthropic-ai/sdk 0.129.0`（`subagent-claude-code` 要 `0.93.0`）、`undici 8.11.2`（`experimental-subagent-oar` 要 `8.10.2`）。这两个引用方**都不在挂载行面上**，且 rc.1 轮即如此，不是本轮引入。 |
+| **上游下限高过钉值** | **新增 0 条**。原有 77 条里共 **13 处**（涉及 6 个包）的引用方 range 不接受当前钉值：`@anthropic-ai/sdk 0.129.0`（`subagent-claude-code` 要 `0.93.0`）、`undici 8.11.2`（`experimental-subagent-oar` 要 `8.10.2`）、`@deepseek-ai/cosmokit 1.9.0`（`cordis-plugin-hmr` 要 `~1.8.6`）、`chokidar 5.0.0`（`cordis-plugin-hmr` 要 `^4.0.3`）、`debug 2.6.9`（`express`/`body-parser`/`router`/`send`/`finalhandler`/`http-proxy-agent`/`https-proxy-agent`/`express-rate-limit` 都要 `^4`）、`ipaddr.js 2.5.0`（`proxy-addr` 要 `1.9.1`）。**用同一口径重跑 rc.1 得 69 处**，rc.3 相对 rc.1 的**新增为 0**，且这 13 处**没有一处落在挂载行面上**。 |
 | **钉的包在上游消失了** | **0 条**。原有 77 条在 rc.3 npm 闭包顶层实测 **72 条逐字一致**；5 条例外：不在闭包 3 条（`typebox@1.3.27` 是 pi-ai 精确钉、`@tanstack/react-virtual@3.14.10` 与 `mime@4.1.2` 在 rc.3 全树只有 devDependencies/零引用，与 rc.1 同类）、版本不同 2 条（`@earendil-works/pi-telemetry` 闭包 1.5.2 但 pi-ai 1.3.0 钉 1.3.0；`@eslint-community/regexpp` 闭包 4.12.3 但上游锁是 4.12.2）。两侧的共同点是**闭包值不是我们要的安装值**。 |
 | **有无消费者** | 78 条里只有 `@tanstack/react-virtual` 在**最终快照**里零声明者（rc.3 全树也只有 devDependencies 声明它，与 rc.1 逐字相同）。保留理由：rc.1 轮已按同口径定过、且它是 `dsh-client-ui-trajectory` 等包 devDependencies 的精确钉，删掉要单独立项。 |
 
@@ -205,7 +205,7 @@
 
 ### 5.5 `extraPresent`：7 条**全留**
 
-逐条做了「删掉它会不会判红」的负控（用基座实测清单 + overlay 重建快照的顶层包集合）：
+逐条做了「删掉它会不会判红」的负控（模型与 §6 末段同一个；**7 条逐个单独删**，每次 unaccounted 都恰好回来 1 条）：
 
 | 条目 | 删掉后未登记且闭包不可达 | 结论 |
 |---|---|---|
@@ -214,6 +214,9 @@
 | `@opentelemetry/exporter-logs-otlp-http` | 是 | 必需（基座顶层残留） |
 | `@vscode/ripgrep-android-arm64` / `-x64` | 是 | 必需（构建期 `RGPKG` 产出） |
 | `clsx` / `scheduler` | 是 | 必需（基座顶层残留，零消费者） |
+
+实测（负控）：全留 → unaccounted **0**；单独删任一条 → unaccounted **恰 1**（就是被删的那条）；7 条全删 → unaccounted **7**。
+这说明 7 条**每一条都是承重的**，没有一条是历史冗余。
 
 ### 5.6 `keepUnpublished`：4 条**不增不减**
 
@@ -254,8 +257,9 @@
    rc.3 的 zod 就是这一类：`vendorTop` 不给值，基座 4.4.3 在场、门禁全绿，而 49 条挂载行要 4.6.6；
 3. **vendorTop 的传递闭包**：正向闭包只覆盖挂载行的 `runtimeDeps` 缺口，不判「物化了但版本不对」。
 
-反向面复算（本轮实测，模型 = 基座实测清单 − `slim.json` 两个剔除面 + overlay 顶层替换 + 构建期产物，
-再按门禁同款的 `dependencies`+`optional`+`peer` BFS）：顶层 **682** 个包 / 登记 469 / 闭包可达 772 / **无来源 0**。
+反向面复算（本轮实测，模型 = 基座 429 个实测顶层包 − `slim.json.engineStalePackages` 5 条 + overlay 顶层替换
++ 构建期 3 条产物，再按门禁同款的 `dependencies`+`optional`+`peer` BFS）：顶层 **685** 个包 /
+登记 463（380 packages + 78 vendorTop + 1 pins + 4 keepUnpublished）/ 闭包可达 678 / **无来源 0**。
 ——注意这条只在我这个模型里成立；**真值要等快照建出来**（§7）。
 
 ## 7. 本机预检实测（能跑的都跑了）

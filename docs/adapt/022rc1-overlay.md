@@ -161,9 +161,14 @@ git show <commit>:<path>                                               # 逐条�
   判据：0.2.2-rc.1 全树 **0 个包声明 lexical**，npm 闭包里也完全没有 lexical ⇒ 宿主把编辑器搬进自身 bundle。
 - **加**：`zod@4.4.3` 已嵌到 4 个**新**宿主 `dsh-action-cards`、`dsh-creation-recommendations`、
   `dsh-experimental-liveshare`、`dsh-plugin-recommendations`。
-  判据：全树 74 个包**精确钉** `zod 4.4.3`（非 `^`），基座顶层 zod 是 4.6.7，npm 自己的解析就是把 4.4.3 嵌到这些包下；
+  判据：全树 74 个包**精确钉** `zod 4.4.3`（非 `^`），npm 自己的解析就是把 4.4.3 嵌到这些包下；
   而 `build-snapshot-013.mjs` 的 `overlayExtract` 只对**原位替换**的包保留旧嵌套 `node_modules`，
-  新包没有可继承的嵌套 ⇒ 不补就解析到 4.6.7。
+  新包没有可继承的嵌套 ⇒ 不补就解析到基座顶层的那个版本。
+  **勘误（2026-11-15，rc.3 追版时实测）**：本行原文写「基座顶层 zod 是 4.6.7」是**错的** ——
+  从 `base/base-usr-{arm64,x86_64}.tar.xz` 解出的引擎树实测顶层 `zod` 是 **4.4.3**（无嵌套副本）；
+  4.6.7 是当时 npm 闭包的解析值，不是基座的。两个数在那个时点恰好都「比 4.4.3 新」，
+  所以当时的「不补就会解到更高版本」结论仍然成立，但引用的依据写错了层。
+  rc.3 的实测与逐条对账见 `docs/adapt/022rc3-overlay.md` §2 与 §4.1。
 - 现 nested 共 **10 主机 / 24 子项**；C-3「保持不动」的 6 主机逐条核对无变化：
   `dsh-acp`→`@agentclientprotocol/sdk 1.4.0`、`dsh-terminal-bash`→`@xterm/headless 6.0.0`、
   `dsh-otel`→`@opentelemetry/*` 0.222.0/2.11.0、`dsh-session-telemetry-otel`→`@opentelemetry/api-logs 0.222.0`、
