@@ -120,6 +120,15 @@ export function assembleApk(options, runner = spawnSync) {
     outputDir,
     artifactName,
     suffix = '',
+    /**
+     * versionCode 覆盖值。缺省 undefined = 完全沿用 Gradle 里的默认值，构建参数与改动前一致。
+     *
+     * 为什么必须能覆盖：交付包要能**覆盖安装**上一个测试版，而 Gradle 的默认 versionCode 是跟着
+     * 版本线走的常量。测试版迭代时版本线不动（如 0.15.0 出 -dev-pre / -dev-pre-1 两个包），
+     * 默认值不变就装不上去；此时调用方显式给一个更大的值。
+     * 只接受正整数，且必须是十进制字面量——它会被直接拼进 Gradle 的 -P 参数。
+     */
+    versionCode,
     buildType = 'release',
     gradleCommand,
     clean = false,
@@ -189,6 +198,17 @@ export function assembleApk(options, runner = spawnSync) {
 
   const gradle = gradleCommand ?? (process.platform === 'win32' ? 'gradlew.bat' : './gradlew')
   const gradleArgs = [`:app:assemble${buildType === 'release' ? 'Release' : 'Debug'}`, '--no-daemon', `-PversionNameSuffix=${suffix}`]
+  // versionCode 覆盖（缺省不给 = 沿用 app/build.gradle.kts 的默认值，行为与改动前完全一致）。
+  //
+  // 校验放在拼参数之前，而不是交给 Gradle 去报错：这个值会进 `-P` 命令行，
+  // 非法输入（空串、负数、'81 ; rm -rf'）必须在这里就被挡住，不能落进 Gradle 的解析。
+  if (versionCode !== undefined && versionCode !== null && versionCode !== '') {
+    const text = String(versionCode)
+    if (!/^[1-9]\d*$/.test(text)) {
+      throw new Error(`versionCode must be a positive decimal integer, got: ${JSON.stringify(versionCode)}`)
+    }
+    gradleArgs.push(`-PversionCode=${text}`)
+  }
   // An app process on targetSdk >= 29 may only execve apk_data_file, so the
   // Linux runtime's glibc loader ships in jniLibs and is installed into
   // nativeLibraryDir. Omitting the directory leaves the build unchanged.
