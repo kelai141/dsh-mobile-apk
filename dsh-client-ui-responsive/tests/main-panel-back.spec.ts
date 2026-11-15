@@ -367,7 +367,7 @@ describe('C2. 页头在嵌套结构里（2026-11-13 用户实报：插件页左�
     expect(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')).toBeNull()
   })
 
-  it('列表根不给 frame 打占屏标记 —— 那一屏没有返回键，☰ 必须留着（用户第二轮反馈）', async () => {
+  it('列表根也给 frame 打占屏标记 —— 列表页的返回键是可见出口，☰ 必须让位（issue #1785）', async () => {
     setPhoneForm(true)
     const frame = document.createElement('div')
     frame.setAttribute('data-dsh-frame', '')
@@ -382,9 +382,11 @@ describe('C2. 页头在嵌套结构里（2026-11-13 用户实报：插件页左�
     mount = new MainPanelBackMount(vi.fn())
     mount.attach()
     await flush()
-    expect(frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)).toBe(false)
+    // 原判据是 false（2026-11-14 第二轮反馈「删了返回就卡住」）—— 那个前提是**当时没有
+    // 可见返回键**。issue #1785 让列表页的注入键显形后，前提翻转：两个控件不能抢同一块
+    // 位置，返回键可见 => ☰ 让位。判据因此必须跟着翻，而不是留着旧断言把缺陷锁死。
+    expect(frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)).toBe(true)
     expect(document.querySelector('[data-plugin-panel]')?.hasAttribute(MAIN_PANEL_MORE_ATTR)).toBe(false)
-    // 控件本身仍要挂在列表根（back-stack 靠它退这一层），只是不画脸。
     expect(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')).not.toBeNull()
   })
 
@@ -397,6 +399,131 @@ describe('C2. 页头在嵌套结构里（2026-11-13 用户实报：插件页左�
     mount = new MainPanelBackMount(vi.fn())
     mount.attach()
     await flush()
+    expect(frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)).toBe(false)
+  })
+})
+
+/**
+ * issue #1785：插件主列表页没有任何可见返回键。
+ *
+ * 真因不是「按钮没挂上」——它一直在 DOM 里；是 main-panel-back.css.ts 的**无条件**
+ * `display: none !important` 把它藏了。那条规则是 2026-11-14 用户反馈
+ * 「去掉最左侧的打开侧边栏与返回，只保留自带黑色加粗标题」的产物，但那次反馈针对的是
+ * **「更多 / 实验性插件」那一屏**（它有上游 moreBack）。同一段代码写成了全局规则，
+ * 把主列表页的唯一出口一起藏掉 —— 而列表页**没有** moreBack，于是零可见出口。
+ *
+ * 判据纪律：这两组必须**能判红**。改前实测红（见 PR 描述），改后绿。
+ */
+describe('E. issue #1785：列表页的返回键必须显形，且 ☰ 让位', () => {
+  /**
+   * 把样式表挂到文档里（jsdom 会真的解析层叠，含 !important）。
+   * 先清 head：document.styleSheets 是全文档共享的，不清理会让上一条用例的规则串进来，
+   * 计数类判据（「恰好一条」）因此失真 —— 本轮实测踩到过。
+   */
+  function mountCss(css: string): void {
+    document.head.innerHTML = ''
+    const style = document.createElement('style')
+    style.textContent = css
+    document.head.appendChild(style)
+  }
+
+  /**
+   * 取「命中该按钮、且真的声明了 display」的规则选择器。
+   *
+   * 走 CSSOM 而不是 getComputedStyle：jsdom 的 innerWidth 恒 1024，`@media (max-width:
+   * 767px)` 里的规则在计算值上永远不生效 —— 拿计算值判会得到「一律可见」的假绿，
+   * 而真机（视口 < 768px）上恰恰相反。判据必须落在「规则怎么写的」这件事上。
+   */
+  function displayRulesFor(button: Element): CSSStyleRule[] {
+    const out: CSSStyleRule[] = []
+    for (const sheet of Array.from(document.styleSheets)) {
+      const walk = (rules: CSSRuleList): void => {
+        for (const rule of Array.from(rules)) {
+          if (rule instanceof CSSMediaRule) { walk(rule.cssRules); continue }
+          if (!(rule instanceof CSSStyleRule)) continue
+          if (rule.style.getPropertyValue('display') === '') continue
+          if (!button.matches(rule.selectorText)) continue
+          out.push(rule)
+        }
+      }
+      walk(sheet.cssRules)
+    }
+    return out
+  }
+
+  it('主列表页：没有任何 display 规则命中注入的返回键（它必须显形）', async () => {
+    setPhoneForm(true)
+    buildPanel('list')
+    mountCss(MAIN_PANEL_BACK_CSS)
+    mount = new MainPanelBackMount(vi.fn())
+    mount.attach()
+    await flush()
+    const button = document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')!
+    expect(button).not.toBeNull()
+    const hits = displayRulesFor(button)
+    // 反证形态：把条件收窄去掉，这条立刻非空（旧 CSS 就是这样藏掉它的）。
+    expect(hits.map(r => r.selectorText), '列表页不得有任何规则藏起返回键').toEqual([])
+  })
+
+  it('「更多」屏：返回键仍必须被藏（那一屏靠上游 moreBack，不画第二枚脸）', async () => {
+    setPhoneForm(true)
+    buildPanel('more')
+    mountCss(MAIN_PANEL_BACK_CSS)
+    mount = new MainPanelBackMount(vi.fn())
+    mount.attach()
+    await flush()
+    // 「更多」屏本模块不挂注入按钮（上游 moreBack 是唯一出口），样式只是兜底。
+    // 判据打在**样式表的兜底规则**上：它必须存在、且只在 more 标记下命中。
+    const panel = document.querySelector('[data-plugin-panel]')!
+    expect(panel.hasAttribute(MAIN_PANEL_MORE_ATTR)).toBe(true)
+    const probeButton = document.createElement('button')
+    probeButton.setAttribute(MAIN_PANEL_BACK_ATTR, '')
+    panel.appendChild(probeButton)
+    const hitsMore = displayRulesFor(probeButton)
+    expect(hitsMore.length, '「更多」屏的兜底隐藏规则必须还在').toBe(1)
+    expect(hitsMore[0].selectorText).toContain('data-dsh-main-panel-more')
+    // 反证：把 more 标记摘掉，同一条规则就不再命中这个按钮。
+    panel.removeAttribute(MAIN_PANEL_MORE_ATTR)
+    expect(displayRulesFor(probeButton), '同一颗按钮在列表页上不得被藏').toEqual([])
+  })
+
+  it('反证：旧的无条件规则必须判红（证明判据有判别力）', async () => {
+    setPhoneForm(true)
+    buildPanel('list')
+    // 缺陷形态：无条件隐藏（2026-11-14 写下的那一版）。
+    mountCss('html[data-dsh-mobile-form] [data-dsh-main-panel-back] { display: none !important; }')
+    mount = new MainPanelBackMount(vi.fn())
+    mount.attach()
+    await flush()
+    const button = document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')!
+    expect(displayRulesFor(button), '缺陷形态下列表页返回键被藏').toHaveLength(1)
+  })
+
+  it('列表页挂上返回键时 frame 带 data-dsh-main-panel-open（☰ 让位的前提）', async () => {
+    setPhoneForm(true)
+    const frame = document.createElement('div')
+    frame.setAttribute('data-dsh-frame', '')
+    document.body.appendChild(frame)
+    buildPanel('list')
+    mount = new MainPanelBackMount(vi.fn())
+    mount.attach()
+    await flush()
+    expect(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')).not.toBeNull()
+    expect(frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)).toBe(true)
+  })
+
+  it('反证：没有可见返回控件时 ☰ 必须留着（详情层靠上游 crumb，本模块不挂按钮）', async () => {
+    setPhoneForm(true)
+    const frame = document.createElement('div')
+    frame.setAttribute('data-dsh-frame', '')
+    document.body.appendChild(frame)
+    buildPanel('detail')
+    mount = new MainPanelBackMount(vi.fn())
+    mount.attach()
+    await flush()
+    // 详情层我们**不**注入（那一层有自己的 crumb），所以这一屏不写占屏标记；
+    // 写与不写必须跟着「有没有我们的可见控件」，不能跟着「是不是主面板」。
+    expect(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')).toBeNull()
     expect(frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)).toBe(false)
   })
 })
@@ -439,7 +566,7 @@ describe('D. 判据与样式面（机器可判）', () => {
   it('样式只在手机形态生效，且不动上游页头自身的内边距', () => {
     const css = MAIN_PANEL_BACK_CSS
     expect(css).toContain('@media (max-width: 767px)')
-    expect(css).toContain('html[data-dsh-mobile-form] [data-dsh-main-panel-back]')
+    expect(css).toContain('html[data-dsh-mobile-form]')
     // 反证：不得改上游 .pageHead 的 padding（那是页头自己的顶距）。
     expect(css).not.toMatch(/header\[data-window-drag\]\s*\{[^}]*padding-top/)
   })

@@ -36,13 +36,25 @@
  * sheets key on those tags.
  *
  * 2026-11-14 (user, screenshot): "去掉最左侧的打开侧边栏与返回，只保留自带的黑色加粗
- * 字体的放到左上角" — the control keeps its job but loses its face. It is still mounted
- * (back-stack.ts closes the list root through it) and the frame tag is still written (it
- * is what hides the drawer opener), but `main-panel-back.css.ts` now paints the button
- * `display: none`: the phone head of a main panel shows the title, with upstream's
- * `moreBack` chevron kept — the second round of feedback ("你将自带的返回也给删除了，
- * 这会导致无法返回上级界面") showed that chevron is the only visible way back to the
- * plugin list, so it must stay.
+ * 字体的放到左上角" — that feedback was about the **"更多 / 实验性插件"** level, which
+ * carries upstream's own `moreBack` chevron, and the second round ("你将自带的返回也给
+ * 删除了，这会导致无法返回上级界面") was about keeping that chevron. The control keeps its
+ * job and loses its face **on that level only**.
+ *
+ * issue #1785 (user): the plugin **list root** had no visible exit at all. The
+ * `display: none` above had been written unconditionally, so it also hid the injected
+ * button on the list root — which has no `moreBack` (that chevron only exists in the
+ * deeper sub-view). The button was in the DOM but unpaintable, and the only thing left
+ * in the corner was ☰, which opens the drawer instead of going back. Two paired fixes:
+ *  - `main-panel-back.css.ts` narrows the hide to `[data-dsh-main-panel-more]`, so the
+ *    list root paints the button — that is the level's visible exit;
+ *  - the frame tag below now follows "this screen has a visible back control" instead of
+ *    "this screen owns upstream's control", so ☰ yields on the list root too. Two
+ *    controls must not fight for the same corner.
+ *
+ * The premise of the 2026-11-14 second round was "there is no visible back control"; with
+ * the button painted, the premise flips. Levels where this module injects nothing (the
+ * detail levels, whose crumb is authoritative) still keep ☰.
  */
 const PANEL_SELECTOR = '[data-plugin-panel]'
 /** The page head row. `data-window-drag` separates it from the intro/status siblings. */
@@ -245,12 +257,18 @@ export class MainPanelBackMount {
           this.mounted.push(button)
         }
       }
-      // 抽屉开关只在「这一屏自己有返回控件」时让位（更多/实验性插件那一屏）。
-      // 插件主列表页没有返回键，那一屏的 ☰ 是唯一出口 —— 用户 2026-11-14 的第二轮反馈
-      // 正是「删了返回就卡住」，所以列表页必须留着它。
+      // 抽屉开关的判据是「这一屏**有没有可见的返回控件**」，不是「这一屏是不是主面板」：
+      //  - 「更多」屏靠上游 moreBack（ownsControl，本模块不造第二枚键）；
+      //  - 主列表页靠我们注入的按钮（this.mounted 非空）。
+      // issue #1785：这两者此前被写成了同一个条件（只要 ownsControl），所以列表页即使挂上
+      // 了注入键也不会让 ☰ 让位 —— 两个控件抢同一块位置。issue 的修法以「返回键可见」为
+      // 前提，前提成立就必须让位。2026-11-14 第二轮反馈「删了返回就卡住」说的是当时
+      // **没有可见返回键**，与这里不冲突：没有可见返回控件时（例如详情层，我们根本不挂）
+      // 仍然保留 ☰。
       const frame = document.querySelector(FRAME_SELECTOR)
       if (frame !== null) {
-        if (ownsControl) {
+        const visibleControl = ownsControl || this.mounted.length > 0
+        if (visibleControl) {
           if (!frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)) frame.setAttribute(MAIN_PANEL_OPEN_ATTR, '')
         } else {
           frame.removeAttribute(MAIN_PANEL_OPEN_ATTR)

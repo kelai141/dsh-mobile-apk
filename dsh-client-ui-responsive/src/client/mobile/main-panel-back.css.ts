@@ -41,8 +41,14 @@ export const MAIN_PANEL_BACK_CSS: string = `
     --plugin-page-top-inset: 0px;
   }
 
-  /* 注入的返回键：保留 DOM（back-stack 的闭包），不画脸。 */
-  html[data-dsh-mobile-form] [data-dsh-main-panel-back] {
+  /* 注入的返回键：只在「更多 / 实验性插件」那一屏兜底隐藏。
+     issue #1785（用户）：插件主列表页没有任何可见返回键。真因就是这条规则曾经**无条件**：
+     它来自 2026-11-14 反馈「去掉最左侧的打开侧边栏与返回，只保留自带黑色加粗标题」，
+     但那次说的是「更多」那一屏 —— 上游在那屏有 moreBack。写成全局规则后，主列表页的
+     唯一出口也被藏了，而列表页**没有** moreBack（它只存在于更深的子视图），于是零出口：
+     注入键在 DOM 里但看不见，旁边只剩 ☰，而 ☰ 开抽屉、不返回。
+     作用面收窄到 more 标记：列表页让按钮显形，就是那一屏的返回控件。 */
+  html[data-dsh-mobile-form] [data-plugin-panel][data-dsh-main-panel-more] [data-dsh-main-panel-back] {
     display: none !important;
   }
 
