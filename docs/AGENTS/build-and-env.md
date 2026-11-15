@@ -89,7 +89,7 @@ available for offline mode`，22s 即 break），且该行把 gradle 输出重�
 - **快照来源两档**：`snapshot_source=release`（**默认**）= 取已发布 release 的快照（`--from-release`，按 MANIFEST.txt 核对 sha256），**不做**覆盖对账也不重复注入——已发布快照必然早于当前树的登记面（实测 v0.14.11 快照缺 `@dsh-android/dsh-android-phone-control` 目录），先跑该门禁只会恒红，脚本会打印这条例外及其等价保障。
 - **`snapshot_source=tree` 档当前不可用（既有门禁红，不是本链的问题）**：该档要跑发布链的 `build-apk.mjs --emit-snapshot` 拿到注入后的快照，而发布链门禁集里有 `check-gate-skips.mjs`，它要求 `check-script-tests.mjs` 结尾打印 `SKIP=n` 汇总 —— 而后者在 main 上**本来就有 23 个失败**（`失败数(23) != 已知失败清单长度(0)`，`KNOWN_FAIL` 为空）。两条既有红叠起来让 `tree` 档在注入阶段被判停。故默认档改成 `release`，`tree` 保留在选项里等那两条修好。判据一句话：**`tree` 档的健康度等于发布链门禁集的健康度**，它不该比发布链更宽松。
 - **产物名**：`dsh-mobile-apk-v<versionName>-<abi>.apk`（例 `dsh-mobile-apk-v0.15.0-x7K2mQ9z-dev-arm64.apk`）。多出 `-<段>-dev` 一段，而 `UpdateChecker.assetNameCandidates` 产出的是 `dsh-mobile-apk-v<tag>-<abi>.apk` ⇒ 应用内更新**不会**把调试包当成正式版推给任何设备。
-- **证据**：`node --test scripts/build-apk-debug.test.mjs`（23 例：随机段长度/字符集、versionCode +1 与「解析不到即抛」、versionName 组装与发布链同一套 `resolve-version-suffix`、产物名、ABI 交叉断言、产物形态正反控、GITHUB_OUTPUT 形态）。本链**未做设备验证**（只产包不装设备）。
+- **证据**：`node --test scripts/build-apk-debug.test.mjs`（25 例：随机段长度/字符集、versionCode +1 与「解析不到即抛」、versionName 组装与发布链同一套 `resolve-version-suffix`、产物名、ABI 交叉断言、产物形态正反控、MANIFEST 解析正反控、GITHUB_OUTPUT 形态）。云端实测两条 release 档全绿：arm64 `debug-apk-arm64-0.15.0-FNgFvi7K-dev`（168,971,063 B）、x86_64 `debug-apk-x86_64-0.15.0-3IQYBuUQ-dev`（165,518,639 B），均打印 `PASS 产物是 debuggable 变体，versionName=0.15.0-<8位>-dev versionCode=71`。本链**未做设备验证**（只产包不装设备）。
 
 **快照构建入口已收敛为单一链（0.14.5，删除已死的并行 workflow）**：apk 仓原有的 `.github/workflows/build-snapshot.yml`
 已删除，连同只服务它的 `docs/ci-snapshot-build.md` 与 `scripts/upload-snapshot-input.mjs`。四路证据：

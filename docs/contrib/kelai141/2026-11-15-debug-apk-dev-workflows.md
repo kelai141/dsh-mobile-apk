@@ -30,24 +30,18 @@
 
 ## 证据
 
-- `node --test scripts/build-apk-debug.test.mjs`：23 例全绿（随机段长度/字符集/注入 nextInt、versionCode +1 与「解析不到即抛」、versionName 与发布链同一套 `resolve-version-suffix`、产物名不被 `assetNameCandidates` 命中、ABI 交叉断言、产物形态正反控、GITHUB_OUTPUT 形态）。
+- `node --test scripts/build-apk-debug.test.mjs`：**25 例**全绿（随机段长度/字符集/注入 nextInt、versionCode +1 与「解析不到即抛」、versionName 与发布链同一套 `resolve-version-suffix`、产物名不被 `assetNameCandidates` 命中、ABI 交叉断言、产物形态正反控、MANIFEST 解析正反控、GITHUB_OUTPUT 形态）。
+- `node --test scripts/build-apk-engine.test.mjs`：23 例全绿（新增 1 例钉住 `verifyForm` 开关的三个不变量：skipForm 时签名仍跑、skipForm 时形态门禁一次不调、默认仍严格）。
 - 受控负控三条（真实命令，全部按预期判红）：① arm64 快照 + `--abi x86_64` → `elf-check` exit 1（`ABI 不匹配：快照 node 实际 0xb7（aarch64）≠ x86_64`）；② 不存在的 `--release-tag v0.0.0-nope` → exit 1（`读不到 ... 的 app/build.gradle.kts`）；③ `--suffix 'bad part'` → exit 2（`必须是恰好 8 位 ASCII 字母或数字`）。
-- `node scripts/check-workflow-input-injection.mjs`（15 份 workflow PASS）、`check-release-gates`（48 项声明门禁）、`check-retired-plugins`、`check-build-chain-abort` 全 PASS。
-- `check-code-map.mjs`：在我改动的文件面上**零新增失败**（干净检出里 pristine HEAD 15 项 → 加改动 15 项，逐项 diff 为空）。
+- **云端实测两条链全绿**（`snapshot_source=release`，即当前默认档）：
+
+| run | ABI | 产物 | 字节 |
+|---|---|---|---|
+| [43722680732](https://github.com/kelai141/dsh-mobile-apk/actions/runs/43722680732) | arm64 | `debug-apk-arm64-0.15.0-FNgFvi7K-dev` | 168,971,063 |
+| [43722693994](https://github.com/kelai141/dsh-mobile-apk/actions/runs/43722693994) | x86_64 | `debug-apk-x86_64-0.15.0-3IQYBuUQ-dev` | 165,518,639 |
+
+两条各自打印 `PASS 产物是 debuggable 变体，versionName=0.15.0-<8位>-dev versionCode=71`，并跑过签名门禁、内嵌快照可解压门禁、ABI 交叉核对。这就是需求四条的机器可读回执：随机 8 位 + `-dev`、versionCode 71 = 已发布 release 绑定的 70 + 1。
+
+- `node scripts/check-workflow-input-injection.mjs`（15 份 workflow PASS）、`check-release-gates`（48 项）、`check-retired-plugins`、`check-build-chain-abort` 全 PASS。
+- `check-code-map.mjs`：在本改动面上零新增失败（干净检出 pristine 15 项 → 加改动 15 项，逐项 diff 为空）；顺带把 13 处既有锚点漂移与 1 条未覆盖登记修好（独立 PR #1803），现在 **PASSED**。
 - **未做设备验证**：本链只产包不装设备。首次真机跑装后按 AGENTS.md §2.1 三层自行验收。
-
-## 顺带修掉的两处既有门禁漂移（调试链第一次跑通前必须清）
-
-`snapshot_source=tree` 档要跑发布链的 `build-apk.mjs --emit-snapshot`，而它的门禁集里有 `check-code-map.mjs`。当时的实况：
-
-```
-CHECK-CODE-MAP FAILED（15 项）：全部是 scripts/build-apk-013.ps1 的 bad-anchor-content
-```
-
-`build-apk-013.ps1` 在某个 commit 里整体上移了 4 行（`:43→:47`、`:148→:152`、`:181→:185`、`:189→:193`、`:213→:217`、`:218→:222`、`:236→:240`、`:238→:242`、`:245→:249`、`:429→:433`、`:514→:518`、`:618→:622`、`:739→:745`），而执行地图里的行号锚点没跟着动。判据是「去缩进后的规范化前缀」：行号错位即 `bad-anchor-content`，与预期文本对不对无关。
-
-另一处是 `[uncovered] 未被任何查点覆盖：scripts/verify-sidebar-drawer.mjs` —— 那个脚本进了仓却没在执行地图的覆盖账本里登记。
-
-两处都不是本改动造成的（干净检出 `origin/main` 上同样 15 项 + 1 项），但它们是 `tree` 档的硬阻断：不清掉，调试链的「从本 commit 构建快照」这条路永远跑不到 Gradle。修法是照实重钉锚点 + 把 `verify-sidebar-drawer.mjs` 补进账本，判据本身一字未改。复验：`check-code-map.mjs` -> `PASSED（覆盖完整、锚点有效、编号一致）`。
-
-**为什么值得单独记一笔**：这两处漂移在 `build-apk.yml`（云端发布链）里也会撞，只是那条链最近没被跑到。看到「门禁红但预期文本明明在文件里」时，先确认是**行号**错位而不是内容缺失 —— 两者的报错长得一样。
