@@ -259,6 +259,46 @@ describe('mobile sidebar content gestures', () => {
     expect(h.collapsed()).toBe(true)
   })
 
+  // ── 侧滑收不起已展开的左抽屉（用户设备实测） ────────────────────────────────
+  //
+  // 现场：抽屉展开后左滑，抽屉纹丝不动。对照事实：侧滑「打开」左抽屉正常、右栏开合都正常，
+  // 只有这一条路径坏。
+  // 真因：上游左抽屉**自己**就是 `role="dialog" aria-modal="true" data-shortcut-modal="sidebar"`
+  // （真机实测：展开态 document.querySelectorAll('[role="dialog"][aria-modal="true"]') 恰好返回
+  // 它一个）。旧守卫写的是 `:not([data-dsh-settings-dialog])`，于是**抽屉一展开守卫就恒命中**，
+  // touchstart 直接 return —— 手势永远认领不到。打开方向不受影响（那一刻抽屉是收起的）。
+  it('抽屉根自身就是 aria-modal 对话框：侧滑仍必须能收起它（缺陷形态）', () => {
+    const h = setup({ drawerOpen: true, panel: true })
+    // 真机形态：上游把 role/aria-modal/data-shortcut-modal 写在抽屉根节点上。
+    h.drawer.setAttribute('role', 'dialog')
+    h.drawer.setAttribute('aria-modal', 'true')
+    h.drawer.setAttribute('data-shortcut-modal', 'sidebar')
+    swipe(h.drawer, 180, 300, 80, 302)
+    expect(h.calls.returnToConversation, '抽屉是手势要操作的对象，不是「挡住页面的模态面」').toHaveBeenCalledOnce()
+    expect(h.collapsed()).toBe(true)
+  })
+
+  it('反证：真正的模态对话框（不属于侧栏）仍必须block住手势', () => {
+    const h = setup({ drawerOpen: true })
+    const modal = document.createElement('div')
+    modal.setAttribute('role', 'dialog')
+    modal.setAttribute('aria-modal', 'true')
+    document.body.appendChild(modal)
+    swipe(h.drawer, 180, 300, 80, 302)
+    expect(h.calls.returnToConversation).not.toHaveBeenCalled()
+    expect(h.collapsed()).toBe(false)
+  })
+
+  it('反证：抽屉内的普通 role=dialog 子树同样不阻断收起手势（不算"挡在页面前的模态面"）', () => {
+    const h = setup({ drawerOpen: true, panel: true })
+    const inner = document.createElement('div')
+    inner.setAttribute('role', 'dialog')
+    inner.setAttribute('aria-modal', 'true')
+    h.drawer.appendChild(inner)
+    swipe(h.drawer, 180, 300, 80, 302)
+    expect(h.calls.returnToConversation).toHaveBeenCalledOnce()
+  })
+
   it('keeps the settings overlay gesture eligible so its owner can close it before returning', () => {
     const h = setup({ drawerOpen: true })
     const settings = document.createElement('div')

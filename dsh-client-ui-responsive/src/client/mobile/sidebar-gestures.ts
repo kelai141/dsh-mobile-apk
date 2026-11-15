@@ -114,6 +114,24 @@ const IME_INSET_VAR = '--dsh-android-ime-bottom'
 const REORDER_ATTR = 'data-dsh-sidebar-reorder'
 /** 预先标记真正横向溢出的滚动容器，供常驻 CSS 保留其原生横向平移。 */
 const HORIZONTAL_SCROLL_ATTR = 'data-dsh-horizontal-scroll'
+/**
+ * 真正把页面挡在后面的模态面（不得把手势交给抽屉仲裁）。
+ *
+ * 真因（侧滑收不起左抽屉）：上游左抽屉**自己**就是
+ * `role="dialog" aria-modal="true" data-shortcut-modal="sidebar"` 的根节点 —— 真机实测
+ * 展开态 `document.querySelectorAll('[role="dialog"][aria-modal="true"]')` 恰好返回它一个
+ * （其他模态都关闭时）。旧守卫用的是
+ * `[role="dialog"][aria-modal="true"]:not([data-dsh-settings-dialog])`，
+ * 于是**抽屉开着的时候守卫恒命中**：touchstart 直接 return，手势永远认领不到。
+ * 这解释了全部对照事实 —— 用侧滑「打开」左抽屉正常（那一刻抽屉是收起的，没有这个对话框），
+ * 侧滑开合右栏也正常（右栏根节点不是 dialog，且左抽屉收着），只有「侧滑收起已展开的左抽屉」
+ * 这一条路径进不来。
+ *
+ * 判据改成「属于侧栏自己的对话框不算模态面」：与抽屉/右栏同一子树的一律排除。
+ * 只按属性排除（settings）不够 —— 上游给抽屉根写的只有 role/aria-modal/data-shortcut-modal。
+ */
+const MODAL_SURFACE_SELECTOR = '[role="dialog"][aria-modal="true"]'
+const PANEL_ROOT_SELECTOR = '.sidebarCol, [class*="sidebarCol"], [data-sidebar-right-panel]'
 // A floating pane owns its own move/resize gestures. Letting the drawer arbiter claim a
 // horizontal press on its header closed the whole right column while the float moved.
 const INTERACTIVE = 'input, textarea, select, button, label, a, summary, [contenteditable="true"], [role="button"], [role="tab"], [role="menu"], [role="menuitem"], [role="textbox"], [role="searchbox"], [role="combobox"], [aria-haspopup], [data-trigger-menu], [data-dockkit-float]'
@@ -224,6 +242,22 @@ function imeInsetPx(): number {
 
 function clamp01(value: number): number {
   return value < 0 ? 0 : value > 1 ? 1 : value
+}
+
+/**
+ * 页面上是否有**真正的**模态面（不含侧栏自己的对话框根）。
+ *
+ * @returns true = 有模态面挡着，本模块不得认领手势。
+ */
+function modalSurfaceOpen(): boolean {
+  for (const dialog of document.querySelectorAll<HTMLElement>(MODAL_SURFACE_SELECTOR)) {
+    if (dialog.hasAttribute('data-dsh-settings-dialog')) continue
+    // 侧栏自己的根（抽屉 / 右栏）不是"挡在页面前的模态面"，它正是手势要操作的对象。
+    if (dialog.closest(PANEL_ROOT_SELECTOR) !== null) continue
+    if (dialog.querySelector(PANEL_ROOT_SELECTOR) !== null) continue
+    return true
+  }
+  return false
 }
 
 /** 把 CSS 长度（px / vw）换算成 px；认不出的写法返回 0，交给调用方回落。 */
@@ -345,7 +379,7 @@ export class MobileSidebarGestures {
       || (event.target instanceof Element && event.target.closest('[data-dsh-bubble-nav]') !== null)
       // 互斥：sidebar-reorder 正在做长按拖动重排时不认领本次手势，重排拖动期间抽屉绝不能开合。
       || document.documentElement.hasAttribute(REORDER_ATTR)
-      || document.querySelector('[role="dialog"][aria-modal="true"]:not([data-dsh-settings-dialog])') !== null) return
+      || modalSurfaceOpen()) return
 
     const width = document.documentElement.clientWidth || window.innerWidth
     const touch = event.touches[0]

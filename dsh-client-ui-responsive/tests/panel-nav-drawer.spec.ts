@@ -129,3 +129,81 @@ describe('PanelNavDrawer：进面板时收起抽屉', () => {
     expect(h.collapseDrawer).not.toHaveBeenCalled()
   })
 })
+
+// ── 点会话行「三个点」不得把抽屉收起来（用户设备实测） ──────────────────────────
+//
+// 现场：抽屉开着 → 点某条会话右侧的「三个点」→ 抽屉自己收起，菜单刚弹出就被连带清掉。
+// 真因：attachNavDismiss 的点击判据只排除 [aria-expanded]（展开器），而上游「三个点」是
+// primitives Menu 的锚点按钮，真机属性只有 data-context-menu-trigger（无 aria-haspopup、
+// 无 aria-expanded）⇒ 被当成「导航了一次」，260ms 后模拟点遮罩收起抽屉。
+describe('PanelNavDrawer：点会话行菜单入口不得收起抽屉', () => {
+  /**
+   * 装一个「抽屉开着」的真实 DOM：frame > sidebarCol > row(treeitem) > rowActions > 三个点。
+   * @param buttonAttrs - 三个点按钮要带的属性（本用例的判据变量）。
+   */
+  function drawerHarness(buttonAttrs: Record<string, string>) {
+    setPhoneForm(true)
+    document.body.innerHTML = ''
+    const frame = document.createElement('div')
+    frame.setAttribute('data-dsh-frame', '')
+    const column = document.createElement('div')
+    column.className = 'x_sidebarCol'
+    // 抽屉在屏上（几何判据的第一道门）。
+    vi.spyOn(column, 'getBoundingClientRect').mockReturnValue({
+      width: 280, height: 800, top: 0, left: 0, right: 280, bottom: 800, x: 0, y: 0,
+      toJSON: () => ({}),
+    } as DOMRect)
+    const row = document.createElement('div')
+    row.setAttribute('data-row-key', 'session:s1')
+    row.setAttribute('role', 'treeitem')
+    const actions = document.createElement('span')
+    actions.className = 'x_rowActions'
+    const menuButton = document.createElement('button')
+    menuButton.setAttribute('type', 'button')
+    menuButton.setAttribute('aria-label', '会话“示例”的操作')
+    for (const [name, value] of Object.entries(buttonAttrs)) menuButton.setAttribute(name, value)
+    actions.appendChild(menuButton)
+    row.appendChild(actions)
+    column.appendChild(row)
+    frame.appendChild(column)
+    document.body.appendChild(frame)
+    // 抽屉遮罩：dismiss() 唯一的收起通路就是对它派发点按。
+    const mask = document.createElement('div')
+    mask.setAttribute('data-sidebar-mask', '')
+    const maskClicks = vi.fn()
+    mask.addEventListener('click', maskClicks)
+    document.body.appendChild(mask)
+    const collapseDrawer = vi.fn()
+    const drawer = new PanelNavDrawer({ activePanelId: () => null, collapseDrawer, frame: () => frame })
+    drawer.attachNavDismiss()
+    return { frame, column, row, menuButton, maskClicks, drawer, collapseDrawer }
+  }
+
+  /** 派发一次真实点击并等过 NAV_DISMISS_DELAY_MS（260ms）的判定期。 */
+  async function clickAndSettle(target: Element): Promise<void> {
+    target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }))
+    await new Promise<void>(resolve => window.setTimeout(resolve, 420))
+  }
+
+  it('上游「三个点」只带 data-context-menu-trigger：不得收起抽屉（缺陷形态）', async () => {
+    // 真机实测属性集合：type / class / aria-label / data-context-menu-trigger（无 haspopup、无 expanded）。
+    const h = drawerHarness({ 'data-context-menu-trigger': '' })
+    await clickAndSettle(h.menuButton)
+    expect(h.maskClicks, '点菜单入口不是导航，抽屉必须保持张开').not.toHaveBeenCalled()
+    h.drawer.detachNavDismiss()
+  })
+
+  it('反证：工作区行的「…」带 aria-haspopup=menu，同样不得收起抽屉', async () => {
+    const h = drawerHarness({ 'data-context-menu-trigger': '', 'aria-haspopup': 'menu' })
+    await clickAndSettle(h.menuButton)
+    expect(h.maskClicks).not.toHaveBeenCalled()
+    h.drawer.detachNavDismiss()
+  })
+
+  it('正控：真正的导航按钮（无菜单属性）仍必须收起抽屉（修复不得把功能关掉）', async () => {
+    const h = drawerHarness({})
+    await clickAndSettle(h.menuButton)
+    expect(h.maskClicks, '点抽屉里的普通条目仍是一次导航，抽屉应退场').toHaveBeenCalled()
+    h.drawer.detachNavDismiss()
+  })
+})
