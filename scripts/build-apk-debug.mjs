@@ -205,6 +205,33 @@ export function formatGithubOutput(fields) {
     .join('\n') + '\n'
 }
 
+/**
+ * 解析发布仓 MANIFEST.txt 的一行，取出指定资产名对应的 sha256 与字节数。
+ *
+ * 行格式（实测 v0.14.11）：`<sha256>  <仓库内路径>  <字节数>`，路径带目录前缀
+ * （`snapshot/snapshot-arm64.tar.xz`、`apk/dsh-mobile-apk-v0.14.11-arm64.apk`）。
+ *
+ * 三个判据都不能省：
+ *   · **按 basename 比对而不是 endsWith**：行尾是字节数，`endsWith('snapshot-arm64.tar.xz')`
+ *     恒不命中（第一版就这么写的，云端实测报「MANIFEST.txt 里没有 snapshot-arm64.tar.xz 条目」，
+ *     而条目明明在 —— 这种「自己写错解析却像是资产缺失」的报错最费时间）；
+ *   · 目录前缀必须取 basename 后再比，不能要求整行路径等于资产名；
+ *   · 返回字节数供调用方核对大小：摘要能对上但大小对不上意味着读到的是另一份同摘要文件，
+ *     概率极低，但大小几乎免费，顺手断言。
+ */
+export function parseManifestEntry(text, assetName) {
+  for (const row of String(text ?? '').split(/\r?\n/)) {
+    const parts = row.trim().split(/\s+/)
+    if (parts.length < 2) continue
+    const [sha, pathPart, sizePart] = parts
+    if (!/^[0-9a-f]{64}$/.test(sha)) continue
+    if (basename(pathPart) !== assetName) continue
+    const size = sizePart === undefined ? null : Number(sizePart)
+    return { sha256: sha, path: pathPart, size: Number.isSafeInteger(size) ? size : null }
+  }
+  return null
+}
+
 /** sha256 of a file：分块读（快照 160 MB 以上，不整体进内存）。 */
 export function sha256File(path, chunkBytes = 8 * 1024 * 1024) {
   const hash = createHash('sha256')
@@ -298,12 +325,17 @@ function downloadReleaseSnapshot({ tag, abi, dir }) {
   const manifest = join(dir, 'MANIFEST.txt')
   if (!existsSync(tar)) throw new Error('下载后仍没有 ' + tar)
   if (!existsSync(manifest)) throw new Error('下载后仍没有 ' + manifest + '：没有 MANIFEST 就无法独立核对字节')
+  const entry = parseManifestEntry(readFileSync(manifest, 'utf8'), assetName)
+  if (!entry) {
+    throw new Error('MANIFEST.txt 里没有 ' + assetName + ' 条目：无法核对摘要'
+      + '（该 release 也许没把快照作为资产附上；资产清单见 gh release view ' + tag + ' --json assets）')
+  }
   const digest = sha256File(tar)
-  const line = readFileSync(manifest, 'utf8').split(/\r?\n/).find((row) => row.trim().endsWith(assetName))
-  if (!line) throw new Error('MANIFEST.txt 里没有 ' + assetName + ' 条目：无法核对摘要')
-  const declared = line.trim().split(/\s+/)[0]
-  if (declared !== digest) {
-    throw new Error(assetName + ' 摘要不符：MANIFEST 声明 ' + declared + '，实际 ' + digest + '（下载被截断或资产被替换）')
+  if (entry.sha256 !== digest) {
+    throw new Error(assetName + ' 摘要不符：MANIFEST 声明 ' + entry.sha256 + '，实际 ' + digest + '（下载被截断或资产被替换）')
+  }
+  if (entry.size !== null && entry.size !== statSync(tar).size) {
+    throw new Error(assetName + ' 字节数不符：MANIFEST 声明 ' + entry.size + '，实际 ' + statSync(tar).size)
   }
   return { path: tar, digest, manifestSource: 'release:' + tag }
 }

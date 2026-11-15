@@ -27,6 +27,7 @@ import {
   parseArgs,
   parseGradleBaseVersionName,
   parseGradleDefaultVersionCode,
+  parseManifestEntry,
   randomSuffix,
   validateRandomPart,
 } from './build-apk-debug.mjs'
@@ -226,4 +227,34 @@ test('GITHUB_OUTPUT：单行 key=value，换行被压平（否则后续 key 变�
   const text = formatGithubOutput({ a: '1', b: 'x\ny', c: undefined, d: null, e: 0 })
   assert.equal(text, 'a=1\nb=x y\ne=0\n')
   assert.ok(text.endsWith('\n'))
+})
+
+// ── MANIFEST 解析 ─────────────────────────────────────────────────────────
+// 发布仓的 MANIFEST.txt 行格式是 `<sha256>  <仓库内路径>  <字节数>`（路径带 snapshot/ 或 apk/ 前缀）。
+// 第一版用 `row.trim().endsWith(assetName)` 找条目：行尾是字节数，恒不命中，云端报的是
+// 「MANIFEST.txt 里没有 snapshot-arm64.tar.xz 条目」——而条目就在那儿。这类「自己的解析写错、
+// 报错却像资产缺失」最容易让人往错方向查，故把它钉进单测。
+const REAL_MANIFEST = [
+  '29d03d34df269e7d270ef8616d83b8cf54cd54403ea732ce5f37ecfcda708f66  apk/dsh-mobile-apk-v0.14.11-arm64.apk  166650240',
+  '1f41ead47d1854fd3a134964115dc7d0dbeb04365a1d888e102b839fc4d21eb8  snapshot/snapshot-arm64.tar.xz  162287688',
+  '375808b597dc7203623213d1aa459eb22bb1c22b9ab50407298356984e53bafa  snapshot/snapshot-x86_64.tar.xz  158790724',
+].join('\n')
+
+test('MANIFEST：按 basename 命中带目录前缀的条目，并取回 sha256 与字节数', () => {
+  assert.deepEqual(parseManifestEntry(REAL_MANIFEST, 'snapshot-arm64.tar.xz'), {
+    sha256: '1f41ead47d1854fd3a134964115dc7d0dbeb04365a1d888e102b839fc4d21eb8',
+    path: 'snapshot/snapshot-arm64.tar.xz',
+    size: 162287688,
+  })
+  assert.equal(parseManifestEntry(REAL_MANIFEST, 'snapshot-x86_64.tar.xz').size, 158790724)
+})
+
+test('MANIFEST 负控：不存在的资产、被截断的行、非十六进制摘要都不命中', () => {
+  assert.equal(parseManifestEntry(REAL_MANIFEST, 'snapshot-armv7.tar.xz'), null)
+  // 只有摘要没有路径的行：不得当成命中（否则会取到 undefined 路径再崩在别处）。
+  assert.equal(parseManifestEntry('1f41ead47d1854fd3a134964115dc7d0dbeb04365a1d888e102b839fc4d21eb8', 'snapshot-arm64.tar.xz'), null)
+  // 摘要不是 64 位十六进制：跳过，不得因为 basename 对上就采信。
+  assert.equal(parseManifestEntry('sha256:whatever  snapshot/snapshot-arm64.tar.xz  1', 'snapshot-arm64.tar.xz'), null)
+  // 大小字段缺失时 size=null（调用方据此跳过字节数断言，而不是与 undefined 比较后误判）。
+  assert.equal(parseManifestEntry('1f41ead47d1854fd3a134964115dc7d0dbeb04365a1d888e102b839fc4d21eb8  snapshot/snapshot-arm64.tar.xz', 'snapshot-arm64.tar.xz').size, null)
 })
