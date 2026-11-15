@@ -14,12 +14,19 @@
 //   ④ `--dry-run` 只解析真源并打印产物名/注入集/门禁集，不写任何文件（验收 ① 的机器可读入口）。
 //
 // 用法：node scripts/build-apk.mjs --abi arm64|x86_64 [--suffix "-v3"] [--snapshot <snap.tar.xz>] [--skip-inject] [--dry-run]
+//       [--emit-snapshot <out.tar.xz>]   # 跑完全部门禁后只交出「已注入 + 已过门禁」的快照，不打 APK
+//
+// --emit-snapshot 的用途（0.15.0 调试包链）：调试包与发布包**必须共用同一份注入实现**，
+// 否则「调试包里的插件树」与「发布包里的插件树」是两条各自演进的路径，而设备上只表现为
+// 某个插件行为不一致。于是本脚本仍是唯一的注入方与门禁方，调试链只接管「变体 + 版本号 + 产物名」
+// 这三件发布链刻意不做的事（见 scripts/build-apk-debug.mjs 文件头）。
 // 依赖：node、python（Windows）/python3（Linux/WSL）在 PATH；插件/vendor 在 ROOT（apk 仓自包含布局下 ROOT 即 apk 仓根）；
 //       scripts/plugin-dirs.json 与 scripts/profile-web.cordis.patch.yml 在场。
 import { execFileSync, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
-import { mkdirSync, existsSync, rmSync, copyFileSync, cpSync, readFileSync, readdirSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { mkdirSync, existsSync, rmSync, copyFileSync, cpSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { assembleApk, verifyApks } from './build-apk-engine.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -167,6 +174,7 @@ const SUFFIX = opt('suffix', SUFFIX_DEFAULT)
 const SKIP_INJECT = args.includes('--skip-inject')
 const DRY_RUN = args.includes('--dry-run')
 const SNAP = opt('snapshot', '')
+const EMIT_SNAPSHOT = opt('emit-snapshot', '')
 
 if (!['arm64', 'x86_64'].includes(ABI)) { console.error(`未知 ABI: ${ABI}`); process.exit(2) }
 
@@ -503,6 +511,21 @@ try {
   for (const f of readdirSync(join(ROOT, 'LICENSES'))) if (f.endsWith('.txt')) copyFileSync(join(ROOT, 'LICENSES', f), join(licAssets, f))
   copyFileSync(join(ROOT, 'THIRD_PARTY_NOTICES.md'), join(licAssets, 'THIRD_PARTY_NOTICES.md'))
   log('许可资产就位')
+
+  // ---- 5b. 只交快照（调试链入口，见文件头 --emit-snapshot）----
+  //
+  // 位置是判据的一部分：**必须**在全部注入后门禁通过之后、Gradle 之前。放前面 = 交出一份
+  // 没验过的快照；放后面 = 要跑一遍 gradle 才拿得到（调试链会再跑一次，白烧十几分钟）。
+  if (EMIT_SNAPSHOT) {
+    const emitPath = resolve(EMIT_SNAPSHOT)
+    mkdirSync(dirname(emitPath), { recursive: true })
+    copyFileSync(snapIn, emitPath)
+    const emitSha = createHash('sha256').update(readFileSync(emitPath)).digest('hex')
+    writeFileSync(emitPath + '.sha256', emitSha, 'ascii')
+    console.log('EMIT_SNAPSHOT OK abi=' + ABI + ' snapshot=' + emitPath + ' sha256=' + emitSha
+      + ' injected=' + (!SKIP_INJECT))
+    process.exit(0)
+  }
 
   // ---- 6-8. Shared terminal stage: snapshot/fingerprint + Gradle + copy ----
   const name = `dsh-mobile-apk-v${VER}${SUFFIX}-${ABI}.apk`
