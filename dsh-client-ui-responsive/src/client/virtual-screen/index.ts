@@ -425,7 +425,7 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
     return createElement('div', { className: 'dsh-vdisplay-panel', 'data-state': snap.state },
       createElement('p', { className: 'dsh-vdisplay-empty' },
         tr('由会话 ', 'In use by session ') + String(snap.ownerSessionId ?? '').slice(-6)
-          + tr(' 使用中', '')))
+          + tr(' 使用中', ' in use')))
   }
 
   return createElement('div', { className: 'dsh-vdisplay-panel', 'data-state': snap.state },

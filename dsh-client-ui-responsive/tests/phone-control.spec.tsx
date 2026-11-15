@@ -1506,6 +1506,10 @@ describe('root 授权终态（issue #1377）', () => {
       rootAccessState: () => rootAccessJson({ state: 'requesting', granted: false, requesting: true }),
       setRootGranted,
     })
+    // #1730 之后 root 授权面收进了「Root 权限」二级页（主列表只留入口行）。
+    // 旧用例直接在主列表上找开关 —— 找不到时 toggleOf 抛「找不到开关」，
+    // 看起来像开关没渲染，实际是**没进那一页**。先走用户真实路径进页，再点开关。
+    await enter(el, 'Root 权限')
     await act(async () => { toggleOf(el, '授权 AI 使用 root').click() })
     // 前置：确实进了 pending（否则下面的超时断言会因「压根没等」而假绿）。
     expect(setRootGranted).toHaveBeenCalledTimes(1)

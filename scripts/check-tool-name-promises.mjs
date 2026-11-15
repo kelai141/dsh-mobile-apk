@@ -70,12 +70,67 @@ const DOC_NON_PROMISES = [
     why: '外部 MCP 封装名（同 android_ui_describe），不在本仓插件工具面',
     since: '2026-10',
   },
+  // ── 2026-11：原生链路重构（PR #1730）把工具面整体改名并迁到 phone-control 插件 ──────────
+  // 旧 bridge/manage 的工具名（android_shell_exec / android_vdisplay_* / android_ui_tree 等）
+  // 已不存在于任何声明位。docs/AGENTS 里这些名字现在的用法全是**史实记述**：
+  //   · changelog-archive.md 记的是当时的发布内容；
+  //   · gotchas.md 记的是当时的设备缺陷与真因；
+  //   · EXECUTION-MAP.md 的 P02/P03 表明确标注「旧 manage」「manage 已退役」「已随 bridge 控制面删除」。
+  // 它们不是「指引指向一条不存在的路」——那段指引本身也随插件一起删了。逐条登记以免误判，
+  // 但**不**把新工具名混进来：新名（android_ui_dump / android_ui_click / android_env_prepare 等）
+  // 都有真实声明位，若哪天漏了必须照样判红。
+  {
+    name: 'android_vdisplay_input',
+    why: '史实记述：旧 manage 的失败文案曾把模型引到这个工具；manage 退役后 vd 输入由 phone-control 的 android_ui_input 原生计划承接（EXECUTION-MAP 该行原文即写了这件事）',
+    since: '2026-11',
+  },
+  {
+    name: 'android_ui_tree',
+    why: '史实记述：原生重构后该能力改名为 android_ui_dump；changelog 与 gotchas 记的是当时的名字',
+    since: '2026-11',
+  },
+  {
+    name: 'android_act_input',
+    why: '史实记述：原生重构后该能力并入 android_ui_input（写文本/发按键二选一）；docs 里只出现在 changelog 与 gotchas 的历史复盘',
+    since: '2026-11',
+  },
+  {
+    name: 'android_capabilities',
+    why: '史实记述：渐进披露门（installCapabilityGate）在原生重构后随 capability-gate.ts 一并删除；changelog 与 gotchas 记的是当时「模型经 android_capabilities 解锁能力组」的设计，该设计已不存在',
+    since: '2026-11',
+  },
 ]
 
 /** 声明位形态 A： name: 'android_x' / tier: 'android_browser_tier'（名册键）。单/双引号等价。 */
 const DECL_KEY = /\b[\w$]+:\s*(['"])(android_[a-z0-9_]+)\1/g
 /** 声明位形态 B： export const CAPABILITY_TOOL_NAME = 'android_capabilities'。单/双引号等价。 */
 const DECL_CONST = /(?:export\s+)?const\s+\w*TOOL\w*\s*=\s*(['"])(android_[a-z0-9_]+)\1/g
+/**
+ * 声明位形态 C：**元组表 + 解构**注册（原生链路重构 #1730 引入的形态）。
+ *
+ * phone-control 把「操作名 / 工具名 / 描述」写成表格，再在循环里解构注册：
+ *
+ * ```ts
+ * for (const [operation, name, description] of [
+ *   ['shExec', 'android_shell_exec', '…'],
+ * ] as const) {
+ *   ctx.tools.register(defineTool({ name, description, … }), { when: when(operation) })
+ * }
+ * ```
+ *
+ * 这里 `name` 是**真声明位**——工具确实以 android_shell_exec 注册、模型确实能调到它。
+ * 但形态 A 的 `键: '值'` 匹配不到（它在数组字面量里，前面没有键名）。
+ *
+ * 旧实现因此把 7 个**确实存在**的工具判成「承诺但未实现」，方向是**误判红**。
+ * 修法是把这类数组字面量里的 android_* 字面量也算声明位——**不是**把它们塞进 ALLOW：
+ * ALLOW 是「名字属于别的产品面」的台账，拿它吸收误报等于把判据关掉。
+ *
+ * 风险对照：这条只会让**数组里出现的 android_* 字符串**变成声明位。若某处文案把
+ * 一个不存在的工具名写进数组，它会被误判成已声明（方向是误判绿）。可接受的理由：
+ * 数组字面量在插件源码里就是「枚举注册集」的写法，而散文/描述文案都活在字符串的
+ * 第二个元素之后——真出现那种情况，是那段代码本身写了不存在的名字，属于另一个缺陷。
+ */
+const DECL_TUPLE = /(['"])(android_[a-z0-9_]+)\1/g
 /** 提及：任意位置的 android_* 标识符。 */
 const MENTION = /\bandroid_[a-z][a-z0-9_]*/g
 
@@ -222,6 +277,14 @@ export function collectRegistry(texts) {
     const clean = stripComments(t)
     for (const m of clean.matchAll(DECL_KEY)) out.add(m[2])
     for (const m of clean.matchAll(DECL_CONST)) out.add(m[2])
+    // 形态 C：元组表行。只认「以 [' 开头、且该行含至少两个逗号分隔字符串」的枚举行，
+    // 避免把描述散文里的名字也算成声明位。
+    for (const line of clean.split('\n')) {
+      if (!/^\s*\[\s*['"]/.test(line)) continue
+      const parts = line.match(/['"][^'"]*['"]/g) ?? []
+      if (parts.length < 2) continue
+      for (const m of line.matchAll(DECL_TUPLE)) out.add(m[2])
+    }
   }
   return out
 }
@@ -353,6 +416,19 @@ function selfTest() {
       texts: ['  模型调 android_vdisplay_* 工具', "export const VDISPLAY_TOOL_NAME = 'android_vdisplay_status'"],
       expect: [],
     },
+    {
+      // #1730 原生重构引入的形态：元组表 + 解构注册。这是真声明位，
+      // 旧实现认不出，把 7 个确实存在的工具判成「承诺但未实现」。
+      name: '正例：元组表 + 解构注册（name 来自表格）算声明位，不得假红',
+      texts: ["for (const [operation, name, description] of [\n  ['shExec', 'android_shell_exec', '只读查询'],\n] as const) {\n  ctx.tools.register(defineTool({ name, description }))\n}"],
+      expect: [],
+    },
+    {
+      // 反向：描述散文里提到的名字不是声明位，仍须报出（否则就是把判据关掉）。
+      name: '反例：元组表的描述文案里提到未声明名字，仍必须判红',
+      texts: ["for (const [op, name, description] of [\n  ['x', 'android_real_one', '像 android_ghost_in_row 那样工作'],\n] as const) {}"],
+      expect: ['android_ghost_in_row'],
+    },
   ]
   let failed = 0
   for (const c of cases) {
@@ -390,7 +466,7 @@ function selfTest() {
     console.error('CHECK-TOOL-NAME-PROMISES SELF-TEST FAILED（' + failed + ' 例）')
     process.exit(1)
   }
-  console.log('CHECK-TOOL-NAME-PROMISES SELF-TEST PASSED（' + (cases.length + 4) + ' 项：注释 / 拼接 / 模板 / 引号 / docs 五族双向用例）')
+  console.log('CHECK-TOOL-NAME-PROMISES SELF-TEST PASSED（' + (cases.length + 4) + ' 项：注释 / 拼接 / 模板 / 引号 / 元组表 / docs 六族双向用例）')
 }
 
 function main() {
