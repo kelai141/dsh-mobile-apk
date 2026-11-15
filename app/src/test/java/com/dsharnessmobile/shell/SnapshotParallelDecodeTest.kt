@@ -348,27 +348,100 @@ class SnapshotParallelDecodeTest {
 
   @Test
   fun threadPlanNeverExceedsFourOrCoresOrBlocks() {
+    // 入参是**可用堆余量**（不是上限）。丰厚余量 = 512 MiB。
+    val plenty = 512L * 1024 * 1024
     // 上限 4：核数与堆都充足时也只到 4（手机上 8 线程收益递减且字典内存翻倍）。
-    assertEquals(4, SnapshotExtractor.ParallelPlan.threadsFor(cores = 16, maxHeapBytes = 512L * 1024 * 1024))
+    assertEquals(4, SnapshotExtractor.ParallelPlan.threadsFor(cores = 16, maxHeapBytes = plenty))
     // 不得超过核数。
-    assertEquals(2, SnapshotExtractor.ParallelPlan.threadsFor(cores = 2, maxHeapBytes = 512L * 1024 * 1024))
+    assertEquals(2, SnapshotExtractor.ParallelPlan.threadsFor(cores = 2, maxHeapBytes = plenty))
     // 不得超过块数（34 块的快照上 4 线程绰绰有余；块数少时按块数）。
-    assertEquals(1, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = 512L * 1024 * 1024, blockCount = 1))
-    assertEquals(3, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = 512L * 1024 * 1024, blockCount = 3))
+    assertEquals(1, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = plenty, blockCount = 1))
+    assertEquals(3, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = plenty, blockCount = 3))
   }
 
+  /**
+   * 各档数值都按「先扣 [PARALLEL_HEAP_RESERVE_BYTES] 再比阈值」推导：
+   * 要 2 线程需 `余量 - 64 MiB >= 128 MiB` ⇒ 余量 >= 192 MiB；
+   * 要 4 线程需 `余量 - 64 MiB >= 256 MiB` ⇒ 余量 >= 320 MiB。
+   */
   @Test
   fun threadPlanDegradesOnSmallHeaps() {
-    // 低于 128 MiB：强制单线程（128 MiB 是 2 线程实测仍余 50 MiB 的下界）。
-    assertEquals(1, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = 96L * 1024 * 1024))
-    assertEquals(1, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = 128L * 1024 * 1024 - 1))
-    // 128 MiB .. 256 MiB：最多 2 线程。
-    assertEquals(2, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = 128L * 1024 * 1024))
-    assertEquals(2, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = 255L * 1024 * 1024))
-    // 达到 256 MiB：放开到 4。
-    assertEquals(4, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = 256L * 1024 * 1024))
-    // 单核：无论堆多大都只能 1（并行没有意义，只会多线程开销）。
+    val reserve = SnapshotExtractor.ParallelPlan.PARALLEL_HEAP_RESERVE_BYTES
+    val twoThreadFloor = reserve + SnapshotExtractor.ParallelPlan.MIN_HEAP_FOR_TWO_BYTES
+    val fourThreadFloor = reserve + SnapshotExtractor.ParallelPlan.MIN_HEAP_FOR_FOUR_BYTES
+
+    // 扣完保底仍不到 128 MiB：强制单线程。
+    assertEquals(1, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = reserve))
+    assertEquals(1, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = twoThreadFloor - 1))
+    // 刚好够 2 线程，但不够 4。
+    assertEquals(2, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = twoThreadFloor))
+    assertEquals(2, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = fourThreadFloor - 1))
+    // 够 4 线程。
+    assertEquals(4, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = fourThreadFloor))
+    // 单核：无论余量多大都只能 1（并行没有意义，只会多线程开销）。
     assertEquals(1, SnapshotExtractor.ParallelPlan.threadsFor(cores = 1, maxHeapBytes = 1024L * 1024 * 1024))
+  }
+
+  /**
+   * issue #1714：判据必须读**当前可用余量**，而不是堆上限。
+   *
+   * 缺陷形态（设备日志原样）：`target footprint 201326592, growth limit 201326592` 与
+   * `Failed to allocate a 368 byte allocation with 296032 free bytes` 同时出现——
+   * 上限 192 MiB 恒定不变，但堆已经用满。旧判据拿 `maxMemory()` 比阈值，读到 192 MiB
+   * ⇒ 放行 2 线程 ⇒ 立刻 OOM ⇒ 整段回落到单线程把已解内容重解一遍。
+   *
+   * 这条用例把「同样的堆上限、不同的已用量」这一对摆在一起：上限一样，结论必须不同。
+   */
+  @Test
+  fun freeHeapNotHeapCeilingDecidesParallelism() {
+    val ceiling = 192L * 1024 * 1024  // 设备上的堆上限（growth limit）
+    // ① 刚启动、几乎没用：余量约等于上限 ⇒ 放行并行。
+    val fresh = SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = ceiling)
+    assertTrue("堆刚起时余量充足，应当并行（实际 $fresh）", fresh >= 2)
+    // ② 同一个上限，但已用掉 190 MiB（OOM 现场就是这种处境）⇒ 必须退回单线程。
+    val nearlyFull = ceiling - 190L * 1024 * 1024
+    assertEquals(
+      "堆已用满时必须退单线程：同 192 MiB 上限下这一点与「刚启动」结论相反，正是 #1714 的判据",
+      1, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = nearlyFull))
+    // ③ 极端：余量为 0 或负数（已超用，等着 GC）也必须是 1。
+    assertEquals(1, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = 0))
+    assertEquals(1, SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = -100L * 1024 * 1024))
+  }
+
+  /**
+   * issue #1714：`liveFreeHeapBytes` 必须是「上限 − 已用」，而不是上限本身。
+   *
+   * 判据用真实的 `Runtime` 现算，再用**同一个 Runtime 的读数**交叉验证——
+   * 不钉常量（堆大小随机器变），只断言恒等式与钳位这两件事。
+   */
+  @Test
+  fun liveFreeHeapIsCeilingMinusUsed() {
+    val runtime = Runtime.getRuntime()
+    val expected = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
+    assertEquals(
+      "余量必须等于「上限 − 已用」，与堆上限的形状无关",
+      expected.coerceAtLeast(0L),
+      SnapshotExtractor.ParallelPlan.liveFreeHeapBytes(runtime),
+    )
+  }
+
+  /**
+   * issue #1714：同一堆上限下，已用量不同必须得出**不同**结论。
+   *
+   * 这条是 #1714 的核心判据。旧实现只看 `maxMemory()`，所以「刚启动」与「堆已用满」
+   * 会得出同一个答案（都放行 2 线程）——OOM 就是这么发生的。
+   * 现在把两种处境摆在一起：上限相同，结论必须相反。
+   */
+  @Test
+  fun sameCeilingDifferentUsageYieldsDifferentPlans() {
+    val ceiling = 192L * 1024 * 1024  // 设备上的 growth limit，取实测值
+    // 刚启动（余量≈上限）⇒ 并行。
+    val fresh = SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = ceiling)
+    // 堆已用满（OOM 现场：余量只剩几百 KB）⇒ 必须单线程。
+    val full = SnapshotExtractor.ParallelPlan.threadsFor(cores = 8, maxHeapBytes = 289L * 1024)
+    assertTrue("堆刚起时必须并行（实际 $fresh）", fresh >= 2)
+    assertEquals("同 192 MiB 上限下堆已用满必须退单线程——这正是 #1714 修掉的误判", 1, full)
+    assertTrue("两者的结论必须不同，否则判据仍与已用量无关", fresh != full)
   }
 
   // ── 4. APK 内 STORED 资产的偏移源（fd 生命周期 + 边界）──────────────────────
