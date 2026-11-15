@@ -83,10 +83,13 @@ export interface ReleaseManifest {
 /** Failure from a route call, carrying the host HTTP status. */
 export class RouteError extends Error {
   readonly status: number
-  constructor(message: string, status = 0) {
+  /** 宿主给出的真因（服务端的 detail 字段），没有时为空串。 */
+  readonly detail: string
+  constructor(message: string, status = 0, detail = '') {
     super(message)
     this.name = 'RouteError'
     this.status = status
+    this.detail = detail
   }
 }
 
@@ -117,7 +120,10 @@ async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown):
   const payload = await json(response)
   if (!response.ok) {
     const error = typeof payload?.error === 'string' ? payload.error : ''
-    throw new RouteError(error !== '' ? error : 'HTTP ' + response.status, response.status)
+    // detail 是宿主的真因（例如 Cordis 的 Invalid effect、runtime verify() 的断言）。
+    // 没有它，用户和排查者都只能看到一句「请检查环境状态与日志」，而日志在不可调试包上取不到。
+    const detail = typeof payload?.detail === 'string' ? payload.detail : ''
+    throw new RouteError(error !== '' ? error : 'HTTP ' + response.status, response.status, detail)
   }
   if (payload === null) throw new RouteError('The host returned a non-JSON response', response.status)
   return payload as T

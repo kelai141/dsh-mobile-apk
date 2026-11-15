@@ -98,7 +98,11 @@ function failureText(cause: unknown): string {
     const detail = cause.detail !== '' ? '（' + cause.detail + '）' : ''
     return tr('准备下载资产失败：', 'Preparing the download failed: ') + cause.message + detail
   }
-  if (cause instanceof RouteError) return cause.message
+  if (cause instanceof RouteError) {
+    // 宿主的 detail 是唯一能说明「为什么」的字段；把它一起显示，避免用户只拿到一句
+    // 「请检查环境状态与日志」却无从下手（不可调试包上根本读不到日志）。
+    return cause.detail !== '' ? cause.message + '\n' + cause.detail : cause.message
+  }
   return cause instanceof Error ? cause.message : String(cause)
 }
 

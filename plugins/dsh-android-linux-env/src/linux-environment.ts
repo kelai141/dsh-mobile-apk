@@ -453,7 +453,14 @@ export function registerLinuxEnvironmentRoutes(options: {
             const status = normalizeLinuxStatus(await bootstrap.status())
             send(res, 200, { ...status, busy: busy || status.busy })
           }
-          catch { send(res, 500, { error: '无法读取 Linux 环境状态。' }) }
+          catch (failure) {
+            // 同 485：状态读取失败时也要留下真因，否则设置页只剩一句通用话。
+            send(res, 500, {
+              error: '无法读取 Linux 环境状态。',
+              detail: failure instanceof Error ? failure.message : String(failure),
+              reason: 'linux-environment-status-failed',
+            })
+          }
           return
         }
         if (action === 'manifest') {
@@ -482,7 +489,14 @@ export function registerLinuxEnvironmentRoutes(options: {
             case 'auto-update-off': await bootstrap.setAutoUpdateEnabled(false); break
           }
           send(res, 200, normalizeLinuxStatus(await bootstrap.status()))
-        } catch { send(res, 500, { error: 'Linux 环境操作失败，请检查环境状态与日志后重试。' }) }
+        } catch (failure) {
+          // 兜底文案不得吞掉真因：失败原因（Cordis 的 Invalid effect、runtime 的 verify()
+          // 断言、摘要不符等）此前被一条不带绑定变量的 catch 整个丢弃，UI 只能显示一句
+          // 「请检查环境状态与日志」，而日志在不可调试包上根本拿不到 —— 现场等于无证据。
+          // 这里沿用本插件 env 路由的既有形态（error 给稳定标识，detail 给真因）。
+          const detail = failure instanceof Error ? failure.message : String(failure)
+          send(res, 500, { error: 'Linux 环境操作失败，请检查环境状态与日志后重试。', detail, reason: 'linux-environment-op-failed' })
+        }
         finally { busy = false }
       },
     }))

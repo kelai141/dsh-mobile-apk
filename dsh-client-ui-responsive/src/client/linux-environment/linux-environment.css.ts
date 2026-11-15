@@ -79,6 +79,8 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 .dsh-linux-env-error p {
   margin: 0;
   overflow-wrap: anywhere;
+  /* 真因常是跨行的一条断言（含路径与动词），保留宿主给出的换行，不要折成一坨。 */
+  white-space: pre-wrap;
 }
 
 .dsh-linux-env[data-phase='failed'] .dsh-linux-env-status {
