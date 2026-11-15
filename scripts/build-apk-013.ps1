@@ -1,6 +1,6 @@
 # build-apk-013.ps1 — 0.13.0 双 ABI APK 本地构建编排（插件注入 → 门禁 → gradle 双 ABI）
 # 前置：scripts/build-snapshot-013.mjs 已产出 .deploy-tmp/snapshot-013/<abi>/snapshot.tar.xz
-# 用法：pwsh build-apk-013.ps1 [-Suffix ""] [-SkipInject] [-OnlyAbi arm64]
+# 用法：pwsh build-apk-013.ps1 [-Suffix ""] [-SkipInject] [-OnlyAbi arm64] [-VersionCode 81]
 param(
     [string]$Suffix = "-SN-1-13",          # 快照测试后缀；正式版传 ""
     [string]$OnlyAbi = "",
@@ -13,6 +13,10 @@ param(
     # 为什么做成显式参数：issue #1705 的「可选改进」——手工 export 环境变量最容易漏，
     # 而漏掉的表现是「构建全绿、MIUI 上仍 EACCES」，失败点离原因最远。
     [string]$NativeLinuxLoaderDir = $env:DSH_NATIVE_LINUX_LOADER_DIR,
+    # versionCode 覆盖值（缺省空 = 沿用 Gradle 默认值，构建与改动前完全一致）。
+    # 用途：同一版本线连出多个测试包（-dev-pre / -dev-pre-1 …）时，后出的包必须带更大的
+    # versionCode 才能覆盖安装前一个，而 Gradle 默认值只跟版本线走。
+    [string]$VersionCode = "",
 [switch]$Fast                          # 2c 快速档（2026-09-05）：单 ABI（缺省 x86_64=MuMu 开发目标）+ 注入链 preset 1
 )
 $ErrorActionPreference = 'Stop'
@@ -625,6 +629,8 @@ foreach ($abi in @('arm64', 'x86_64')) {
     # Windows PowerShell drops an empty native argument during splatting. Omitting an empty
     # suffix avoids shifting --clean into the suffix value (and producing versionName 0.14.5--clean).
     if (-not [string]::IsNullOrEmpty($Suffix)) { $engineArgs += @("--suffix", $Suffix) }
+    # versionCode 覆盖：只有显式给了才传，否则引擎沿用 Gradle 默认值（与改动前逐字节同参数）。
+    if (-not [string]::IsNullOrEmpty($VersionCode)) { $engineArgs += @("--version-code", $VersionCode) }
     # issue #1705：把 ABI 与 loader 源目录交给终端引擎。ABI 显式传（本地链的循环变量就是它），
     # 让引擎按 ABI 分档后再交给 Gradle —— 本仓 Gradle 没有 abiFilters/splits，直接把含两个
     # ABI 子目录的 loader 目录交过去会让两个 APK 都带上两种 ABI 的 loader。

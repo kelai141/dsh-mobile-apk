@@ -519,3 +519,82 @@ test('引擎显式凭据覆盖：换发布钥的调用方不必改代码', () =>
   assert.equal(verify[verify.indexOf('--keystore-alias') + 1], 'releasekey')
   assert.equal(verify[verify.indexOf('--keystore-pass') + 1], 'S3cret-Release')
 })
+
+// versionCode 覆盖：同一版本线连出多个测试包时，后出的包必须能覆盖安装前一个，
+// 而 Gradle 的默认 versionCode 只跟版本线走。缺省不给必须与改动前逐字节同参数，
+// 给了则必须原样进 Gradle 命令行。
+test('versionCode 覆盖值原样进 Gradle 参数，缺省时不出现', (t) => {
+  const runOnce = (versionCode) => {
+    const f = fixture(t)
+    let gradleArgs
+    const runner = (command, args) => {
+      if (args[0]?.endsWith('check-snapshot-fingerprint.mjs')) return { status: 0 }
+      if (args[0]?.endsWith('build-hard-manifest.mjs')) {
+        const out = args[args.indexOf('--out') + 1]
+        writeFileSync(out, JSON.stringify({ schema: 1, complete: true, fingerprint: 'fixture', entries: [{ id: 'factory', name: 'factory-plugin' }] }))
+        return { status: 0 }
+      }
+      if (args[0]?.endsWith('check-apk-signatures.mjs')) return { status: 0 }
+      if (args[0]?.endsWith('check-apk-form.mjs')) return { status: 0 }
+      gradleArgs = args
+      const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk')
+      mkdirSync(join(built, '..'), { recursive: true })
+      writeFileSync(built, Buffer.from('signed-test-apk'))
+      return { status: 0 }
+    }
+    assembleApk({
+      snapshot: f.snapshot,
+      apkDir: f.apkDir,
+      outputDir: f.outputDir,
+      artifactName: 'vc-x86_64.apk',
+      suffix: '-dev-pre-1',
+      ...(versionCode === undefined ? {} : { versionCode }),
+      fingerprintGate: '/tools/check-snapshot-fingerprint.mjs',
+      log() {},
+    }, runner)
+    return gradleArgs
+  }
+
+  // 缺省：参数里不能出现 -PversionCode=，与改动前完全一致。
+  const withoutCode = runOnce(undefined)
+  assert.ok(!withoutCode.some((a) => a.startsWith('-PversionCode=')), '不给 versionCode 时不得凭空注入')
+  assert.deepEqual(withoutCode, [':app:assembleRelease', '--no-daemon', '-PversionNameSuffix=-dev-pre-1'])
+
+  // 给了：原样透传。
+  const withCode = runOnce('81')
+  assert.ok(withCode.includes('-PversionCode=81'), 'versionCode 必须原样进 Gradle 参数')
+  assert.deepEqual(withCode, [':app:assembleRelease', '--no-daemon', '-PversionNameSuffix=-dev-pre-1', '-PversionCode=81'])
+})
+
+// 这个值会被拼进 Gradle 的 -P 命令行，非法输入必须在拼参数之前挡住，
+// 不能落进 Gradle 的解析。反证：每一条都必须在调用 Gradle 之前就抛。
+test('非法 versionCode 在调用 Gradle 之前被拒', (t) => {
+  const reject = (bad) => {
+    const f = fixture(t)
+    let gradleCalled = false
+    const runner = (command, args) => {
+      if (args[0]?.endsWith('check-snapshot-fingerprint.mjs')) return { status: 0 }
+      if (args[0]?.endsWith('build-hard-manifest.mjs')) {
+        const out = args[args.indexOf('--out') + 1]
+        writeFileSync(out, JSON.stringify({ schema: 1, complete: true, fingerprint: 'fixture', entries: [{ id: 'factory', name: 'factory-plugin' }] }))
+        return { status: 0 }
+      }
+      gradleCalled = true
+      return { status: 0 }
+    }
+    assert.throws(() => assembleApk({
+      snapshot: f.snapshot,
+      apkDir: f.apkDir,
+      outputDir: f.outputDir,
+      artifactName: 'bad-vc-x86_64.apk',
+      versionCode: bad,
+      fingerprintGate: '/tools/check-snapshot-fingerprint.mjs',
+      log() {},
+    }, runner), /versionCode must be a positive decimal integer/)
+    assert.equal(gradleCalled, false, `非法值 ${JSON.stringify(bad)} 不得走到 Gradle`)
+  }
+  for (const bad of ['0', '-1', '81abc', '8 1', '81; rm -rf /', ''] ) {
+    if (bad === '') continue // 空串按「未给」处理，走缺省分支，不在此判据范围
+    reject(bad)
+  }
+})
