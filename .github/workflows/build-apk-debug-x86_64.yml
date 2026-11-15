@@ -46,10 +46,10 @@ on:
         type: string
         default: ''
       snapshot_source:
-        description: '快照来源：tree = 本 commit 从源构建（默认）；release = 取已发布 release 的快照'
+        description: '快照来源：release = 取已发布 release 的快照（默认，推荐）；tree = 从本 commit 从源重建'
         type: choice
-        options: [tree, release]
-        default: tree
+        options: [release, tree]
+        default: release
       release_tag:
         description: '版本号绑定与快照来源的 release 标签（留空 = 最新已发布 release）'
         type: string
