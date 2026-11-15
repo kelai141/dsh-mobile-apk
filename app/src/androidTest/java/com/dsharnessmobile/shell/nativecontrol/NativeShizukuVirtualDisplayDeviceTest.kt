@@ -351,7 +351,7 @@ class NativeShizukuVirtualDisplayDeviceTest {
         val click = rpc(host, request(caps, screen, "click", "vd-sfx-click-" + System.nanoTime(),
           JSONObject().put("x", point.first).put("y", point.second)))
         assertTrue(click.toString(), click.getBoolean("ok"))
-        instrumentation.waitForIdleSync()
+        awaitSideEffect { NativeControlClickFixtureActivity.clickCount == 1 }
         assertEquals("点击必须改变目标屏上的按钮计数", 1,
           NativeControlClickFixtureActivity.clickCount)
         assertEquals("点击不得触发长按", 0,
@@ -360,7 +360,7 @@ class NativeShizukuVirtualDisplayDeviceTest {
         val longPress = rpc(host, request(caps, screen, "longClick", "vd-sfx-long-" + System.nanoTime(),
           JSONObject().put("x", point.first).put("y", point.second)))
         assertTrue(longPress.toString(), longPress.getBoolean("ok"))
-        instrumentation.waitForIdleSync()
+        awaitSideEffect { NativeControlClickFixtureActivity.longClickCount >= 1 }
         assertTrue("长按必须改变目标屏上的长按计数",
           NativeControlClickFixtureActivity.longClickCount >= 1)
 
@@ -373,7 +373,7 @@ class NativeShizukuVirtualDisplayDeviceTest {
           JSONObject().put("x", viewport.centerX()).put("y", viewport.centerY())
             .put("direction", "down").put("fraction", 0.3)))
         assertTrue(scroll.toString(), scroll.getBoolean("ok"))
-        instrumentation.waitForIdleSync()
+        awaitSideEffect { NativeControlClickFixtureActivity.lastScrollY > before }
         assertTrue("滚动必须产生位移: before=" + before +
           " after=" + NativeControlClickFixtureActivity.lastScrollY,
           NativeControlClickFixtureActivity.lastScrollY > before)
@@ -384,7 +384,7 @@ class NativeShizukuVirtualDisplayDeviceTest {
             .put("x2", viewport.centerX() - 20).put("y2", viewport.top + viewport.height() / 4)
             .put("durationMs", 400)))
         assertTrue(swipe.toString(), swipe.getBoolean("ok"))
-        instrumentation.waitForIdleSync()
+        awaitSideEffect { NativeControlClickFixtureActivity.lastScrollY != beforeSwipe }
         assertTrue("swipe 必须改变目标屏状态: before=" + beforeSwipe +
           " after=" + NativeControlClickFixtureActivity.lastScrollY,
           NativeControlClickFixtureActivity.lastScrollY != beforeSwipe)
@@ -393,7 +393,7 @@ class NativeShizukuVirtualDisplayDeviceTest {
         val back = rpc(host, request(caps, screen, "global", "vd-sfx-back-" + System.nanoTime(),
           JSONObject().put("action", "back")))
         assertTrue(back.toString(), back.getBoolean("ok"))
-        instrumentation.waitForIdleSync()
+        awaitSideEffect { NativeControlClickFixtureActivity.backCount > backsBefore }
         assertTrue("back 必须落在目标屏: before=" + backsBefore +
           " after=" + NativeControlClickFixtureActivity.backCount,
           NativeControlClickFixtureActivity.backCount > backsBefore)
@@ -423,16 +423,24 @@ class NativeShizukuVirtualDisplayDeviceTest {
   /** 按钮在屏幕坐标里的中心点；坐标是这块屏自己的像素空间。 */
   private fun buttonPoint(instrumentation: Instrumentation,
     activity: NativeControlClickFixtureActivity): Pair<Int, Int> {
-    var point = 0 to 0
-    instrumentation.runOnMainSync {
-      val location = IntArray(2)
-      activity.button.getLocationOnScreen(location)
-      point = (location[0] + activity.button.width / 2) to
-        (location[1] + activity.button.height / 2)
+    val deadline = SystemClock.elapsedRealtime() + 4_000
+    val rect = android.graphics.Rect()
+    while (SystemClock.elapsedRealtime() < deadline) {
+      var visible = false
+      instrumentation.runOnMainSync {
+        visible = activity.button.isShown && activity.button.getGlobalVisibleRect(rect)
+      }
+      if (visible && !rect.isEmpty) return rect.centerX() to rect.centerY()
+      SystemClock.sleep(50)
     }
-    return point
+    throw AssertionError("目标屏按钮尚未完成布局")
   }
 
+  /** The shell can return before a view's posted input callback is delivered. Never inject twice. */
+  private fun awaitSideEffect(observed: () -> Boolean) {
+    val deadline = SystemClock.elapsedRealtime() + 2_000
+    while (!observed() && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(25)
+  }
 
   private fun awaitDisplays(context: android.content.Context, displayId: Int, vararg required: String): Boolean {
     val deadline = SystemClock.elapsedRealtime() + 30_000
