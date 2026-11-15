@@ -56,3 +56,13 @@ D:/
 # （字节 EF 80 BA），所以字面量 `D:/` 匹配不到它。存量已于 2026-10-28 清理。
 **/.npm-cache/
 .git-msg-*.txt
+
+# 代理/并行开发用的本地 git worktree 检出目录（`git worktree add _dsh-wt/<名>`）。
+#
+# 真因（2026-11-15 实锤）：这些 worktree 是同一仓的**完整副本**，不忽略时会被
+# `scripts/check-code-map.mjs` 建 universe 时当成仓库内容收进去，于是每条锚点都能在同名文件里
+# 匹配到十几份副本，判据 `ambiguous-anchor` 大面积红（实测主检出报 124 项，
+# 干净 worktree 里同一份源码是 PASSED）。误报的是门禁，不是代码；但 `build-apk-013.ps1`
+# 在主检出里跑同一条门禁，会因此拒绝打包。
+# 它们不是仓库内容，任何提交都不该带上；本地工作树卫生由开发者自理（`git worktree remove`）。
+_dsh-wt/
