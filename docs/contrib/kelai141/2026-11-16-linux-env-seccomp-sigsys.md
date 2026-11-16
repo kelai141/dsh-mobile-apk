@@ -63,6 +63,16 @@ svc #0        (0xd4000001)   ->   movn x0, #37   (0x928004a0)   == -ENOSYS
   且复验需要**一份带新 loader 的 APK**（loader 在 `nativeLibraryDir`，只能在打包时替换）：
   先发 dsh-bionilux 0.10.7，再用 `-NativeLinuxLoaderDir` 指向新 loader 重出 arm64 APK。
 
+## 5.1 已完成的构建链验证（2026-11-16）
+
+- dsh-bionilux#22 的全绿 CI：6 项 pass（含 `node --test packages/linux-runtime/test/*.test.mjs`
+  148 项：131 pass / 17 skip / 0 fail）。
+- 用分支 ref 触发的 draft release（`v0.10.7`，**未发布**）已经产出：下载产物
+  `bionilux-loader-aarch64.so` 复核，`67380` 与 `67544` 两处都已是 `0x928004a0`
+  （`movn x0, #37`），即构建期的打补丁步骤真的生效了；x86_64 产物按设计跳过。
+- 该 draft 保持 draft 状态：先发布 0.10.7 再出带新 loader 的 APK 才有意义
+  （当前 APK 的 loader 仍是未打补丁的那份，安装仍会在启动阶段被 SIGSYS 杀掉）。
+
 ## 6. 其他
 
 - `check-native-linux-loader.mjs` 要求 loader 在 APK 内是 stored（method 0）这一条，

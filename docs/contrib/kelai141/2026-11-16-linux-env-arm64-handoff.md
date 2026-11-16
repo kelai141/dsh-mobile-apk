@@ -84,7 +84,8 @@ bionic 把这个拒绝报成 `Permission denied`，与动态链接失败同句�
 ### 6.0 修复落地顺序（本任务续做）
 
 1. dsh-bionilux#22 → 0.10.7：CI 在构建期给 `bionilux-loader-*.so` 打补丁；运行时在安装
-   阶段给 guest 的 `libc.so.6` 打补丁。
+   阶段给 guest 的 `libc.so.6` 打补丁。**已完成**：PR 全绿，draft release `v0.10.7`
+   已产出且复核了 loader 里两处补丁（**未发布**，等 APK 一起走）。
 2. 用新 loader 重出 arm64 APK：`build-apk-013.ps1 -NativeLinuxLoaderDir <0.10.7 的 loader 目录>`。
 3. 真机复验整链（下载 / 校验 / 准备 / 激活）+ 三层验收（代码层 / CDP 层 / ADB 用户层）。
    本轮设备在收尾前断开，第 2、3 步未做。
