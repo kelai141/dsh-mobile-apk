@@ -447,6 +447,13 @@ export function createMobileBootstrap(options = {}) {
         }
       }
       if (!enable) throw new Error('Runtime plugin activation requires explicit confirmation')
+      // Record the manifest this install actually used, before activation touches
+      // anything. The settings page prepares assets from the *persisted* copy
+      // (GET /manifest reads state, never the network), so a manifest that only
+      // lived in memory would make the next attempt prepare one release's assets
+      // while install asks for another's sha256 — a mismatch the host rejects as
+      // "no prepared asset", with no hint that the two sides disagree.
+      state.availableManifest = publicManifest(manifest)
       // Once the host has loaded the plugin, a later failure (manager
       // provisioning, health status, or persistence) rolls the host back.
       // Keep the in-memory view at the pre-activation value as well, so a
@@ -504,6 +511,15 @@ export function createMobileBootstrap(options = {}) {
         manager = managerBeforeActivation
       }
       state.lastError = safeError(error)
+      // Persist before rethrowing: the route surfaces the message once, then the
+      // settings page reloads from disk. Without this write the cause existed only
+      // in memory and vanished on the next poll, so a failed install left
+      // lastError: null behind it (issue #1790).
+      try {
+        await save()
+      } catch (saveError) {
+        console.warn('[dsh-linux-bootstrap] failed to persist install error: ' + safeError(saveError))
+      }
       emit()
       throw error
     } finally {
@@ -604,7 +620,27 @@ export function createMobileBootstrap(options = {}) {
     syncInjectionState: () => ready.then(() => serial(async () => { await synchronizeInjectionState(); return emit() })),
     install: ({ runtimeId, confirmed = false, activate = false } = {}) => ready.then(() => serial(async () => {
       if (confirmed !== true || activate !== true) throw new Error('install requires confirmed:true and activate:true')
-      const manifest = await fetchManifest()
+      // Asset preparation is already complete on the host at this point: every
+      // archive was downloaded, checksum-verified and unpacked into the staging
+      // tree before this call. The only thing this refetch adds is a live GitHub
+      // API round trip, and an unauthenticated 60/hour limit (a shared carrier
+      // NAT burns it easily) turns a fully offline-capable install into a hard
+      // 500 before installRuntime() ever runs (issue #1790).
+      //
+      // Falling back to the manifest the last successful check persisted keeps
+      // the pinned-asset guarantee intact: installVerifiedPluginBundle still
+      // verifies every archive against the manifest's sha256/size.
+      let manifest
+      try {
+        manifest = await fetchManifest()
+      } catch (error) {
+        if (!state.availableManifest) throw error
+        try {
+          manifest = validateManifestShape(state.availableManifest)
+        } catch {
+          throw error
+        }
+      }
       return installRuntime({ manifest, runtimeId, activate: true })
     })),
     reinstall: ({ confirmed = false, activate = false } = {}) => ready.then(() => serial(async () => {

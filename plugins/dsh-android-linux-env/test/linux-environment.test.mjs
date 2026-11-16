@@ -22,9 +22,10 @@ function makeBootstrap(overrides = {}) {
   const state = { autoUpdateEnabled: false, currentMobileVersion: '0.14.9', installedLinuxVersion: null, operation: 'idle', ...overrides }
   return {
     calls, state,
-    status: async () => ({ ...state }),
+    // overrides 同时可以替换行为（status 抛错等），不只是状态字段。
+    status: overrides.status ?? (async () => ({ ...state })),
     checkForUpdates: async options => { calls.push(['check', options]); state.latestReleaseVersion = '1.2.0'; state.updateAvailable = true },
-    install: async options => { calls.push(['install', options]); state.installedLinuxVersion = '1.2.0' },
+    install: overrides.install ?? (async options => { calls.push(['install', options]); state.installedLinuxVersion = '1.2.0' }),
     reinstall: async (...args) => { calls.push(['reinstall', ...args]) },
     uninstall: async (...args) => { calls.push(['uninstall', ...args]); state.installedLinuxVersion = null },
     setAutoUpdateEnabled: async enabled => { calls.push(['autoUpdate', enabled]); state.autoUpdateEnabled = enabled },
@@ -505,4 +506,33 @@ test('pluginHost rejects activation with no Android filesDir and a non-Cordis bu
     const activate = () => { throw new Error('must not activate') }
     await assert.rejects(createLinuxPluginHost({ root: undefined, activate }).install({ directory }), /DSH_FILES_DIR/)
     await assert.rejects(createLinuxPluginHost({ root: dir, activate, importModule: async () => ({}) }).install({ directory }), /Cordis apply/)  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+// 兜底文案不得吞掉真因：安装失败时 UI 只能显示宿主给的 error 文本，而日志在不可调试包上
+// 根本拿不到（vivo V2425A 现场实测：run-as 被拒、logcat 只放行系统 tag）。此前 handler 是
+// 一条不带绑定变量的 `catch {`，真正的 cause（Cordis 的 Invalid effect、runtime verify()
+// 的断言）被整个丢弃，用户与排查者都只剩一句「请检查环境状态与日志」。
+//
+// 反证：本用例的 fake bootstrap 抛的是一个只有这里有、生产文案里绝不可能出现的串；如果哪天
+// 有人把 detail 去掉，这个断言必然红，而不是继续以「文案还在」的样子绿着。
+test('安装失败必须把真因回给调用方（detail），不得只留一句兜底文案', async () => {
+  const boom = 'verify() failed: bionilux backend is not executable on aarch64 (probe exit 127)'
+  const bootstrap = makeBootstrap({ install: async () => { throw new Error(boom) } })
+  const h = harness(bootstrap)
+  const response = await h.call('install')
+  assert.equal(response.code, 500)
+  assert.equal(typeof response.payload.error, 'string')
+  assert.equal(response.payload.detail, boom, 'detail 必须是真因原文')
+  assert.equal(response.payload.reason, 'linux-environment-op-failed')
+  h.dispose()
+})
+
+test('状态读取失败同样要留真因（detail）', async () => {
+  const boom = 'state file is not readable: EACCES'
+  const bootstrap = makeBootstrap({ status: async () => { throw new Error(boom) } })
+  const h = harness(bootstrap)
+  const response = await h.call('status')
+  assert.equal(response.code, 500)
+  assert.equal(response.payload.detail, boom)
+  assert.equal(response.payload.reason, 'linux-environment-status-failed')
+  h.dispose()
 })
