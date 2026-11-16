@@ -228,6 +228,19 @@ execFileSync(process.execPath, [join(root, 'scripts', 'check-snapshot-fingerprin
 rmSync(join(apkDir, 'app', 'build', 'outputs', 'apk', 'debug'), { recursive: true, force: true })
 const gradle = process.platform === 'win32' ? 'gradlew.bat' : './gradlew'
 const args = [':app:assembleDebug', '--no-daemon', '--console=plain', '-PversionNameSuffix=-DEV-FAST']
+// The Linux environment needs an executable glibc loader, and on targetSdk >= 29 the
+// only directory an app may execve is nativeLibraryDir -- which is populated only
+// when a loader source is passed in. A dev package without it installs fine and
+// then fails the first guest command with
+// "execve failed: EACCES .../rootfs/lib/ld-linux-aarch64.so.1", so the flag is
+// forwarded here exactly as build-apk-engine.mjs does for the release chain.
+const nativeLinuxLoaderDir = process.env.DSH_NATIVE_LINUX_LOADER_DIR
+if (nativeLinuxLoaderDir) {
+  console.log('DEV-FAST: glibc loader source = ' + nativeLinuxLoaderDir)
+  args.push(`-PnativeLinuxLoaderDir=${nativeLinuxLoaderDir}`)
+} else {
+  console.log('DEV-FAST: DSH_NATIVE_LINUX_LOADER_DIR not set; this package cannot start the Linux environment')
+}
 console.log('DEV-FAST: all release gates skipped; artifact is for local verification only')
 execFileSync(gradle, args, { cwd: apkDir, stdio: 'inherit', shell: process.platform === 'win32' })
 const built = join(apkDir, 'app/build/outputs/apk/debug/app-debug.apk')
