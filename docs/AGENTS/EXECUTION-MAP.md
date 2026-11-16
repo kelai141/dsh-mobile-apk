@@ -2238,6 +2238,7 @@ plugins/dsh-android-linux-env/src/linux-host-asset-io.ts
 plugins/dsh-linux-bootstrap/build.mjs
 glob:plugins/dsh-linux-bootstrap/src/*.js
 glob:plugins/dsh-linux-bootstrap/client/*.js
+glob:plugins/dsh-linux-bootstrap/test/*.mjs
 glob:plugins/dsh-android-file-open/test/*.mjs
 glob:plugins/dsh-android-linux-env/test/*.mjs
 glob:plugins/dsh-session-delete/src/*.js
