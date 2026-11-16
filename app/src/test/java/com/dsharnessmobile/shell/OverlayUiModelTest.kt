@@ -341,6 +341,33 @@ class OverlayUiModelTest {
   }
 
   @Test
+  fun `卡片状态文案不把轮次失败冒充离线`() {
+    val failed = OverlayUiModel.onTurnEnd(toolModel(), "error", 100L, english = true)
+    assertEquals("Failed", OverlayUiModel.cardStateLabel(failed, english = true))
+    val offline = OverlayUiModel.onEngineStatus(failed, false, 200L)
+    assertEquals("Engine offline", OverlayUiModel.cardStateLabel(offline, english = true))
+    assertEquals("引擎离线", OverlayUiModel.cardStateLabel(offline, english = false))
+    val reconnected = OverlayUiModel.onEngineStatus(offline, true, 300L)
+    assertEquals("重连后回到真实轮次状态", "Failed", OverlayUiModel.cardStateLabel(reconnected, english = true))
+  }
+
+  @Test
+  fun `卡片状态文案离线优先于运行中并按语言成对`() {
+    val running = OverlayUiModel.onToolCall(
+      OverlayUiModel.onRuntimeStatus(toolModel(), true, 100L),
+      "c1",
+      "Read",
+      "a.kt",
+      110L,
+    )
+    assertEquals("Working", OverlayUiModel.cardStateLabel(running, english = true))
+    assertEquals("工作中", OverlayUiModel.cardStateLabel(running, english = false))
+    val offline = OverlayUiModel.onEngineStatus(running, false, 200L)
+    assertEquals("Engine offline", OverlayUiModel.cardStateLabel(offline, english = true))
+    assertEquals("引擎离线", OverlayUiModel.cardStateLabel(offline, english = false))
+  }
+
+  @Test
   fun `轮次失败离线重连后仍 Failed 而不是 Idle`() {
     val ended = OverlayUiModel.onTurnEnd(toolModel(), "error", 100L, english = true)
     val offline = OverlayUiModel.onEngineStatus(ended, false, 200L)

@@ -160,6 +160,14 @@ internal class OverlayPillView(
   fun measureContentWidthPx(maxWidthPx: Int): Int = visual.widthPx(maxWidthPx, density)
 
   /** 出现：120ms alpha 0->1（§4.4，时长取 [OverlayMotionSpec.pillInMs]）。动画关闭时立即到终态。 */
+  /** 窗口 addView 之前压到透明位，避免首帧闪现。 */
+  fun prepareEnter() {
+    cancelFiniteAnimation()
+    view.alpha = 0f
+    view.scaleX = 1f
+    view.scaleY = 1f
+  }
+
   fun fadeIn() {
     cancelFiniteAnimation()
     // 消散后同一实例可能被召回；启用动画时也必须撤销之前的 0.92 缩放。

@@ -30,7 +30,7 @@ import { SESSION_ID_ATTRIBUTE } from './session-marker.ts'
 export const OVERLAY_HOST_GLOBAL = '__dshOverlayHost'
 
 /** 宿主 API 版本：新增/改变方法语义时递增，原生据此判断能力。 */
-export const OVERLAY_HOST_VERSION = 2
+export const OVERLAY_HOST_VERSION = 3
 
 /** 会话列表行（只读我们确实要用的字段；缺字段一律按「没有」处理）。 */
 export interface OverlaySessionRowLike {
@@ -100,6 +100,8 @@ export interface OverlayWorkspacesFace {
 export interface OverlayUiWorkspaceFace {
   openSession(id: unknown): void
   openWorkspace?(id: unknown): Promise<void>
+  /** 新建会话（上游 uiWorkspace.startSession）；缺失时原生隐藏新建入口。 */
+  startSession?(): void
 }
 
 /** 输入机公开状态（InputState 的窄面）。 */
@@ -446,6 +448,7 @@ export class OverlayHost {
       send: (text: unknown, sessionId: unknown) => this.send(text, sessionId),
       removeAttachment: (index: unknown) => this.removeAttachment(index),
       openSession: (sessionId: unknown) => this.openSession(sessionId),
+      newSession: () => this.newSession(),
     }
   }
 
@@ -957,6 +960,21 @@ export class OverlayHost {
       ui.openSession(sessionId)
       return ok({})
     } catch (error) { return failWith('openSession', error) }
+  }
+
+  /**
+   * 新建会话并让页面自己切过去。
+   *
+   * 原生只管「请求新建」，会话落点由页面导航决定；成功后原生按 sessionId 变化跟随。
+   * 上游没有 startSession（旧页面）时返回明确错误，原生据此隐藏/禁用入口，而不是假装成功。
+   */
+  newSession(): string {
+    try {
+      const ui = this.faces.uiWorkspace?.()
+      if (ui === undefined || ui.startSession === undefined) return fail('new-session-unavailable')
+      ui.startSession()
+      return ok({})
+    } catch (error) { return failWith('newSession', error) }
   }
 
   openWorkspace(id: unknown): string {
