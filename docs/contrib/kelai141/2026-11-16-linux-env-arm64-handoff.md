@@ -55,7 +55,9 @@ bionic 把这个拒绝报成 `Permission denied`，与动态链接失败同句�
 
 应用进程（targetSdk >= 29）继承的是 `untrusted_app` 的 seccomp **白名单**，默认动作是
 `SECCOMP_RET_TRAP`。bionic 从不调用 `set_robust_list`(99) 与 `rseq`(293)，两者因此不在
-白名单里；而 glibc 在 `__libc_early_init` 就发出它们 —— 早于任何 `LD_PRELOAD` 构造函数。
+白名单里；而 glibc 的 loader 在为第一个线程做 TLS 初始化时（`init_tls` → `__tls_init_tp`）
+就发出它们 —— 早于任何重定位，也早于任何 `LD_PRELOAD` 代码；libc 之后在 `start_thread`
+里为每个新线程再发一次 `set_robust_list`，而那一刻全部信号被 block。
 
 真机上用应用控制台 + `ptrace` 抓到的顺序：`... set_tid_address -> set_robust_list`（被杀）；
 把 99 改成 `-ENOSYS` 后下一条被拦的是 `rseq`；两条都改成 `-ENOSYS` 后
@@ -63,8 +65,10 @@ bionic 把这个拒绝报成 `Permission denied`，与动态链接失败同句�
 99/293 返回 SIGSYS（共 243 个号被拦）。
 
 原「三个未验证的假设」全部证伪，逐条反证见 `2026-11-16-linux-env-seccomp-sigsys.md` §3：
-预载库构造函数、`LD_AUDIT` 的 `la_version`、`GLIBC_PRIVATE` 版本节覆盖
-`__libc_early_init`、`SIG_IGN` 继承 —— 四条都救不下来。
+预载库构造函数、`LD_PRELOAD` 的 `ifunc` resolver、`LD_AUDIT` 的 `la_version`、
+`GLIBC_PRIVATE` 版本节覆盖、`SIG_IGN` 继承、叠加 `ERRNO`/`USER_NOTIF`/`TRACE` 过滤器 ——
+六条都救不下来；业界先例（cortex / DroidDeck / termux-pacman）也都是改指令或改源码，
+没有人做到「早装处理器」。详见同目录 `2026-11-16-linux-env-seccomp-sigsys.md` §6。
 
 修复：`svc #0` 改成 `movn x0, #37`（`-ENOSYS`），loader 在构建期打、guest 的 libc 在
 安装阶段打（dsh-bionilux#22）。
