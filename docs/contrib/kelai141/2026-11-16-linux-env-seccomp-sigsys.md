@@ -111,6 +111,9 @@ svc #0        (0xd4000001)   ->   movn x0, #37   (0x928004a0)   == -ENOSYS
 140 B 的 stub，让 `rt_sigaction` 成为进程的第一条系统调用）。本轮只做到可行性原型
 （离线结构与时序验证通过，真机端到端未验），**未进 0.10.7**。
 
+这条增量已单独立文：`2026-11-17-linux-env-sigsys-entry-stub.md` —— 人话版根因、注入细节、
+处理器规则、G1–G4 验收计划与决策记录都在那里。
+
 ## 7. 其他
 
 - `check-native-linux-loader.mjs` 要求 loader 在 APK 内是 stored（method 0）这一条，

@@ -117,6 +117,9 @@ bionic 把这个拒绝报成 `Permission denied`，与动态链接失败同句�
 
 ### 6.2 其他
 
+- **后续增量（未进 0.10.7，尚未实现）**：把 SIGSYS 处理器装到 loader 第一行代码之前
+  （入口 stub），让任意被拦调用拿到 `-ENOSYS` 而不是被杀 —— 方案、原型边界与 G1–G4
+  验收计划见 `2026-11-17-linux-env-sigsys-entry-stub.md`。
 - `dsh-mobile-apk#1807`（执行地图补登记 linux-bootstrap 测试 glob）：CI 全绿、`MERGEABLE`，
   只差 review 与标签；它修掉的正是 main 上唯一一项 code-map 红。
 - `dsh-mobile-apk#1798`（追版 Harness 0.2.2-rc.3）：唯一红是
