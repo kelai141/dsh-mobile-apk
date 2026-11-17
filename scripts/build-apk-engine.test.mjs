@@ -12,7 +12,8 @@ function fixture(t) {
   isolateEngineEnv(t)
   const root = mkdtempSync(join(tmpdir(), 'dsh-build-engine-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
-  const [apkDir, outputDir, snapshot] = ['apk', 'out', 'snapshot.tar.xz'].map((name) => join(root, name))
+  const [apkDir, outputDir] = [join(root, 'apk'), join(root, 'out')]
+  const snapshot = join(root, 'snapshot.tar.xz')
   mkdirSync(apkDir, { recursive: true })
   writeFileSync(snapshot, Buffer.from('test-snapshot-bytes'))
   return { root, apkDir, outputDir, snapshot }
