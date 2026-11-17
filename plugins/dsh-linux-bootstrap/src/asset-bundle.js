@@ -371,6 +371,133 @@ export async function sweepStaleBundleDirs(root, options = {}) {
   return removed
 }
 
+const SHA256_DIR = /^[a-f0-9]{64}$/
+const STAGING_PART_DIR = /^staging-[a-f0-9]{64}\.part$/
+
+function isPathWithin(parent, child) {
+  const rel = path.relative(parent, child)
+  return rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel)
+}
+
+/**
+ * Collect all 64-char SHA-256 asset digests pinned by a release manifest.
+ *
+ * When `runtimeId` is provided, only that runtime's assets (plus top-level
+ * plugins) are kept so assets for unused runtimes/releases are pruned.
+ *
+ * @param {object|null|undefined} manifest
+ * @param {string|null|undefined} [runtimeId]
+ * @returns {Set<string>}
+ */
+export function collectManifestAssetDigests(manifest, runtimeId) {
+  const digests = new Set()
+  if (!manifest || typeof manifest !== 'object') return digests
+  for (const asset of [manifest.plugins?.runtime, manifest.plugins?.bootstrap]) {
+    if (typeof asset?.sha256 === 'string' && SHA256_DIR.test(asset.sha256)) {
+      digests.add(asset.sha256)
+    }
+  }
+  const runtimes = Array.isArray(manifest.runtimes) ? manifest.runtimes : []
+  const selected = runtimeId ? runtimes.filter((runtime) => runtime?.id === runtimeId) : runtimes
+  const targets = selected.length > 0 ? selected : runtimes
+  for (const runtime of targets) {
+    for (const field of ['backendAsset', 'rootfsAsset', 'nodeAsset']) {
+      const sha = runtime?.[field]?.sha256
+      if (typeof sha === 'string' && SHA256_DIR.test(sha)) digests.add(sha)
+    }
+  }
+  return digests
+}
+
+/**
+ * Prune retired `<pluginRoot>/<sha256>` runtime-plugin slots after commit or uninstall.
+ *
+ * Best-effort: never throws so a locked directory cannot turn an already-committed
+ * install/uninstall into a failure. Never touches `keepDirectory` or non-slot entries.
+ */
+export async function pruneOldPluginSlots(pluginRoot, { keepDirectory = null, removeTempArtifacts = false } = {}) {
+  const removed = []
+  const failed = []
+  if (typeof pluginRoot !== 'string' || !pluginRoot) return { removed, failed }
+  const root = path.resolve(pluginRoot)
+  const keepResolved = typeof keepDirectory === 'string' && keepDirectory !== '' ? path.resolve(keepDirectory) : null
+  let entries
+  try {
+    entries = await readdir(root, { withFileTypes: true })
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return { removed, failed }
+    console.warn('[dsh-linux-bootstrap] plugin slot scan failed: ' + root + ' (' + String(error?.message ?? error) + ')')
+    return { removed, failed }
+  }
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue
+    const target = path.join(root, entry.name)
+    if (!isPathWithin(root, target)) continue
+    const isShaSlot = entry.isDirectory() && SHA256_DIR.test(entry.name)
+    const isTemp = removeTempArtifacts && (
+      (entry.isDirectory() && (entry.name.startsWith('.backup-') || entry.name.startsWith('.stage-'))) ||
+      (entry.isFile() && entry.name.startsWith('.asset-'))
+    )
+    if (!isShaSlot && !isTemp) continue
+    if (isShaSlot && keepResolved !== null && path.resolve(target) === keepResolved) continue
+    try {
+      await rm(target, { recursive: true, force: true })
+      removed.push(entry.name)
+    } catch (error) {
+      failed.push(entry.name)
+      console.warn('[dsh-linux-bootstrap] old plugin slot cleanup skipped: ' + target + ' (' + String(error?.message ?? error) + ')')
+    }
+  }
+  return { removed, failed }
+}
+
+/**
+ * Prune retired `<hostStagingRoot>/<sha256>` directories and stale `staging-<sha256>.part`
+ * leftovers after commit or uninstall.
+ *
+ * Best-effort: never deletes digests in `keepShas` (unless `pruneAll` is true) and never
+ * deletes state files, user data, or non-matching directories.
+ */
+export async function pruneOldHostStaging(hostStagingRoot, { keepShas = null, pruneAll = false } = {}) {
+  const removed = []
+  const failed = []
+  if (typeof hostStagingRoot !== 'string' || !hostStagingRoot) return { removed, failed }
+  const stagingRoot = path.resolve(hostStagingRoot)
+  const keepSet = pruneAll ? new Set() : (keepShas instanceof Set ? keepShas : new Set(keepShas ?? []))
+
+  const sweepDir = async (dir, { pruneShaSlots = false } = {}) => {
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return
+      console.warn('[dsh-linux-bootstrap] staging scan failed: ' + dir + ' (' + String(error?.message ?? error) + ')')
+      return
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink() || !entry.isDirectory()) continue
+      const target = path.join(dir, entry.name)
+      if (!isPathWithin(dir, target)) continue
+      const isShaDir = pruneShaSlots && SHA256_DIR.test(entry.name) && (pruneAll || !keepSet.has(entry.name))
+      const isPartDir = STAGING_PART_DIR.test(entry.name)
+      if (!isShaDir && !isPartDir) continue
+      try {
+        await rm(target, { recursive: true, force: true })
+        removed.push(target)
+      } catch (error) {
+        failed.push(target)
+        console.warn('[dsh-linux-bootstrap] old staging cleanup skipped: ' + target + ' (' + String(error?.message ?? error) + ')')
+      }
+    }
+  }
+
+  await sweepDir(stagingRoot, { pruneShaSlots: true })
+  if (path.basename(stagingRoot) === 'staging') {
+    await sweepDir(path.dirname(stagingRoot), { pruneShaSlots: false })
+  }
+  return { removed, failed }
+}
+
 async function validatePackage(directory, packageName, entry) {
   const metadataPath = path.join(directory, 'package.json')
   const metadataStat = await lstat(metadataPath)

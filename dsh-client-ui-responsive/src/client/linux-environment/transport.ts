@@ -52,6 +52,7 @@ export interface LinuxStatus {
   architecture?: string
   injectionActivated?: boolean
   pluginReleaseUrls?: { bootstrap?: string; runtime?: string }
+  checkError?: string
   error?: string
 }
 
