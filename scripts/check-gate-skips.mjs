@@ -259,10 +259,33 @@ const PROBE_HOOK = [
 ].join('\n')
 
 // 慢门禁实测：check-script-tests / check-patch-test-manifest / check-release-gates 单跑 150–160 s，
-// 并发 8 路时更慢；给足预算，超时仍按「无法证明」判红（不按已计数处理）。
-const PROBE_TIMEOUT_MS = 600 * 1000
-/** 并发探针数：门禁是独立进程、互不共享状态，串行跑完 70 个要十几分钟（实测）。 */
-const PROBE_CONCURRENCY = 8
+// WSL2 DrvFs 下并发 8 路会互相抢 IO 导致超时；默认降为 4 路并发并把超时放到 1200s，同时支持环境变量覆写。
+const DEFAULT_PROBE_TIMEOUT_MS = 1200 * 1000
+/** 并发探针数：门禁是独立进程、互不共享状态，4 路兼顾速度与 DrvFs 稳定性。 */
+const DEFAULT_PROBE_CONCURRENCY = 4
+
+function parsePositiveIntEnv(name, raw, fallback) {
+  if (raw === undefined || raw === '') return fallback
+  const text = String(raw).trim()
+  if (!/^[1-9]\d*$/.test(text)) {
+    throw new Error(`${name} must be a positive integer, got: ${JSON.stringify(raw)}`)
+  }
+  const value = Number(text)
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} out of safe positive integer range: ${JSON.stringify(raw)}`)
+  }
+  return value
+}
+
+let PROBE_TIMEOUT_MS
+let PROBE_CONCURRENCY
+try {
+  PROBE_TIMEOUT_MS = parsePositiveIntEnv('DSH_GATE_SKIPS_TIMEOUT_MS', process.env.DSH_GATE_SKIPS_TIMEOUT_MS, DEFAULT_PROBE_TIMEOUT_MS)
+  PROBE_CONCURRENCY = parsePositiveIntEnv('DSH_GATE_SKIPS_CONCURRENCY', process.env.DSH_GATE_SKIPS_CONCURRENCY, DEFAULT_PROBE_CONCURRENCY)
+} catch (error) {
+  console.error('CHECK-GATE-SKIPS FAILED：' + error.message)
+  process.exit(2)
+}
 
 /**
  * 真跑一个门禁并用探针抓它的实际输出（运行期实证）。异步 + 并发池：70 个门禁串行要十几分钟。
@@ -516,7 +539,9 @@ const NODE_CHAIN = 'scripts/build-apk.mjs'
 const PWSH_CHAIN = 'scripts/build-apk-013.ps1'
 const selfTest = (silent) => {
   const fails = []
+  let total = 0
   const t = (label, ok, detail) => {
+    total += 1
     if (!ok) fails.push(label + (detail === undefined ? '' : ' -> ' + detail))
     else if (!silent) console.log('PASS  [self-test] ' + label)
   }
@@ -635,24 +660,38 @@ const selfTest = (silent) => {
     unmetRequirements({ requires: ['snapshoT'] }, envAll).length === 1)
   t('#1154 无 requires 的条目行为不变（环境不参与判定，照旧销账）',
     unmetRequirements({ kinds: ['no-verdict'] }, envNone).length === 0)
-  return fails
+
+  // 44-46 探针并发与超时环境变量解析
+  t('探针参数：缺省并发=4、超时=1200000ms',
+    parsePositiveIntEnv('DSH_GATE_SKIPS_CONCURRENCY', undefined, DEFAULT_PROBE_CONCURRENCY) === 4
+    && parsePositiveIntEnv('DSH_GATE_SKIPS_TIMEOUT_MS', '', DEFAULT_PROBE_TIMEOUT_MS) === 1200 * 1000)
+  t('探针参数：合法正整数覆写生效（含首尾空白）',
+    parsePositiveIntEnv('DSH_GATE_SKIPS_CONCURRENCY', ' 2 ', DEFAULT_PROBE_CONCURRENCY) === 2
+    && parsePositiveIntEnv('DSH_GATE_SKIPS_TIMEOUT_MS', '900000', DEFAULT_PROBE_TIMEOUT_MS) === 900000)
+  const throwsBadEnv = (val) => {
+    try { parsePositiveIntEnv('DSH_GATE_SKIPS_TIMEOUT_MS', val, DEFAULT_PROBE_TIMEOUT_MS); return false }
+    catch (err) { return /DSH_GATE_SKIPS_TIMEOUT_MS/.test(err.message) }
+  }
+  t('探针参数：非法值（abc/0/-1/1.5/空白）一律拒绝',
+    ['abc', '0', '-1', '1.5', '   '].every(throwsBadEnv))
+  return { fails, total }
 }
 
 if (argv.includes('--self-test')) {
-  const stFails = selfTest(false)
-  if (stFails.length > 0) {
-    console.error('CHECK-GATE-SKIPS SELF-TEST FAILED（' + stFails.length + ' 项）：' + stFails.join('；'))
+  const st = selfTest(false)
+  if (st.fails.length > 0) {
+    console.error('CHECK-GATE-SKIPS SELF-TEST FAILED（' + st.fails.length + '/' + st.total + ' 项）：' + st.fails.join('；'))
     process.exit(1)
   }
-  console.log('CHECK-GATE-SKIPS SELF-TEST PASSED（46 项判别力断言：声明提取 / 执行点扫描 / SKIP 行与计数口径 / 运行期审计六态 / 严格档八态 / 判据行 / 零判据标记 / 静态写点 / 销账环境前置）')
+  console.log('CHECK-GATE-SKIPS SELF-TEST PASSED（' + st.total + ' 项判别力断言：声明提取 / 执行点扫描 / SKIP 行与计数口径 / 运行期审计六态 / 严格档八态 / 判据行 / 零判据标记 / 静态写点 / 销账环境前置 / 探针参数解析）')
   process.exit(0)
 }
 
 // 判据自证：主体每次运行都先自证判别力（静默，仅失败时出声）。
 {
-  const stFails = selfTest(true)
-  if (stFails.length > 0) {
-    console.error('CHECK-GATE-SKIPS FAILED：判据自证不通过（' + stFails.length + ' 项）—— ' + stFails.join('；'))
+  const st = selfTest(true)
+  if (st.fails.length > 0) {
+    console.error('CHECK-GATE-SKIPS FAILED：判据自证不通过（' + st.fails.length + '/' + st.total + ' 项）—— ' + st.fails.join('；'))
     process.exit(1)
   }
 }
