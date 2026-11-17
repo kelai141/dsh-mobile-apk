@@ -2008,6 +2008,7 @@ app/src/main/java/com/dsharnessmobile/shell/PendingJsEntry.kt
 app/src/main/java/com/dsharnessmobile/shell/NotifyTailSplit.kt
 plugins/dsh-linux-bootstrap/test/rollback-trace-1528.test.mjs
 plugins/dsh-linux-bootstrap/test/asset-bundle-rollback.test.mjs
+plugins/dsh-linux-bootstrap/test/install-offline-and-error-persist.test.mjs
 app/src/main/java/com/dsharnessmobile/shell/WorkspaceReclaim.kt
 app/src/main/java/com/dsharnessmobile/shell/PendingJsDrain.kt
 app/src/main/java/com/dsharnessmobile/shell/ForegroundPageRecoveryPolicy.kt

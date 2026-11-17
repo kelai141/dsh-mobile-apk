@@ -40,6 +40,7 @@ const UPSTREAM_PACKAGE = 'packages/linux-bootstrap'
 const MANIFEST = {
   'test/rollback-trace-1528.test.mjs': 'ac891c9a72e73a94464181298e7c2a98451f24866139eb1dbe6ec61185e0cf23',
   'test/asset-bundle-rollback.test.mjs': '33371c99e467e6ae9a23b879ede6e0383fe6c6f6abb5d25669592eb636edf967',
+  'test/install-offline-and-error-persist.test.mjs': '93bb42fba74740dd6e1b40672720eaf003d46245c79a782c3534f742a3429140',
   'README.md': '9809a0991a5314ae7baafdae3a53147099b1dbc66100060519d157512732b8bb',
   'client/api.js': 'e53e3a05f6c9922a9186101a88430fea231880356045289439434e61089ccc38',
   'client/assets.js': '9cbb67716f7d0b7d433d5e3a4d324b16f5121fd7eea64f77f71a4cc02708bc5c',
@@ -47,7 +48,7 @@ const MANIFEST = {
   'client/index.js': '5c53f8eddad50e1092ce7f46c5efb19776f5bf0f9310e50c5c0df8299e60f5aa',
   'src/asset-bundle.js': 'a73998cd72301dae51a7f0ed7e9f2897859131d2bd4cb76cd9c67b0d8b8a601e',
   'src/github.js': '8bf1bdac19fb17dc866087342b55714661e762124953bb6f697a4c87f04e70c3',
-  'src/index.js': 'ee3cb7b35086b0f1848ddb1783c2b445ca3163c333b247c397121e2d1bb22673',
+  'src/index.js': '2db5d762273ab52d2c7b65260ebf68abcce3250badd53fadc27450fce92d83d5',
   'src/manifest.js': '45b0655c3702bd236090776e3d1b276416ab5a643a2ed58b47b4343bf5c8b86c',
   'src/routes.js': '678391176bcd81ba6cbbbab293a4731d07e37e99c51178d7605821eac6aa5bb9',
   'src/status.js': '494238e39094999e44105d1c56ca562f88ce3e65146bd3070806d4c82dd98f7b',
