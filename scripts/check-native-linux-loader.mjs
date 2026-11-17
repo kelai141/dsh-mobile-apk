@@ -25,10 +25,12 @@
 // --------------------------------
 //   A. 输入档（--source + --abi + --stage）：该 ABI 的 loader 必须在场，且 ELF 是 64 位、
 //      e_machine 与目标 ABI 一致。缺失 / 架构不符 / 非 ELF ⇒ 判红（拒绝打包该 ABI）。
-//   B. 产物档（--apk）：APK 的 lib/<jniAbi>/libbionilux-loader.so 必须在场、归档内是
-//      **stored**（method 0）、ELF e_machine 与 APK 的 ABI 一致。stored 这一条不是洁癖：
-//      useLegacyPackaging=true 才让它以普通文件落进 nativeLibraryDir，而 #1704 的承诺正是
-//      「设备上 applicationInfo.nativeLibraryDir 里能看到它，且是普通文件」。
+//   B. 产物档（--apk）：APK 的 lib/<jniAbi>/libbionilux-loader.so 必须在场、压缩方式与 manifest 一致
+//      （method=0 stored 或 method=8 deflate；useLegacyPackaging=true 在 AGP 8.8.2 下会以 method=8
+//      打包并向 AndroidManifest.xml 注入 android:extractNativeLibs="true"，安装时由 PackageManager
+//      解压为 nativeLibraryDir 下的普通可执行文件）、且提取后 ELF64 e_machine 与本包 ABI 一致。
+//      若 AndroidManifest.xml 声明 android:extractNativeLibs="false"（或 method=8 时未声明 true），
+//      安装后不会落盘为普通文件 ⇒ 判红。
 //   C. 混入档（--apk）：本包 lib/ 下**不得**出现另一个 ABI 的 libbionilux-loader.so
 //      （issue #1705「双 ABI 构建是同一个 gradle 源集」那条警告的机器判据）。
 //
@@ -48,6 +50,8 @@
 // 退出码：0 = 通过（或已计数并打印 SKIP）；1 = 判据不满足（含严格档缺席）；2 = 用法错误。
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import zlib from 'node:zlib'
 
 /** 发布产物里 loader 的固定文件名（Gradle 只把 lib*.so 当 jniLib 处理，名字不能随便取）。 */
 export const LOADER_FILE_NAME = 'libbionilux-loader.so'
@@ -153,11 +157,6 @@ export function detectLoaderAbi(names) {
 /**
  * 最小 zip 中央目录解析（纯函数，供 --self-test 与产物档共用）。
  *
- * 只回答「有哪些条目、各自的压缩方法与数据偏移」。本门禁的产物断言只需要 stored 条目
- * （method 0）的原始字节，因此不实现 inflate —— 这条限制反过来**就是**判据的一部分：
- * 若 loader 被 deflate 打包（useLegacyPackaging 失效），它不会以普通文件落进
- * nativeLibraryDir，本函数会如实报出 method，由产物档判红。
- *
  * 返回 { entries: [{ name, method, compressedSize, size, localOffset }] } 或 null（不可解）。
  */
 export function readZipCentralDirectory(buffer) {
@@ -196,13 +195,14 @@ export function readZipCentralDirectory(buffer) {
 }
 
 /**
- * 从 zip 里取某个 stored 条目的原始字节（纯函数）。
+ * 从 zip 里取某个条目的明文字节（纯函数，支持 method=0 stored 与 method=8 deflate）。
  *
- * 非 stored（method !== 0）返回 { ok:false, method } —— 由调用方把它当成判据失败，
- * 而不是在这里悄悄解压：解压成功会让「useLegacyPackaging 失效」这条缺陷隐形。
+ * 其他压缩方法直接失败；deflate 条目先核对压缩区间不越界再 inflateRawSync 并核对解压后长度。
  */
-export function readStoredEntry(buffer, entry) {
-  if (entry.method !== 0) return { ok: false, method: entry.method }
+export function readZipEntry(buffer, entry) {
+  if (entry.method !== 0 && entry.method !== 8) {
+    return { ok: false, method: entry.method, why: '不支持的压缩方法（method ' + entry.method + '，仅支持 stored=0 / deflate=8）' }
+  }
   const p = entry.localOffset
   if (p + 30 > buffer.length || buffer.readUInt32LE(p) !== 0x04034b50) {
     return { ok: false, method: entry.method, why: '本地文件头魔数不符' }
@@ -210,21 +210,142 @@ export function readStoredEntry(buffer, entry) {
   const nameLen = buffer.readUInt16LE(p + 26)
   const extraLen = buffer.readUInt16LE(p + 28)
   const start = p + 30 + nameLen + extraLen
-  const end = start + entry.size
+  const payloadLen = entry.method === 0 ? entry.size : entry.compressedSize
+  const end = start + payloadLen
   if (end > buffer.length) return { ok: false, method: entry.method, why: '条目数据越界（归档被截断）' }
-  return { ok: true, data: buffer.subarray(start, end) }
+  const raw = buffer.subarray(start, end)
+  if (entry.method === 0) return { ok: true, data: raw }
+  let data
+  try {
+    data = zlib.inflateRawSync(raw)
+  } catch (error) {
+    return { ok: false, method: entry.method, why: 'deflate 解压失败：' + error.message }
+  }
+  if (data.length !== entry.size) {
+    return {
+      ok: false,
+      method: entry.method,
+      why: 'deflate 解压后长度不符（期望 ' + entry.size + ' B，实际 ' + data.length + ' B）',
+    }
+  }
+  return { ok: true, data }
+}
+
+const ATTR_EXTRACT_NATIVE_LIBS = 0x010104ea
+
+/**
+ * 从编译后的二进制 AndroidManifest.xml（AXML）解析 `<application android:extractNativeLibs>`。
+ *
+ * 返回 { ok: true, extractNativeLibs: boolean | null }（null 表示 <application> 未显式声明）
+ * 或 { ok: false, why }。零第三方依赖，与本仓其他门禁同口径。
+ */
+export function readManifestExtractNativeLibs(buffer) {
+  if (!buffer || buffer.length < 8) return { ok: false, why: 'AndroidManifest.xml 字节不足' }
+  if (buffer.readUInt16LE(0) !== 0x0003) return { ok: false, why: '不是二进制 AXML（type != 0x0003）' }
+  const fileHeaderSize = buffer.readUInt16LE(2)
+  const fileSize = buffer.readUInt32LE(4)
+  if (fileHeaderSize < 8 || fileHeaderSize > buffer.length || fileSize > buffer.length) {
+    return { ok: false, why: 'AXML 头部越界' }
+  }
+  let off = fileHeaderSize
+  const strings = []
+  const resIds = []
+  while (off + 8 <= fileSize) {
+    const type = buffer.readUInt16LE(off)
+    const hdrSize = buffer.readUInt16LE(off + 2)
+    const chunkSize = buffer.readUInt32LE(off + 4)
+    if (hdrSize < 8 || chunkSize < hdrSize || off + chunkSize > fileSize) {
+      return { ok: false, why: 'AXML chunk 越界' }
+    }
+    if (type === 0x0001) {
+      if (hdrSize < 28) return { ok: false, why: 'AXML 字符串池头不足' }
+      const strCount = buffer.readUInt32LE(off + 8)
+      const flags = buffer.readUInt32LE(off + 16)
+      const strStart = buffer.readUInt32LE(off + 20)
+      const isUtf8 = (flags & 0x100) !== 0
+      const chunkEnd = off + chunkSize
+      if (off + hdrSize + strCount * 4 > chunkEnd || off + strStart > chunkEnd) {
+        return { ok: false, why: 'AXML 字符串池偏移越界' }
+      }
+      for (let i = 0; i < strCount; i += 1) {
+        let pos = off + strStart + buffer.readUInt32LE(off + hdrSize + i * 4)
+        if (pos >= chunkEnd) return { ok: false, why: 'AXML 字符串偏移越界' }
+        if (isUtf8) {
+          if (pos >= chunkEnd) return { ok: false, why: 'AXML UTF-8 长度越界' }
+          pos += (buffer[pos] & 0x80) ? 2 : 1
+          if (pos >= chunkEnd) return { ok: false, why: 'AXML UTF-8 字节长度越界' }
+          let u8len = buffer[pos]
+          if (u8len & 0x80) {
+            if (pos + 1 >= chunkEnd) return { ok: false, why: 'AXML UTF-8 字节长度越界' }
+            u8len = ((u8len & 0x7f) << 8) | buffer[pos + 1]
+            pos += 2
+          } else {
+            pos += 1
+          }
+          if (pos + u8len > chunkEnd) return { ok: false, why: 'AXML UTF-8 内容越界' }
+          strings.push(buffer.toString('utf8', pos, pos + u8len))
+        } else {
+          if (pos + 2 > chunkEnd) return { ok: false, why: 'AXML UTF-16 长度越界' }
+          let len = buffer.readUInt16LE(pos)
+          pos += 2
+          if (len & 0x8000) {
+            if (pos + 2 > chunkEnd) return { ok: false, why: 'AXML UTF-16 长度越界' }
+            len = ((len & 0x7fff) << 16) | buffer.readUInt16LE(pos)
+            pos += 2
+          }
+          if (pos + len * 2 > chunkEnd) return { ok: false, why: 'AXML UTF-16 内容越界' }
+          strings.push(buffer.toString('utf16le', pos, pos + len * 2))
+        }
+      }
+    } else if (type === 0x0180) {
+      for (let pos = off + hdrSize; pos + 4 <= off + chunkSize; pos += 4) {
+        resIds.push(buffer.readUInt32LE(pos))
+      }
+    } else if (type === 0x0102) {
+      if (off + hdrSize + 20 > off + chunkSize) return { ok: false, why: 'AXML 元素节点越界' }
+      const nameIdx = buffer.readInt32LE(off + hdrSize + 4)
+      if (nameIdx >= 0 && strings[nameIdx] === 'application') {
+        const attrStart = buffer.readUInt16LE(off + hdrSize + 8)
+        const attrSize = buffer.readUInt16LE(off + hdrSize + 10)
+        const attrCount = buffer.readUInt16LE(off + hdrSize + 12)
+        if (attrCount > 0 && attrSize < 20) return { ok: false, why: 'AXML 属性步长异常' }
+        for (let i = 0; i < attrCount; i += 1) {
+          const aOff = off + hdrSize + attrStart + i * attrSize
+          if (aOff + 20 > off + chunkSize) return { ok: false, why: 'AXML 属性越界' }
+          const aNameIdx = buffer.readInt32LE(aOff + 4)
+          const aType = buffer[aOff + 15]
+          const aData = buffer.readInt32LE(aOff + 16)
+          const isExtractAttr = (aNameIdx >= 0 && resIds[aNameIdx] === ATTR_EXTRACT_NATIVE_LIBS)
+            || (aNameIdx >= 0 && strings[aNameIdx] === 'extractNativeLibs')
+          if (isExtractAttr) {
+            if (aType === 0x12) {
+              return { ok: true, extractNativeLibs: aData !== 0 }
+            }
+            if (aType === 0x03 && aData >= 0 && aData < strings.length) {
+              if (strings[aData] === 'true') return { ok: true, extractNativeLibs: true }
+              if (strings[aData] === 'false') return { ok: true, extractNativeLibs: false }
+            }
+            return { ok: false, why: 'android:extractNativeLibs 属性类型非布尔（type=0x' + aType.toString(16) + '）' }
+          }
+        }
+        return { ok: true, extractNativeLibs: null }
+      }
+    }
+    off += chunkSize
+  }
+  return { ok: false, why: 'AndroidManifest.xml 中未找到 <application> 节点' }
 }
 
 /**
  * 产物断言（纯函数）：给定 APK 的 zip 中央目录 + 它自己的 ABI，回答四件事。
  *
  *   · 该 ABI 的 loader 在场；
- *   · 它是 stored（普通文件落盘的证据）；
- *   · 它的 ELF e_machine 与本 APK 的 ABI 一致；
+ *   · 压缩方式受支持（method=0 stored 或 method=8 deflate）且与 manifest `extractNativeLibs` 一致；
+ *   · 提取后的 ELF64 e_machine 与本 APK 的 ABI 一致；
  *   · 本包 lib/ 下**没有**另一个 ABI 的 loader（#1705 的同源集警告）。
  * entryBytes(entry) 供自测注入（避免为了测判据造一个真 APK）。
  */
-export function evaluateApkLoader(entries, abi, entryBytes) {
+export function evaluateApkLoader(entries, abi, entryBytes, options = {}) {
   const spec = ABI_TABLE[abi]
   if (spec === undefined) return { ok: false, problems: ['未知 ABI: ' + abi], evidence: {} }
   const problems = []
@@ -238,10 +359,9 @@ export function evaluateApkLoader(entries, abi, entryBytes) {
     evidence.present = true
     evidence.method = entry.method
     evidence.size = entry.size
-    if (entry.method !== 0) {
-      // useLegacyPackaging 失效时 loader 会被压缩：安装后不是 nativeLibraryDir 里的普通文件。
-      problems.push(wanted + ' 在归档里是压缩条目（method ' + entry.method
-        + '），不是 stored —— useLegacyPackaging = true 未生效，安装后不会是普通文件')
+    if (entry.method !== 0 && entry.method !== 8) {
+      problems.push(wanted + ' 使用了不支持的压缩方式（method ' + entry.method
+        + '），仅支持 stored（0）或 deflate（8）')
     } else {
       const bytes = entryBytes(entry)
       if (!bytes || !bytes.ok) {
@@ -250,6 +370,33 @@ export function evaluateApkLoader(entries, abi, entryBytes) {
         const elf = classifyLoaderElf(bytes.data, abi)
         evidence.elf = { machine: elf.machine, machineName: elf.machineName, ok: elf.ok }
         if (!elf.ok) problems.push(wanted + '：' + elf.why)
+      }
+    }
+  }
+  const manifestEntry = entries.find((e) => e.name === 'AndroidManifest.xml')
+  if (manifestEntry === undefined) {
+    if (options.requireManifest) {
+      problems.push('APK 内缺 AndroidManifest.xml，无法核对 extractNativeLibs 一致性')
+    } else {
+      evidence.extractNativeLibs = 'absent'
+    }
+  } else {
+    const mfBytes = entryBytes(manifestEntry)
+    if (!mfBytes || !mfBytes.ok) {
+      problems.push('AndroidManifest.xml 的数据取不出来：' + ((mfBytes && mfBytes.why) || '未知原因'))
+    } else {
+      const mf = readManifestExtractNativeLibs(mfBytes.data)
+      if (!mf.ok) {
+        problems.push('AndroidManifest.xml 解析失败：' + mf.why)
+      } else {
+        evidence.extractNativeLibs = mf.extractNativeLibs
+        if (mf.extractNativeLibs === false) {
+          problems.push('AndroidManifest.xml 的 <application> 声明 android:extractNativeLibs="false"'
+            + ' —— 安装时不会将 loader 解压到 nativeLibraryDir（请保持 useLegacyPackaging = true）')
+        } else if (entry !== undefined && entry.method === 8 && mf.extractNativeLibs !== true) {
+          problems.push(wanted + ' 为 deflate 压缩（method 8），但 AndroidManifest.xml 未声明'
+            + ' android:extractNativeLibs="true" —— useLegacyPackaging = true 未完整生效')
+        }
       }
     }
   }
@@ -272,33 +419,35 @@ export function evaluateApkLoader(entries, abi, entryBytes) {
 const USAGE = [
   'usage: node scripts/check-native-linux-loader.mjs [options]',
   '  --source <dir> --abi <arm64|x86_64> --stage <dir>   校验输入档并按单 ABI 产出 loader 目录',
-  '  --apk <file> [--abi <arm64|x86_64>]                 校验最终产物的 loader（在场/架构/stored/混入）',
+  '  --apk <file> [--abi <arm64|x86_64>]                 校验最终产物的 loader（在场/架构/extractNativeLibs/混入）',
   '  --dir <dir>                                         递归收集目录下的 *.apk 逐个校验',
   '  --require                                           严格档：缺席即判红',
   '  --self-test                                         纯判据离线自检',
 ].join('\n')
 
-const options = { requires: [] }
-const argv = process.argv.slice(2)
-for (let i = 0; i < argv.length; i += 1) {
-  const arg = argv[i]
-  if (arg === '--require') options.require = true
-  else if (arg === '--self-test') options.selfTest = true
-  else if (arg === '--help' || arg === '-h') options.help = true
-  else if (arg === '--source') options.source = argv[++i]
-  else if (arg === '--stage') options.stage = argv[++i]
-  else if (arg === '--abi') options.requires.push(argv[++i])
-  else if (arg === '--apk') options.apk = argv[++i]
-  else if (arg === '--dir') options.dir = argv[++i]
-  else if (options.unknown === undefined) options.unknown = arg
+const parseCliArgs = (argv) => {
+  const opts = { requires: [] }
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]
+    if (arg === '--require') opts.require = true
+    else if (arg === '--self-test') opts.selfTest = true
+    else if (arg === '--help' || arg === '-h') opts.help = true
+    else if (arg === '--source') opts.source = argv[++i]
+    else if (arg === '--stage') opts.stage = argv[++i]
+    else if (arg === '--abi') opts.requires.push(argv[++i])
+    else if (arg === '--apk') opts.apk = argv[++i]
+    else if (arg === '--dir') opts.dir = argv[++i]
+    else if (opts.unknown === undefined) opts.unknown = arg
+  }
+  return opts
 }
 
 let skipTotal = 0
 /** 缺席纪律：计数 + 打印合计；严格档当场判红（不得以 SKIP 结案）。 */
-const skip = (why) => {
+const skip = (why, requireMode = false) => {
   skipTotal += 1
-  console.log('SKIP(#' + skipTotal + ')  ' + why + (options.require ? ' —— --require 档不得 SKIP' : ''))
-  if (options.require) {
+  console.log('SKIP(#' + skipTotal + ')  ' + why + (requireMode ? ' —— --require 档不得 SKIP' : ''))
+  if (requireMode) {
     console.log('NATIVE-LINUX-LOADER CHECK FAILED：严格档缺席未判定（SKIP=' + skipTotal + '）')
     process.exitCode = 1
     return
@@ -442,7 +591,7 @@ const checkApk = (apkFile, abiHint) => {
     console.log('NATIVE-LINUX-LOADER CHECK FAILED：无法从文件名或 lib/ 内容判定 ABI，请显式给 --abi：' + abs)
     return false
   }
-  const verdict = evaluateApkLoader(zip.entries, abi, (entry) => readStoredEntry(buffer, entry))
+  const verdict = evaluateApkLoader(zip.entries, abi, (entry) => readZipEntry(buffer, entry), { requireManifest: true })
   const name = path.basename(abs)
   if (!verdict.ok) {
     for (const problem of verdict.problems) console.log('  FAIL  ' + name + ' [' + abi + '] ' + problem)
@@ -452,6 +601,7 @@ const checkApk = (apkFile, abiHint) => {
   const ev = verdict.evidence
   console.log('  OK    ' + name + ' [' + abi + '] lib/' + ev.jniDir + '/' + LOADER_FILE_NAME
     + ' method=' + ev.method + ' size=' + ev.size + ' elf=' + ev.elf.machineName
+    + ' extractNativeLibs=' + String(ev.extractNativeLibs)
     + ' foreign=[' + (ev.foreign.join(', ') || 'none') + ']')
   return true
 }
@@ -480,7 +630,85 @@ const makeElf = (machine, elfClass = 2) => {
   return buf
 }
 
-/** 造一个最小 zip（stored 或指定 method），只含给定条目。 */
+/** 造一个最小二进制 AndroidManifest.xml（AXML），支持 UTF-16LE 或 UTF-8 字符串池。 */
+const makeBinaryManifest = ({ extractNativeLibs, utf8 = false } = {}) => {
+  const strs = ['application']
+  const resIds = [0]
+  if (extractNativeLibs !== undefined) {
+    strs.push('extractNativeLibs')
+    resIds.push(ATTR_EXTRACT_NATIVE_LIBS)
+  }
+  const encodeStr = (s) => {
+    if (utf8) {
+      const b = Buffer.from(s, 'utf8')
+      return Buffer.concat([Buffer.from([s.length, b.length]), b, Buffer.from([0])])
+    }
+    const b = Buffer.from(s, 'utf16le')
+    const hdr = Buffer.alloc(2)
+    hdr.writeUInt16LE(s.length, 0)
+    return Buffer.concat([hdr, b, Buffer.from([0, 0])])
+  }
+  const encodedStrs = strs.map(encodeStr)
+  const offsets = []
+  let sLen = 0
+  for (const buf of encodedStrs) {
+    offsets.push(sLen)
+    sLen += buf.length
+  }
+  const padLen = (4 - (sLen % 4)) % 4
+  const strData = Buffer.concat([...encodedStrs, Buffer.alloc(padLen)])
+  const strPoolHdrSize = 28
+  const strStart = strPoolHdrSize + strs.length * 4
+  const strPool = Buffer.alloc(strStart + strData.length)
+  strPool.writeUInt16LE(0x0001, 0)
+  strPool.writeUInt16LE(strPoolHdrSize, 2)
+  strPool.writeUInt32LE(strPool.length, 4)
+  strPool.writeUInt32LE(strs.length, 8)
+  strPool.writeUInt32LE(0, 12)
+  strPool.writeUInt32LE(utf8 ? 0x100 : 0, 16)
+  strPool.writeUInt32LE(strStart, 20)
+  strPool.writeUInt32LE(0, 24)
+  offsets.forEach((off, idx) => strPool.writeUInt32LE(off, strPoolHdrSize + idx * 4))
+  strData.copy(strPool, strStart)
+
+  const resMap = Buffer.alloc(8 + resIds.length * 4)
+  resMap.writeUInt16LE(0x0180, 0)
+  resMap.writeUInt16LE(8, 2)
+  resMap.writeUInt32LE(resMap.length, 4)
+  resIds.forEach((id, idx) => resMap.writeUInt32LE(id, 8 + idx * 4))
+
+  const attrCount = extractNativeLibs === undefined ? 0 : 1
+  const elem = Buffer.alloc(16 + 20 + attrCount * 20)
+  elem.writeUInt16LE(0x0102, 0)
+  elem.writeUInt16LE(16, 2)
+  elem.writeUInt32LE(elem.length, 4)
+  elem.writeUInt32LE(1, 8)
+  elem.writeInt32LE(-1, 12)
+  elem.writeInt32LE(-1, 16)
+  elem.writeInt32LE(0, 20)
+  elem.writeUInt16LE(20, 24)
+  elem.writeUInt16LE(20, 26)
+  elem.writeUInt16LE(attrCount, 28)
+  if (attrCount === 1) {
+    const a = 36
+    elem.writeInt32LE(-1, a)
+    elem.writeInt32LE(1, a + 4)
+    elem.writeInt32LE(-1, a + 8)
+    elem.writeUInt16LE(8, a + 12)
+    elem[a + 14] = 0
+    elem[a + 15] = 0x12
+    elem.writeInt32LE(extractNativeLibs ? -1 : 0, a + 16)
+  }
+
+  const total = 8 + strPool.length + resMap.length + elem.length
+  const fileHdr = Buffer.alloc(8)
+  fileHdr.writeUInt16LE(0x0003, 0)
+  fileHdr.writeUInt16LE(8, 2)
+  fileHdr.writeUInt32LE(total, 4)
+  return Buffer.concat([fileHdr, strPool, resMap, elem])
+}
+
+/** 造一个最小 zip（stored / deflate / 自定义 method），只含给定条目。 */
 const makeZip = (files) => {
   const locals = []
   const centrals = []
@@ -488,7 +716,9 @@ const makeZip = (files) => {
   for (const file of files) {
     const nameBytes = Buffer.from(file.name, 'utf8')
     const method = file.method ?? 0
-    const payload = method === 0 ? file.data : Buffer.from('deflate-placeholder')
+    const payload = file.rawPayload !== undefined
+      ? file.rawPayload
+      : (method === 8 ? zlib.deflateRawSync(file.data) : file.data)
     const local = Buffer.alloc(30)
     local.writeUInt32LE(0x04034b50, 0)
     local.writeUInt16LE(20, 4)
@@ -559,55 +789,145 @@ export const SELF_TEST_CASES = [
     run: () => findLoaderSources(['bionilux-loader-x86_64.so'], 'arm64').length === 0,
   },
 
-  // ── evaluateApkLoader：1 正 / 4 负 ──
+  // ── evaluateApkLoader + AXML manifest 一致性：3 正 / 9 负 ──
   {
-    label: '正控：产物带本 ABI loader（stored + 架构正确 + 无混入）',
+    label: '正控：产物带本 ABI loader（stored + extractNativeLibs=true + 架构正确 + 无混入）',
     run: () => {
-      const buf = makeZip([{ name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0xb7) }])
+      const buf = makeZip([
+        { name: 'AndroidManifest.xml', data: makeBinaryManifest({ extractNativeLibs: true }), method: 8 },
+        { name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0xb7) },
+      ])
       const zip = readZipCentralDirectory(buf)
-      const v = evaluateApkLoader(zip.entries, 'arm64', (e) => readStoredEntry(buf, e))
-      return v.ok === true && v.evidence.present === true && v.evidence.foreign.length === 0
+      const v = evaluateApkLoader(zip.entries, 'arm64', (e) => readZipEntry(buf, e), { requireManifest: true })
+      return v.ok === true && v.evidence.present === true && v.evidence.extractNativeLibs === true && v.evidence.foreign.length === 0
+    },
+  },
+  {
+    label: '正控：产物带本 ABI loader（deflate method=8 + extractNativeLibs=true + 架构正确，AGP useLegacyPackaging=true 形态）',
+    run: () => {
+      const buf = makeZip([
+        { name: 'AndroidManifest.xml', data: makeBinaryManifest({ extractNativeLibs: true }), method: 8 },
+        { name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0xb7), method: 8 },
+      ])
+      const zip = readZipCentralDirectory(buf)
+      const v = evaluateApkLoader(zip.entries, 'arm64', (e) => readZipEntry(buf, e), { requireManifest: true })
+      return v.ok === true && v.evidence.method === 8 && v.evidence.elf?.ok === true && v.evidence.extractNativeLibs === true
+    },
+  },
+  {
+    label: '正控：UTF-8 字符串池的二进制 AndroidManifest.xml 也能正确读取 extractNativeLibs=true',
+    run: () => {
+      const mf = makeBinaryManifest({ extractNativeLibs: true, utf8: true })
+      const r = readManifestExtractNativeLibs(mf)
+      return r.ok === true && r.extractNativeLibs === true
     },
   },
   {
     label: '负控：缺 loader 即判红（MIUI 上仍 EACCES 的形态）',
     run: () => {
-      const buf = makeZip([{ name: 'lib/arm64-v8a/libother.so', data: makeElf(0xb7) }])
+      const buf = makeZip([
+        { name: 'AndroidManifest.xml', data: makeBinaryManifest({ extractNativeLibs: true }), method: 8 },
+        { name: 'lib/arm64-v8a/libother.so', data: makeElf(0xb7) },
+      ])
       const zip = readZipCentralDirectory(buf)
-      return evaluateApkLoader(zip.entries, 'arm64', (e) => readStoredEntry(buf, e)).ok === false
+      return evaluateApkLoader(zip.entries, 'arm64', (e) => readZipEntry(buf, e), { requireManifest: true }).ok === false
     },
   },
   {
-    label: '负控：loader 被压缩（useLegacyPackaging 失效）即判红',
+    label: '负控：deflate 条目内 ELF 架构与 APK 的 ABI 不符即判红',
+    run: () => {
+      const buf = makeZip([
+        { name: 'AndroidManifest.xml', data: makeBinaryManifest({ extractNativeLibs: true }), method: 8 },
+        { name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0x3e), method: 8 },
+      ])
+      const zip = readZipCentralDirectory(buf)
+      const v = evaluateApkLoader(zip.entries, 'arm64', (e) => readZipEntry(buf, e), { requireManifest: true })
+      return v.ok === false && v.problems.some((p) => /架构不符/.test(p))
+    },
+  },
+  {
+    label: '负控：deflate 流损坏时解压失败判红',
+    run: () => {
+      const buf = makeZip([
+        { name: 'AndroidManifest.xml', data: makeBinaryManifest({ extractNativeLibs: true }), method: 8 },
+        { name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0xb7), method: 8, rawPayload: Buffer.from('not-deflate') },
+      ])
+      const zip = readZipCentralDirectory(buf)
+      const v = evaluateApkLoader(zip.entries, 'arm64', (e) => readZipEntry(buf, e), { requireManifest: true })
+      return v.ok === false && v.problems.some((p) => /deflate 解压失败/.test(p))
+    },
+  },
+  {
+    label: '负控：不支持的压缩方法（method 99）判红',
+    run: () => {
+      const buf = makeZip([
+        { name: 'AndroidManifest.xml', data: makeBinaryManifest({ extractNativeLibs: true }), method: 8 },
+        { name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0xb7), method: 99 },
+      ])
+      const zip = readZipCentralDirectory(buf)
+      const v = evaluateApkLoader(zip.entries, 'arm64', (e) => readZipEntry(buf, e), { requireManifest: true })
+      return v.ok === false && v.problems.some((p) => /不支持的压缩/.test(p))
+    },
+  },
+  {
+    label: '负控：AndroidManifest.xml 声明 extractNativeLibs=false 即判红（安装后不落盘到 nativeLibraryDir）',
+    run: () => {
+      const buf = makeZip([
+        { name: 'AndroidManifest.xml', data: makeBinaryManifest({ extractNativeLibs: false }), method: 8 },
+        { name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0xb7), method: 0 },
+      ])
+      const zip = readZipCentralDirectory(buf)
+      const v = evaluateApkLoader(zip.entries, 'arm64', (e) => readZipEntry(buf, e), { requireManifest: true })
+      return v.ok === false && v.problems.some((p) => /extractNativeLibs="false"/.test(p))
+    },
+  },
+  {
+    label: '负控：deflate loader（method 8）但 manifest 未声明 extractNativeLibs=true 即判红',
+    run: () => {
+      const buf = makeZip([
+        { name: 'AndroidManifest.xml', data: makeBinaryManifest({ extractNativeLibs: undefined }), method: 8 },
+        { name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0xb7), method: 8 },
+      ])
+      const zip = readZipCentralDirectory(buf)
+      const v = evaluateApkLoader(zip.entries, 'arm64', (e) => readZipEntry(buf, e), { requireManifest: true })
+      return v.ok === false && v.problems.some((p) => /未声明 android:extractNativeLibs="true"/.test(p))
+    },
+  },
+  {
+    label: '负控：requireManifest=true 时缺 AndroidManifest.xml 即判红',
     run: () => {
       const buf = makeZip([{ name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0xb7), method: 8 }])
       const zip = readZipCentralDirectory(buf)
-      const v = evaluateApkLoader(zip.entries, 'arm64', (e) => readStoredEntry(buf, e))
-      return v.ok === false && v.problems.some((p) => /压缩条目/.test(p))
+      const v = evaluateApkLoader(zip.entries, 'arm64', (e) => readZipEntry(buf, e), { requireManifest: true })
+      return v.ok === false && v.problems.some((p) => /缺 AndroidManifest\.xml/.test(p))
     },
   },
   {
     label: '负控：本包混入另一 ABI 的 loader 即判红（同源集风险）',
     run: () => {
       const buf = makeZip([
+        { name: 'AndroidManifest.xml', data: makeBinaryManifest({ extractNativeLibs: true }), method: 8 },
         { name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0xb7) },
         { name: 'lib/x86_64/libbionilux-loader.so', data: makeElf(0x3e) },
       ])
       const zip = readZipCentralDirectory(buf)
-      const v = evaluateApkLoader(zip.entries, 'arm64', (e) => readStoredEntry(buf, e))
+      const v = evaluateApkLoader(zip.entries, 'arm64', (e) => readZipEntry(buf, e), { requireManifest: true })
       return v.ok === false && v.problems.some((p) => /混入另一 ABI/.test(p))
     },
   },
   {
-    label: '负控：loader 的 ELF 架构与 APK 的 ABI 不符即判红',
+    label: '负控：stored loader 的 ELF 架构与 APK 的 ABI 不符即判红',
     run: () => {
-      const buf = makeZip([{ name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0x3e) }])
+      const buf = makeZip([
+        { name: 'AndroidManifest.xml', data: makeBinaryManifest({ extractNativeLibs: true }), method: 8 },
+        { name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0x3e) },
+      ])
       const zip = readZipCentralDirectory(buf)
-      return evaluateApkLoader(zip.entries, 'arm64', (e) => readStoredEntry(buf, e)).ok === false
+      return evaluateApkLoader(zip.entries, 'arm64', (e) => readZipEntry(buf, e), { requireManifest: true }).ok === false
     },
   },
 
-  // ── zip 解析器自身的反证（没有它，上面每条负控都可能只是「解析失败」）1 正 / 2 负 ──
+  // ── zip 解析器自身的反证（没有它，上面每条负控都可能只是「解析失败」）1 正 / 3 负 ──
   {
     label: '负控：非 zip 字节解析返回 null（不得静默返回空目录）',
     run: () => readZipCentralDirectory(Buffer.from('definitely not a zip archive at all')) === null,
@@ -628,7 +948,15 @@ export const SELF_TEST_CASES = [
     run: () => {
       const buf = makeZip([{ name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0xb7) }])
       const zip = readZipCentralDirectory(buf)
-      return readStoredEntry(buf.subarray(0, 40), zip.entries[0]).ok === false
+      return readZipEntry(buf.subarray(0, 40), zip.entries[0]).ok === false
+    },
+  },
+  {
+    label: '负控：deflate 条目被截断时解压失败（不是返回半份数据）',
+    run: () => {
+      const buf = makeZip([{ name: 'lib/arm64-v8a/libbionilux-loader.so', data: makeElf(0xb7), method: 8 }])
+      const zip = readZipCentralDirectory(buf)
+      return readZipEntry(buf.subarray(0, 40), zip.entries[0]).ok === false
     },
   },
 ]
@@ -651,46 +979,53 @@ const runSelfTest = () => {
     return
   }
   console.log('NATIVE-LINUX-LOADER SELF-TEST PASSED（' + SELF_TEST_CASES.length
-    + ' 项：ELF 架构 2 正 5 负 / 命名口径 2 正 2 负 / 产物判据 1 正 4 负 / zip 解析 1 正 2 负）')
+    + ' 项：ELF 架构 2 正 5 负 / 命名口径 2 正 2 负 / 产物与 manifest 判据 3 正 9 负 / zip 解析 1 正 3 负）')
 }
 
-if (options.unknown !== undefined) {
-  console.error('NATIVE-LINUX-LOADER CHECK 用法错误：未知参数 ' + options.unknown)
-  console.error(USAGE)
-  process.exitCode = 2
-} else if (options.help) {
-  console.log(USAGE)
-} else if (options.selfTest) {
-  runSelfTest()
-} else if (options.source !== undefined) {
-  // 给了 --stage 才落盘；只给 --source 时是纯输入校验（两条构建链各自的独立可复跑门禁点）。
-  // 「不给 --stage」不等于「跳过分档」：真正分档由终端引擎用同一份脚本 + 同一组判据完成。
-  const staging = options.stage !== undefined
-  const abis = options.requires.length > 0 ? options.requires : [undefined]
-  let ok = true
-  for (const abi of abis) {
-    const stageDir = !staging ? null : (abis.length > 1 ? path.join(options.stage, abi) : options.stage)
-    if (!stageForAbi(options.source, abi, stageDir)) ok = false
-  }
-  if (!ok) process.exitCode = 1
-} else if (options.apk !== undefined || options.dir !== undefined) {
-  const abiHint = options.requires[0]
-  const targets = options.apk !== undefined ? [options.apk] : collectApks(path.resolve(options.dir))
-  if (targets.length === 0) {
-    skip('--dir ' + options.dir + ' 下没有任何 *.apk，产物 loader 无从判定')
-  } else if (abiHint !== undefined && targets.length > 1) {
-    console.error('NATIVE-LINUX-LOADER CHECK 用法错误：目录收集必须让每个 APK 自行判定 ABI（不要给单一 --abi）')
+const main = () => {
+  const options = parseCliArgs(process.argv.slice(2))
+  if (options.unknown !== undefined) {
+    console.error('NATIVE-LINUX-LOADER CHECK 用法错误：未知参数 ' + options.unknown)
+    console.error(USAGE)
     process.exitCode = 2
-  } else {
+  } else if (options.help) {
+    console.log(USAGE)
+  } else if (options.selfTest) {
+    runSelfTest()
+  } else if (options.source !== undefined) {
+    // 给了 --stage 才落盘；只给 --source 时是纯输入校验（两条构建链各自的独立可复跑门禁点）。
+    // 「不给 --stage」不等于「跳过分档」：真正分档由终端引擎用同一份脚本 + 同一组判据完成。
+    const staging = options.stage !== undefined
+    const abis = options.requires.length > 0 ? options.requires : [undefined]
     let ok = true
-    for (const file of targets) if (!checkApk(file, abiHint)) ok = false
-    if (ok) {
-      console.log('NATIVE-LINUX-LOADER CHECK PASSED（' + targets.length
-        + ' 个 APK 均带本 ABI 的 stored loader，且无另一 ABI 混入）')
-    } else {
-      process.exitCode = 1
+    for (const abi of abis) {
+      const stageDir = !staging ? null : (abis.length > 1 ? path.join(options.stage, abi) : options.stage)
+      if (!stageForAbi(options.source, abi, stageDir)) ok = false
     }
+    if (!ok) process.exitCode = 1
+  } else if (options.apk !== undefined || options.dir !== undefined) {
+    const abiHint = options.requires[0]
+    const targets = options.apk !== undefined ? [options.apk] : collectApks(path.resolve(options.dir))
+    if (targets.length === 0) {
+      skip('--dir ' + options.dir + ' 下没有任何 *.apk，产物 loader 无从判定', options.require)
+    } else if (abiHint !== undefined && targets.length > 1) {
+      console.error('NATIVE-LINUX-LOADER CHECK 用法错误：目录收集必须让每个 APK 自行判定 ABI（不要给单一 --abi）')
+      process.exitCode = 2
+    } else {
+      let ok = true
+      for (const file of targets) if (!checkApk(file, abiHint)) ok = false
+      if (ok) {
+        console.log('NATIVE-LINUX-LOADER CHECK PASSED（' + targets.length
+          + ' 个 APK 均带本 ABI 的可执行 loader，extractNativeLibs 一致，且无另一 ABI 混入）')
+      } else {
+        process.exitCode = 1
+      }
+    }
+  } else {
+    skip('未给出 --apk/--dir，也没有 --source，产物 loader 无从判定', options.require)
   }
-} else {
-  skip('未给出 --apk/--dir，也没有 --source，产物 loader 无从判定')
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main()
 }

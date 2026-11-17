@@ -86,8 +86,12 @@ READY -> DISABLING -> INSTALLED_DISABLED
      （`app/build/native-linux-loader/<abi>/`）。直接交源目录会让**两个 APK 都带上两种 ABI 的 loader**，
      而错的那一份在设备上是架构不匹配的 ELF。
   3. **产物断言**：`check-native-linux-loader.mjs` 在终端阶段（与验签同一「最终产物」关口）判四件事：
-     `lib/<jniAbi>/libbionilux-loader.so` 在场、归档内是 **stored**（`useLegacyPackaging=true` 的判据，
-     压缩条目安装后不是普通文件）、ELF `e_machine` 与该 APK 的 ABI 一致、本包 `lib/` 下无另一 ABI 的 loader。
+     `lib/<jniAbi>/libbionilux-loader.so` 在场、压缩方式与 `AndroidManifest.xml` 一致（支持 `method=0` stored
+     或 `method=8` deflate——`app/build.gradle.kts` 的 `useLegacyPackaging=true` 在 AGP 8.8.2 下会以
+     `method=8` 打包 `.so` 并由 manifest merger 注入 `android:extractNativeLibs="true"`，使安装时由
+     `PackageManager` 解压为 `nativeLibraryDir` 下的普通文件；若 manifest 声明 `extractNativeLibs="false"`
+     或 `method=8` 未声明 `extractNativeLibs="true"` 则判红）、解压后 ELF64 `e_machine` 与该 APK 的 ABI 一致、
+     本包 `lib/` 下无另一 ABI 的 loader。
 - loader 的**设备侧**判据（改构建面时必须一起看）：`applicationInfo.nativeLibraryDir` 下能看到
   `libbionilux-loader.so` 且是普通文件；MIUI 真机启用 Linux 环境后 `linux_bash` 能执行命令；
   **x86_64 模拟器同样要验一遍**（两个 ABI 的 loader 是不同文件，只测一边证明不了另一边）。
