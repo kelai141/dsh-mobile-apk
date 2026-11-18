@@ -9,10 +9,10 @@ import { BUILD_TYPES, assembleApk, normalizeLoaderAbi, parseArgs, verifyApks, re
 import { evaluateBadging } from './check-apk-form.mjs'
 
 function fixture(t) {
+  isolateEngineEnv(t)
   const root = mkdtempSync(join(tmpdir(), 'dsh-build-engine-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
-  const apkDir = join(root, 'apk')
-  const outputDir = join(root, 'out')
+  const [apkDir, outputDir] = [join(root, 'apk'), join(root, 'out')]
   const snapshot = join(root, 'snapshot.tar.xz')
   mkdirSync(apkDir, { recursive: true })
   writeFileSync(snapshot, Buffer.from('test-snapshot-bytes'))
@@ -326,7 +326,8 @@ test('assemble --build-type is parsed into the option the engine reads', () => {
   assert.deepEqual(BUILD_TYPES, ['release', 'debug'])
 })
 
-test('shared final-artifact stage self-tests and verifies signatures then form of the caller-selected scope', () => {
+test('shared final-artifact stage self-tests and verifies signatures then form of the caller-selected scope', (t) => {
+  isolateEngineEnv(t)
   const calls = []
   verifyApks({
     directories: ['/release/apk'],
@@ -413,7 +414,8 @@ test('受控负控：把构建类型改回 debug 后，最终产物形态门禁�
   assert.deepEqual(debug.calls.at(-1), ['/tools/check-apk-form.mjs', '--apk', resolve(debug.delivered), '--require'])
 })
 
-test('verifyForm=false 只跳过发布链的形态门禁：签名照跑，且默认仍是严格档', () => {
+test('verifyForm=false 只跳过发布链的形态门禁：签名照跑，且默认仍是严格档', (t) => {
+  isolateEngineEnv(t)
   // 为什么需要这条缝：调试包（buildType=debug）的「含 application-debuggable」是**期望值**，
   // 发布链的形态判据对那个变体恒红。把所有 debug 构建的形态判据一律删掉是错的 ——
   // 0.14.9 的事故形态（构建类型被静默改回 debug）只有那条判据能抓。故做成显式开关：
@@ -449,7 +451,8 @@ test('verifyForm=false 只跳过发布链的形态门禁：签名照跑，且默
   assert.ok(calls.some((a) => a[0] === '/tools/check-apk-form.mjs' && a.includes('--require')),
     '默认必须仍跑形态门禁（忘记传参数 = 保持严格）')
 })
-test('a debuggable form rejection aborts the terminal stage just like a bad signature', () => {
+test('a debuggable form rejection aborts the terminal stage just like a bad signature', (t) => {
+  isolateEngineEnv(t)
   // 签名全绿 + 形态判红：这正是 0.14.9 发布产物的真实形态（debug 变体但签名完全正确），
   // 故形态门禁判红必须与签名判红一样中止交付，而不是被前一步的绿掩盖。
   assert.throws(() => verifyApks({
@@ -461,7 +464,8 @@ test('a debuggable form rejection aborts the terminal stage just like a bad sign
   }, (command, args) => (args[0] === '/tools/check-apk-form.mjs' ? { status: 1 } : { status: 0 })), /failed \(1\)/)
 })
 
-test('verify --skip-self-test is parsed as a boolean and skips the second self-test', () => {
+test('verify --skip-self-test is parsed as a boolean and skips the second self-test', (t) => {
+  isolateEngineEnv(t)
   const options = parseArgs(['verify', '--dir', '/release/apk', '--skip-self-test'])
   assert.equal(options.skipSelfTest, true)
   const calls = []
@@ -533,7 +537,8 @@ test('引擎凭据优先级：显式参数 > 环境变量 > 仓库 debug keystor
     { alias: 'clikey', pass: 'clipass' })
 })
 
-test('引擎把解析后的凭据逐字传给检查器（环境变量必须能穿透）', () => {
+test('引擎把解析后的凭据逐字传给检查器（环境变量必须能穿透）', (t) => {
+  isolateEngineEnv(t)
   const calls = []
   verifyApks({ directories: ['/release/apk'], signatureGate: '/tools/check-apk-signatures.mjs',
     formGate: '/tools/check-apk-form.mjs', keystore: '/release/debug.keystore', selfTest: false, log() {} },
@@ -545,7 +550,8 @@ test('引擎把解析后的凭据逐字传给检查器（环境变量必须能�
   assert.equal(verify[verify.indexOf('--keystore-pass') + 1], 'android')
 })
 
-test('引擎显式凭据覆盖：换发布钥的调用方不必改代码', () => {
+test('引擎显式凭据覆盖：换发布钥的调用方不必改代码', (t) => {
+  isolateEngineEnv(t)
   const calls = []
   verifyApks({ directories: ['/release/apk'], signatureGate: '/tools/check-apk-signatures.mjs',
     formGate: '/tools/check-apk-form.mjs', keystore: '/release/release.keystore',
@@ -632,5 +638,78 @@ test('非法 versionCode 在调用 Gradle 之前被拒', (t) => {
   for (const bad of ['0', '-1', '81abc', '8 1', '81; rm -rf /', ''] ) {
     if (bad === '') continue // 空串按「未给」处理，走缺省分支，不在此判据范围
     reject(bad)
+  }
+})
+
+function isolateEngineEnv(t) {
+  const keys = [
+    'DSH_NATIVE_LINUX_LOADER_DIR',
+    'DSH_TARGET_ABI',
+    'DSH_APK_KEYSTORE_ALIAS',
+    'DSH_APK_KEYSTORE_PASS',
+  ]
+  const saved = new Map(keys.map((key) => [
+    key,
+    Object.prototype.hasOwnProperty.call(process.env, key) ? process.env[key] : undefined,
+  ]))
+  for (const key of keys) delete process.env[key]
+  t.after(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+}
+
+test('inherited DSH_NATIVE_LINUX_LOADER_DIR and DSH_TARGET_ABI do not leak into default fixture runs', async (t) => {
+  const keys = ['DSH_NATIVE_LINUX_LOADER_DIR', 'DSH_TARGET_ABI', 'DSH_APK_KEYSTORE_ALIAS', 'DSH_APK_KEYSTORE_PASS']
+  const prev = new Map(keys.map((k) => [k, Object.prototype.hasOwnProperty.call(process.env, k) ? process.env[k] : undefined]))
+  try {
+    process.env.DSH_NATIVE_LINUX_LOADER_DIR = '/inherited/nonexistent-loader'
+    process.env.DSH_TARGET_ABI = 'arm64'
+    process.env.DSH_APK_KEYSTORE_ALIAS = 'inherited-alias'
+    process.env.DSH_APK_KEYSTORE_PASS = 'inherited-pass'
+
+    await t.test('fixture clears inherited DSH_* engine env vars and restores them after subtest', (st) => {
+      const f = fixture(st)
+      for (const k of keys) assert.equal(process.env[k], undefined, `${k} must be cleared inside fixture`)
+      const seenCommands = []
+      let gradleArgs
+      assembleApk({
+        snapshot: f.snapshot,
+        apkDir: f.apkDir,
+        outputDir: f.outputDir,
+        artifactName: 'isolated-default.apk',
+        fingerprintGate: '/tools/check-snapshot-fingerprint.mjs',
+        log() {},
+      }, (command, args) => {
+        seenCommands.push({ command, args })
+        if (args[0]?.endsWith('check-snapshot-fingerprint.mjs')) return { status: 0 }
+        if (args[0]?.endsWith('build-hard-manifest.mjs')) return { status: 0 }
+        if (args[0]?.endsWith('check-apk-signatures.mjs')) {
+          assert.equal(args[args.indexOf('--keystore-alias') + 1], 'androiddebugkey')
+          assert.equal(args[args.indexOf('--keystore-pass') + 1], 'android')
+          return { status: 0 }
+        }
+        if (args[0]?.endsWith('check-apk-form.mjs')) return { status: 0 }
+        gradleArgs = args
+        const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk')
+        mkdirSync(join(built, '..'), { recursive: true })
+        writeFileSync(built, Buffer.from('isolated-apk'))
+        return { status: 0 }
+      })
+      assert.equal(seenCommands.some((c) => c.args[0]?.endsWith('check-native-linux-loader.mjs')), false)
+      assert.equal(gradleArgs.some((a) => a.startsWith('-PnativeLinuxLoaderDir=')), false)
+    })
+
+    assert.equal(process.env.DSH_NATIVE_LINUX_LOADER_DIR, '/inherited/nonexistent-loader')
+    assert.equal(process.env.DSH_TARGET_ABI, 'arm64')
+    assert.equal(process.env.DSH_APK_KEYSTORE_ALIAS, 'inherited-alias')
+    assert.equal(process.env.DSH_APK_KEYSTORE_PASS, 'inherited-pass')
+  } finally {
+    for (const [k, v] of prev) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
   }
 })
