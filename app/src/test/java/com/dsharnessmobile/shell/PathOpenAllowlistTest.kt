@@ -26,6 +26,16 @@ import org.junit.Test
  */
 class PathOpenAllowlistTest {
 
+  @Test
+  fun documentIdStaysInsideTheAuthorizedTree() {
+    val root = "/storage/emulated/0/我的文档/dsh测试"
+    val id = "primary:我的文档/dsh测试"
+    assertEquals("$id/tests/hello world.txt", ChooserAllowlist.documentId("$root/tests/hello world.txt", root, id))
+    assertEquals(id, ChooserAllowlist.documentId(root, root, id))
+    assertEquals(null, ChooserAllowlist.documentId("$root-private/hello.txt", root, id))
+    assertEquals(null, ChooserAllowlist.documentId("$root/hello.txt", root, "secondary:dsh测试"))
+  }
+
   private val filesDir = File(System.getProperty("java.io.tmpdir"), "dsh-allow-files").canonicalFile
   private val externalDocuments = File(System.getProperty("java.io.tmpdir"), "dsh-allow-documents").canonicalFile
 
