@@ -40,10 +40,14 @@ class ComposerImeOffsetTest {
     val script = ComposerImeOffset.script(0)
     assertTrue(script.contains("api.set(0)"))
     // 位移那段代码在字符串里恒存在，能不能执行由提前返回决定——所以判据是顺序。
-    assertTrue(
-      "零值必须在设位移之前返回",
-      script.indexOf("if(v<=0)return;") in 0 until script.indexOf("translateY"),
-    )
+    val clearShift = script.indexOf("if(v<=0){root.style.removeProperty('${ComposerImeOffset.SHIFT_PROPERTY}');return;}")
+    assertTrue("零值必须在设位移之前返回", clearShift in 0 until script.indexOf("translateY"))
+  }
+
+  @Test fun exposesActualCardLiftForTheReturnBubble() {
+    val script = ComposerImeOffset.script(351)
+    assertTrue(script.contains("root.style.setProperty('${ComposerImeOffset.SHIFT_PROPERTY}',d+'px')"))
+    assertTrue(script.contains("Math.max(0,Math.round(r.bottom-"))
   }
 
   @Test fun negativeImeIsTreatedAsHidden() {

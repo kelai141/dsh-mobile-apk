@@ -16,6 +16,7 @@ it('anchors only the return action and supplies bilingual copy', () => {
   expect(TO_BOTTOM_GUTTER_CSS).toContain("content: 'Back'")
   expect(TO_BOTTOM_GUTTER_CSS).toContain("content: '返回'")
   expect(TO_BOTTOM_GUTTER_CSS).toContain('min-width: 44px')
+  expect(TO_BOTTOM_GUTTER_CSS).toContain('var(--dsh-composer-ime-shift, 0px)')
 })
 
 it('leaves the running text in the transcript without an overlay background', () => {

@@ -36,6 +36,9 @@ internal object ComposerImeOffset {
   /** 常驻 API 的全局名，也是「是否已安装」的判据。 */
   internal const val API_NAME = "__dshComposerIme"
 
+  /** 实际抬升量。输入卡片已在键盘上方时为零，供独立的返回气泡使用。 */
+  internal const val SHIFT_PROPERTY = "--dsh-composer-ime-shift"
+
   /**
    * @param imeCssPx IME 高度，已由壳侧换算成 CSS 像素（[MainActivity] 的 `webImeBottomInset`）。
    *   非正值按 0 处理：键盘收起时必须清位移，否则卡片会悬在半空。
@@ -49,15 +52,17 @@ internal object ComposerImeOffset {
       "var find=function(){return document.querySelector('$CARD_SELECTOR')" +
       "||document.querySelector('$DOCK_SELECTOR')};" +
       "var apply=function(v){" +
-      "var c=find();if(!c)return;" +
+      "var c=find(),root=document.documentElement;" +
+      "if(!c){root.style.removeProperty('$SHIFT_PROPERTY');return;}" +
       // 幂等：先清掉上一次的位移，才能量到卡片的自然位置。
       "c.style.transition='none';" +
       "c.style.removeProperty('transform');" +
       "void c.offsetHeight;" +
-      "if(v<=0)return;" +
+      "if(v<=0){root.style.removeProperty('$SHIFT_PROPERTY');return;}" +
       // 把卡片底边对齐到键盘顶边；差额为负说明卡片本来就在键盘上方，不动。
       "var r=c.getBoundingClientRect();" +
-      "var d=Math.round(r.bottom-((window.innerHeight||0)-v));" +
+      "var d=Math.max(0,Math.round(r.bottom-((window.innerHeight||0)-v)));" +
+      "root.style.setProperty('$SHIFT_PROPERTY',d+'px');" +
       "if(d>0)c.style.setProperty('transform','translateY(-'+d+'px)','important')};" +
       "api={set:apply};" +
       "window.$API_NAME=api;" +
