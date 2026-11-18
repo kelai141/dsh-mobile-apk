@@ -48,10 +48,10 @@ const MANIFEST = {
 }
 
 /** A bootstrap whose manifest fetch fails the way a rate-limited GitHub does. */
-async function fixture({ managerInstallThrows = false } = {}) {
+async function fixture({ managerInstallThrows = false, requireStagedBundle = false } = {}) {
   // Mutable on purpose: the real sequence is "check succeeds (rate limit still
   // available), then the limit is exhausted and install hits 403".
-  const net = { fails: false }
+  const net = { fails: false, manifest: MANIFEST, calls: 0 }
   const dataDir = await mkdtemp(path.join(tmpdir(), 'dsh-1790-'))
   const saved = []
   const manager = {
@@ -68,6 +68,7 @@ async function fixture({ managerInstallThrows = false } = {}) {
   }
   const bootstrap = createMobileBootstrap({
     dataDir,
+    requireStagedBundle,
     releaseUrl: 'https://api.github.com/repos/o/r/releases/latest',
     pluginHost,
     linuxAssetIO: {
@@ -92,6 +93,7 @@ async function fixture({ managerInstallThrows = false } = {}) {
       },
     },
     fetchImpl: async (input) => {
+      net.calls += 1
       const url = typeof input === 'string' ? input : String(input?.url ?? input)
       if (net.fails) {
         const error = new Error('GitHub request failed (403)')
@@ -100,13 +102,14 @@ async function fixture({ managerInstallThrows = false } = {}) {
       }
       // fetchLatestManifest does two hops: the latest-release document, then the
       // version-pinned manifest asset. Model both so the success path is real.
-      const manifestBody = JSON.stringify(MANIFEST)
+      const manifestBody = JSON.stringify(net.manifest)
+      const tag = 'v' + net.manifest.version
       if (url.includes('/releases/latest')) {
         return new Response(JSON.stringify({
-          tag_name: 'v0.10.0',
+          tag_name: tag,
           assets: [{
             name: 'linux-release.json',
-            browser_download_url: 'https://github.com/o/r/releases/download/v0.10.0/linux-release.json',
+            browser_download_url: 'https://github.com/o/r/releases/download/' + tag + '/linux-release.json',
             // Must match the body byte-for-byte: readManifest cross-checks size.
             size: Buffer.byteLength(manifestBody, 'utf8'),
           }],
@@ -135,6 +138,28 @@ test('安装不再强依赖实时 manifest：403 时用上次 check 落下的 av
   assert.equal(status.installed, true, '离线安装必须成功，而不是 500')
   assert.equal(status.version, '0.10.0')
   assert.equal(status.injectionActivated, true)
+})
+
+test('APK 暂存期间上游发布新版本，安装仍使用本次查更准备的资产', async (t) => {
+  const f = await fixture({ requireStagedBundle: true })
+  t.after(() => rm(f.dataDir, { recursive: true, force: true }))
+  await f.bootstrap.checkForUpdates({ source: 'manual' })
+  const callsAfterCheck = f.net.calls
+
+  const stage = path.join(f.dataDir, 'staging', PLUGIN_SHA)
+  const unpacked = path.join(stage, 'unpacked')
+  await mkdir(path.join(unpacked, 'lib'), { recursive: true })
+  await writeFile(path.join(stage, 'asset.tar.xz'), PLUGIN_BYTES)
+  await writeFile(path.join(unpacked, 'package.json'), PACKAGE_JSON)
+  await writeFile(path.join(unpacked, 'lib', 'index.js'), 'x'.repeat(64))
+
+  const next = JSON.parse(JSON.stringify(MANIFEST).replaceAll('0.10.0', '0.10.1'))
+  next.plugins.runtime.sha256 = 'a'.repeat(64)
+  f.net.manifest = next
+
+  const installed = await f.bootstrap.install({ confirmed: true, activate: true })
+  assert.equal(installed.version, '0.10.0')
+  assert.equal(f.net.calls, callsAfterCheck)
 })
 
 test('install 失败必须把真因落盘，重启后仍能读到', async (t) => {
