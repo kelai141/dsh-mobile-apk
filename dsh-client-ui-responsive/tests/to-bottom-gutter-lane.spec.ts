@@ -11,9 +11,20 @@ it('keeps the message column the same width with and without the return action',
   expect(getComputedStyle(flow).paddingRight).toBe(before)
 })
 
-it('anchors the status and return action together and supplies bilingual copy', () => {
-  expect(TO_BOTTOM_GUTTER_CSS.match(/bottom: var\(--dsh-chat-back-bottom\)/g)).toHaveLength(2)
+it('anchors only the return action and supplies bilingual copy', () => {
+  expect(TO_BOTTOM_GUTTER_CSS.match(/bottom: var\(--dsh-chat-back-bottom\)/g)).toHaveLength(1)
   expect(TO_BOTTOM_GUTTER_CSS).toContain("content: 'Back'")
   expect(TO_BOTTOM_GUTTER_CSS).toContain("content: '返回'")
   expect(TO_BOTTOM_GUTTER_CSS).toContain('min-width: 44px')
+})
+
+it('leaves the running text in the transcript without an overlay background', () => {
+  document.head.innerHTML = '<style>' + TO_BOTTOM_GUTTER_CSS + '</style>'
+  document.body.innerHTML = '<main data-conversation-scroll><div data-chat-running style="position: relative">Running</div>' +
+    '<div class="hash_toBottomSlot"><button>⌄</button></div></main>'
+  const running = document.querySelector('[data-chat-running]')!
+  const style = getComputedStyle(running)
+  expect(style.position).toBe('relative')
+  expect(style.backgroundColor).toBe('rgba(0, 0, 0, 0)')
+  expect(TO_BOTTOM_GUTTER_CSS).not.toContain('[data-chat-running]')
 })
