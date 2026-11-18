@@ -8,14 +8,15 @@
  */
 
 /**
- * True when the active dsh locale is English.
+ * Use English copy for an explicit locale outside the Chinese language family.
  *
  * Chinese stays the default: an empty `<html lang>` (tests, hosts that have not
  * synchronized the attribute yet) must not flip every surface to English.
  */
 export function isEnglish(): boolean {
   try {
-    return document.documentElement.lang.toLowerCase().startsWith('en')
+    const language = document.documentElement.lang.trim().toLowerCase()
+    return language !== '' && language !== 'zh' && !language.startsWith('zh-')
   } catch {
     return false
   }
