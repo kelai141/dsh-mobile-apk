@@ -555,7 +555,7 @@
       "evidence": "循环注册的三个 /api/... 路径同样落在 connection.fetch 上，鉴权由 /api 前缀 handler 的 admit 栅栏承担；表内常量逐字在场保证路径不可静默漂移。"
     },
     {
-      "source": "packages/credentials/deepseek-account-platform/src/index.ts",
+      "source": "packages/credentials/deepseek-account/src/index.ts",
       "form": "web",
       "expression": "'/oauth/callback'",
       "kind": "exact",
@@ -565,6 +565,19 @@
       "authCallMarker": "timingSafeEqual(Buffer.from(receivedState), Buffer.from(state))",
       "bundleRowId": "deepseek-account",
       "evidence": "PKCE 回跳：32 字节 random state 常量时间比对 + 只接受 GET + 单一 code/state + 已消费/超时返回 410；失败一律 400。gate 判据落在注册块内的 timingSafeEqual 调用形态上。"
+    },
+    {
+      "source": "packages/experimental/deepseek-chat-import/src/index.ts",
+      "form": "fetch",
+      "expression": "UPLOAD_PATH",
+      "pathText": "/api/deepseek-chat-import/archive",
+      "verdict": "not-mounted",
+      "packageName": "@deepseek-ai/dsh-deepseek-chat-import",
+      "pathEvidence": {
+        "file": "packages/experimental/deepseek-chat-import/src/protocol.ts",
+        "marker": "export const UPLOAD_PATH = '/api/deepseek-chat-import/archive'"
+      },
+      "evidence": "rc.3 快照含实验性导入包，但上游 base/web-app/headless bundle 和应用 profile 未装配该包。默认启动不注册此上传入口。"
     },
     {
       "source": "packages/host/open-in-app/src/index.ts",
