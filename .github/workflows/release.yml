@@ -27,7 +27,7 @@ on:
         description: '已通过真机验证并正式发布的 Bionilux 版本，带 v'
         required: true
         type: string
-        default: 'v0.10.8'
+        default: 'v0.10.7'
 
 # 并发控制（2026-10-28）：发布链绝不取消，也绝不允许两次并行。两次同时发布会在同一 tag 上
 # 抢传资产，而 GitHub 的资产上传是逐文件覆盖语义，混出来的 Release 事后无法分辨哪个文件来自哪次构建。
@@ -227,7 +227,9 @@ jobs:
           gh release download "$BIONILUX_TAG" --repo "$repo" --dir "$loader_dir" \
             --pattern 'bionilux-loader-aarch64.so' --pattern 'bionilux-loader-x86_64.so' \
             --pattern 'SHA256SUMS' --pattern 'BUILD_INFO.json'
-          node -e 'const fs=require("node:fs"); const info=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(info.tag!==process.env.BIONILUX_TAG || !/^[a-f0-9]{40}$/.test(info.source_sha)) throw Error("Bionilux build identity mismatch")' "$loader_dir/BUILD_INFO.json"
+          source_sha=$(gh api "repos/$repo/commits/$BIONILUX_TAG" --jq .sha)
+          [[ "$source_sha" =~ ^[a-f0-9]{40}$ ]] || { echo "::error::无法确定 Bionilux tag 对应的提交"; exit 1; }
+          node -e 'const fs=require("node:fs"); const info=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(info.tag!==process.env.BIONILUX_TAG || info.source_sha!==process.argv[2] || info.mode!=="release") throw Error("Bionilux build identity mismatch")' "$loader_dir/BUILD_INFO.json" "$source_sha"
           for asset in bionilux-loader-aarch64.so bionilux-loader-x86_64.so; do
             expected=$(awk -v file="$asset" '$2 == file { print $1 }' "$loader_dir/SHA256SUMS")
             [[ "$expected" =~ ^[a-f0-9]{64}$ ]] || { echo "::error::缺少唯一的 $asset 摘要"; exit 1; }
