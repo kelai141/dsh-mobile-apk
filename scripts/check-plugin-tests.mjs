@@ -21,7 +21,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
 const PLUGIN_DIR = join(ROOT, 'plugins')
 /** A test runner must not hold CI forever; a hard timeout keeps the failing unit visible. */
-const TEST_TIMEOUT_MS = 5 * 60 * 1000
+const TEST_TIMEOUT_MS = initPluginTestTimeoutMs()
 
 /**
  * 测试运行环境：`NODE_ENV` 必须由门禁自己钉住，**不能继承调用者**。
@@ -44,6 +44,30 @@ const TEST_NODE_ENV = 'test'
  */
 function testEnv(extra) {
   return { ...process.env, ...(extra ?? {}), NODE_ENV: TEST_NODE_ENV }
+}
+
+/** Parse `DSH_PLUGIN_TEST_TIMEOUT_MS` (ms) or fall back to 10 minutes. */
+function resolvePluginTestTimeoutMs(raw) {
+  const DEFAULT_TEST_TIMEOUT_MS = 10 * 60 * 1000
+  if (raw === undefined || raw === '') return DEFAULT_TEST_TIMEOUT_MS
+  const text = String(raw).trim()
+  if (!/^[1-9]\d*$/.test(text)) {
+    throw new Error('DSH_PLUGIN_TEST_TIMEOUT_MS must be a positive integer (ms), got: ' + JSON.stringify(raw))
+  }
+  const value = Number(text)
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error('DSH_PLUGIN_TEST_TIMEOUT_MS out of safe integer range: ' + JSON.stringify(raw))
+  }
+  return value
+}
+
+function initPluginTestTimeoutMs() {
+  try {
+    return resolvePluginTestTimeoutMs(process.env.DSH_PLUGIN_TEST_TIMEOUT_MS)
+  } catch (error) {
+    console.error('CHECK-PLUGIN-TESTS FAILED：' + error.message)
+    process.exit(2)
+  }
 }
 
 /** Kill the whole process group on POSIX so npm/npx grandchildren cannot hold CI open. */
@@ -515,6 +539,15 @@ if (process.argv.includes('--self-test') || process.argv.includes('--self-test-n
       checkResolvedWslPath('/mnt/c/actual/package', process.argv.includes('--self-test-negative')
         ? '/mnt/c/junction/package' : '/mnt/c/actual/package')
     })
+    verify('超时解析：缺省 10 分钟、正整数覆写与非法值拒绝', () => {
+      assert.equal(resolvePluginTestTimeoutMs(undefined), 10 * 60 * 1000)
+      assert.equal(resolvePluginTestTimeoutMs(''), 10 * 60 * 1000)
+      assert.equal(resolvePluginTestTimeoutMs('120000'), 120000)
+      assert.equal(resolvePluginTestTimeoutMs(' 900000 '), 900000)
+      for (const bad of ['abc', '0', '-5', '1.5', '   ']) {
+        assert.throws(() => resolvePluginTestTimeoutMs(bad), /DSH_PLUGIN_TEST_TIMEOUT_MS/)
+      }
+    })
     // 只枚举当前插件的文件与 npm 脚本，不执行任何真实插件测试。
     for (const plugin of plugins.sort()) {
       const dir = join(PLUGIN_DIR, plugin, 'test')
@@ -627,7 +660,8 @@ for (const plugin of plugins.sort()) {
   const failN2 = Number(/^ℹ fail (\d+)/m.exec(plain2)?.[1] ?? /^\s*(\d+) failed/m.exec(plain2)?.[1] ?? '0')
   if (r2.status !== 0 || failN2 !== 0) {
     failed += 1
-    console.error('FAIL  ' + plugin + ' 的单测未通过（runner=' + (usesNodeTest ? 'node:test' : 'vitest') + (r2.error?.code === 'ETIMEDOUT' ? ', timeout=' + TEST_TIMEOUT_MS + 'ms' : '') + '）')
+    const timedOut2 = r2.error?.code === 'ETIMEDOUT' || (process.platform === 'linux' && r2.status === 124)
+    console.error('FAIL  ' + plugin + ' 的单测未通过（runner=' + (usesNodeTest ? 'node:test' : 'vitest') + (timedOut2 ? ', timeout=' + TEST_TIMEOUT_MS + 'ms' : '') + '）')
     console.error(out2.split('\n').slice(-25).join('\n'))
   } else if (passN2 <= 0) {
     failed += 1
@@ -731,7 +765,8 @@ for (const repo of SUBREPO_TESTS) {
   const how = useWslNpm ? 'WSL npm test' : useNpm ? 'npm test' : 'node --test（无依赖路径）'
   if (r3.status !== 0 || failN3 !== 0) {
     failed += 1
-    console.error('FAIL  ' + repo + ' 的子仓测试未通过（' + how + '）')
+    const timedOut3 = r3.error?.code === 'ETIMEDOUT' || (process.platform === 'linux' && r3.status === 124)
+    console.error('FAIL  ' + repo + ' 的子仓测试未通过（' + how + (timedOut3 ? ', timeout=' + TEST_TIMEOUT_MS + 'ms' : '') + '）')
     console.error(out3.split('\n').slice(-25).join('\n'))
   } else if (passN3 <= 0) {
     failed += 1
