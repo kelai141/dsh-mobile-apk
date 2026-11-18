@@ -23,9 +23,12 @@ import java.io.File
 internal object ChooserAllowlist {
   /** Map a canonical path to a single document within an authorized primary-storage tree. */
   fun documentId(canonicalPath: String, root: String, treeId: String): String? {
-    if (!treeId.startsWith("primary:") || !root.startsWith("/") || !permitted(canonicalPath, listOf(root))) return null
+    if (!treeId.startsWith("primary:") || !root.startsWith("/")) return null
     if (canonicalPath == root) return treeId
-    val relative = canonicalPath.removePrefix(root).trimStart('/')
+    // DocumentsContract paths use Android's separator even in desktop JVM tests.
+    val prefix = root.trimEnd('/') + "/"
+    if (!canonicalPath.startsWith(prefix)) return null
+    val relative = canonicalPath.removePrefix(prefix)
     return if (treeId.endsWith(":")) treeId + relative else "$treeId/$relative"
   }
 
