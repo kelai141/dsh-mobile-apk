@@ -317,11 +317,11 @@ if (peer) {
     // 接线），apk 副本缺该接线而**编译与门禁全绿**——正是幽灵缺陷的定义形态（铁律 5）。
     // 故把注入集全量对齐 MIRROR_TOP，而不是只补这一个。
     'plugins/dsh-android-bridge',
-    'plugins/dsh-android-manage',
+    'plugins/dsh-android-phone-control',
     'dsh-shell-termux',
     'plugins/dsh-android-linux-env',
     'plugins/dsh-android-browser',
-    'plugins/dsh-android-vdisplay',
+    // plugins/dsh-android-manage 与 dsh-android-vdisplay 已移入 retiredDirs，由 phone-control 取代
     'plugins/dsh-android-file-open',
     'plugins/dsh-session-delete',
     'scripts/build-release.ps1',
