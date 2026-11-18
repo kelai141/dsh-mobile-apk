@@ -206,7 +206,23 @@ beforeEach(() => {
 afterEach(() => {
   fold.detach()
   document.documentElement.removeAttribute('data-dsh-mobile-form')
+  document.documentElement.removeAttribute('lang')
   document.body.innerHTML = ''
+})
+
+it('updates the existing options button when the document language changes', async () => {
+  document.documentElement.lang = 'zh-Hant'
+  fold.attach()
+  await flush()
+  const arrow = document.querySelector<HTMLButtonElement>('[' + ARROW_ATTR + ']')!
+  expect(arrow.textContent).toBe('更多选项')
+  for (const language of ['en-US', 'fr', 'ja']) {
+    document.documentElement.lang = language
+    await flush()
+    expect(document.querySelector('[' + ARROW_ATTR + ']')).toBe(arrow)
+    expect(arrow.textContent).toBe('More')
+    expect(arrow.getAttribute('aria-label')).toBe('More options')
+  }
 })
 
 /**

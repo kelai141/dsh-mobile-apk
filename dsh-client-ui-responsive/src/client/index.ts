@@ -245,7 +245,7 @@ export function apply(ctx: ClientContext): void {
 
   // Composer insets adaptation: pad composer seat with system bottom / IME bottom.
   ctx.effect(() => injectStyle('composer-insets', COMPOSER_INSETS_CSS), 'ui-responsive: composer insets adaptation')
-  ctx.effect(() => injectStyle('to-bottom-gutter', TO_BOTTOM_GUTTER_CSS), 'ui-responsive: return-to-bottom side lane')
+  ctx.effect(() => injectStyle('to-bottom-gutter', TO_BOTTOM_GUTTER_CSS), 'ui-responsive: sticky return-to-bottom action')
 
   // Composer command-menu scroll fix: the upstream menu viewport lacks
   // flex:1, so an over-long candidate list is clipped unscrollable.

@@ -1,4 +1,5 @@
 import { HeaderPopups } from './header-popups.ts'
+import { tr } from '../i18n.ts'
 
 /**
  * 竖屏顶栏插件 UI 折叠（0.14.7 / Spec 2.6）。
@@ -168,7 +169,7 @@ export class TopBarFold {
     this.formObserver = new MutationObserver(() => { this.schedule() })
     this.formObserver.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ['data-dsh-mobile-form', 'data-dsh-session-id'],
+      attributeFilter: ['data-dsh-mobile-form', 'data-dsh-session-id', 'lang'],
     })
     document.addEventListener('pointerdown', this.onDocumentPointerDown, true)
     document.addEventListener('mousedown', this.onDocumentPointerDown, true)
@@ -249,6 +250,7 @@ export class TopBarFold {
       this.titleRow = target.titleRow
     }
     this.ensureArrow()
+    this.syncCopy()
     // 重进手机竖屏默认收起（Spec 2.6）：容器换新时 this.open 未变，但首次接管必须从收起开始。
     //
     // 审计 §7.9：样式写入只在 open 边沿执行。这里不再无条件调 applyOpen() ——
@@ -334,10 +336,7 @@ export class TopBarFold {
     arrow.type = 'button'
     arrow.setAttribute(ARROW_ATTR, '')
     arrow.setAttribute('aria-expanded', 'false')
-    arrow.setAttribute('aria-label', this.foldLabel())
     const label = document.createElement('span')
-    const language = (document.documentElement.lang || navigator.language || '').toLowerCase()
-    label.textContent = language.startsWith('zh') ? '更多选项' : 'More options'
     arrow.append(label, chevron())
     arrow.addEventListener('click', this.onArrowClick)
     row.appendChild(arrow)
@@ -368,11 +367,14 @@ export class TopBarFold {
     this.setOpen(!this.open)
   }
 
-  /** 本地化的箭头无障碍名（本插件自有文案，无上游文案依赖）。 */
-  private foldLabel(): string {
-    const language = (document.documentElement.lang || navigator.language || '').toLowerCase()
-    if (language.startsWith('zh')) return '更多选项'
-    return 'More options'
+  private syncCopy(): void {
+    const label = this.arrow?.firstElementChild
+    const text = tr('更多选项', 'More')
+    if (label && label.textContent !== text) label.textContent = text
+    const name = tr('更多选项', 'More options')
+    if (this.arrow?.getAttribute('aria-label') !== name) this.arrow?.setAttribute('aria-label', name)
+    const empty = tr('当前会话暂无更多选项', 'No additional options in this conversation')
+    if (this.container?.getAttribute(EMPTY_ATTR) !== empty) this.container?.setAttribute(EMPTY_ATTR, empty)
   }
 
   private removeArrow(): void {
@@ -398,8 +400,6 @@ export class TopBarFold {
     const container = this.container
     if (container === null) return
     container.setAttribute(FOLD_ATTR, this.open ? 'open' : 'closed')
-    const language = (document.documentElement.lang || navigator.language || '').toLowerCase()
-    container.setAttribute(EMPTY_ATTR, language.startsWith('zh') ? '当前会话暂无更多选项' : 'No additional options in this conversation')
     // 打开时由 measure() 写定位；收起时写回接管前的原值（不是一律删空 ——
     // 那会连上游/插件自己原本写在这条容器上的内联样式一起抹掉）。
     for (const name of OWN_POSITION_VARS) {
@@ -417,10 +417,6 @@ export class TopBarFold {
     }
     this.arrow?.setAttribute('aria-expanded', this.open ? 'true' : 'false')
     this.arrow?.setAttribute('aria-controls', container.id)
-    const label = this.foldLabel()
-    if (this.arrow !== null && this.arrow.getAttribute('aria-label') !== label) {
-      this.arrow.setAttribute('aria-label', label)
-    }
     this.setTitleRowUncontained(this.open)
   }
 
