@@ -345,3 +345,5 @@ Windows 优先用 rustc 1.99.0 的 GNU host toolchain（默认 MSVC 常缺 `link
 - 接线状态：`build-apk-dev-fast.mjs` 在重打包前调用本脚本并**硬阻断**：检测到缺失/不一致即构建失败，并打印缺失条目与修复步骤（下载当前 Release 的快照覆盖本地资产后重跑）。作用范围仅限 dev-fast 这条实际消费本地快照的路径；release/Fast/CI/静态检查不经过它。
 
 **快照指纹门禁**：干净工作树缺少归档时，默认档打印具名 SKIP 和计数，严格档返回失败。有归档且三份指纹一致时，打印通过和 SKIP=0。覆盖了两档输出后，SKIP 审计不再为本门禁保留缺口登记。
+
+Gradle 组装后，`build-apk-engine.mjs` 调用 `check-snapshot-fingerprint.mjs --apk` 流式读取 APK 内的快照。ZIP 的 CRC、快照字节的 SHA-256、内嵌指纹和 Hard 插件清单必须与本次构建输入一致。校验失败时终止交付。

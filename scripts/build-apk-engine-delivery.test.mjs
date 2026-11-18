@@ -90,6 +90,20 @@ test('pass case: a verified build still delivers the artifact and clears the sta
     '清理只针对 *.apk，不得误删同目录发布资产')
 })
 
+test('a corrupted packaged snapshot cannot enter the delivery directory', (t) => {
+  const f = fixture(t)
+  const runner = runnerFor(f)
+  const wrapped = (command, args, options) => {
+    if (args[0] === '/tools/check-snapshot-fingerprint.mjs' && args.includes('--apk')) {
+      assert.match(args[args.indexOf('--apk') + 1], /app-release\.apk$/)
+      return { status: 1 }
+    }
+    return runner(command, args, options)
+  }
+  assert.throws(() => assembleApk(baseOptions(f), wrapped), /failed \(1\)/)
+  assert.deepEqual(readdirSync(f.outputDir), [])
+})
+
 test('the delivery directory only ever contains artifacts that passed verification', (t) => {
   const f = fixture(t)
   const record = []

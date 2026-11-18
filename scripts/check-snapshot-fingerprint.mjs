@@ -19,9 +19,11 @@
 // 用法：node scripts/check-snapshot-fingerprint.mjs [--require] [--root <树>]
 //   --require  构建链/发布链用：tar 缺席即失败（不得 SKIP exit 0）。也可用 DSH_REQUIRE_SNAPSHOT_FINGERPRINT=1。
 //   --root     仅用于反向验证或非标准布局；缺省自动探测「含 app/src/main 的树」。
+//   --apk <file> [--sha256 <hash>]  核对最终 APK 中的三份快照资产。
 //   --self-test 判别力自证（含 issue #993 的空壳清单负控）。
 // 退出码：0 = 通过（或 CI 净检出下明确计数并打印的 SKIP）；1 = 不一致 / 声明缺席 / 树定位失败 / 清单不可用。
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
 import { join, dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -245,6 +247,48 @@ if (process.argv.includes('--self-test')) {
 }
 
 const argv = process.argv.slice(2)
+if (argv.includes('--apk')) {
+  const apk = argv[argv.indexOf('--apk') + 1]
+  const expected = argv.includes('--sha256') ? argv[argv.indexOf('--sha256') + 1] : ''
+  if (!apk || apk.startsWith('--') || (argv.includes('--sha256') && !/^[0-9a-f]{64}$/.test(expected))) {
+    console.error('usage: check-snapshot-fingerprint.mjs --apk <file> [--sha256 <hash>]')
+    process.exit(2)
+  }
+  // zipfile 在读取时校验 CRC。快照按块读取，内存开销与 APK 体积无关。
+  const probe = String.raw`import hashlib,json,sys,zipfile
+names = ('assets/snapshot.tar.xz', 'assets/snapshot.sha256', 'assets/plugin-hard-manifest.json')
+with zipfile.ZipFile(sys.argv[1]) as apk:
+    entries = apk.namelist()
+    for name in names:
+        if entries.count(name) != 1:
+            raise ValueError('expected exactly one APK entry: ' + name)
+    if apk.getinfo(names[0]).compress_type != zipfile.ZIP_STORED:
+        raise ValueError('snapshot entry must be stored for Android AssetManager.openFd')
+    digest = hashlib.sha256()
+    with apk.open(names[0]) as snapshot:
+        for chunk in iter(lambda: snapshot.read(1024 * 1024), b''):
+            digest.update(chunk)
+    print(json.dumps([digest.hexdigest(), apk.read(names[1]).decode('ascii').strip(), apk.read(names[2]).decode('utf-8')]))`
+  const python = process.platform === 'win32' ? 'python' : 'python3'
+  const result = spawnSync(python, ['-c', probe, resolve(apk)], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
+  if (result.status !== 0) {
+    const detail = result.error?.message ?? result.stderr.trim().split(/\r?\n/).at(-1)
+    console.error('SNAPSHOT-FINGERPRINT APK FAILED: ' + (detail || 'ZIP 校验未完成'))
+    process.exit(1)
+  }
+  const [actual, declared, hardText] = JSON.parse(result.stdout)
+  const hard = hardManifestProblem(hardText)
+  const manifest = hard.problems.length === 0 ? fingerprintProblem(JSON.parse(hardText).fingerprint, actual) : null
+  if (actual !== declared || (expected && actual !== expected) || hard.problems.length || manifest) {
+    console.error('SNAPSHOT-FINGERPRINT APK FAILED: ' + [
+      'actual=' + actual + ' declared=' + declared + (expected ? ' expected=' + expected : ''),
+      ...hard.problems, ...(manifest ? [manifest] : []),
+    ].join('\n'))
+    process.exit(1)
+  }
+  console.log('SNAPSHOT-FINGERPRINT APK PASSED（sha256=' + actual + '，SKIP=0）')
+  process.exit(0)
+}
 const rootIdx = argv.indexOf('--root')
 const OVERRIDE = rootIdx >= 0 ? argv[rootIdx + 1] : process.env.DSH_APK_ROOT
 const REQUIRE = argv.includes('--require') || process.env.DSH_REQUIRE_SNAPSHOT_FINGERPRINT === '1'

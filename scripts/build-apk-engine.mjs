@@ -248,6 +248,7 @@ export function assembleApk(options, runner = spawnSync) {
   execute(gradle, gradleArgs, { cwd: resolvedApkDir, shell: process.platform === 'win32' }, runner)
 
   if (!existsSync(builtApk)) throw new Error(`Gradle succeeded but APK is missing: ${builtApk} (buildType=${buildType})`)
+  execute(process.execPath, [fingerprintGate, '--apk', builtApk, '--sha256', sha], { cwd: SCRIPT_DIR }, runner)
 
   // 验签必须在**拷进交付目录之前**（issue #1077）。
   //
