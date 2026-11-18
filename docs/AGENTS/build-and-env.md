@@ -49,8 +49,6 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 
 **门禁（build-apk-013.ps1 内）**：聚合入口 `scripts/check-release-gates.mjs`（`--list` 现数，不维护数量；接进本地链 / 云端 `build-apk.mjs` / 两仓 CI / 发布链 `build-release.ps1`，发布链 `--run --require` 要求 SKIP=0）。内容 = vendor 统一补丁（`scripts/patches/apply-patches.mjs`：活动 vendor 项由 registry.json 驱动，完整清单见 RUNTIME-PATCHES.md §6.1；market-A/C 已退役，undo S1/S2 在活动清单内，勿加 Select-First）→ 快照单 pass 注入（`inject-all.py`，补齐 + 修剪双向对齐）→ 注入产物完整性（`check-inject-completeness.mjs`）→ 挂载集（`check-patch-mounts.mjs`）→ 机密（`check-snapshot-secrets.mjs`）→ 第三方合规（`check-third-party.mjs`）→ 路由鉴权（`check-api-route-auth.mjs`）→ 工具 schema / 控制 op / 状态登记 / 桥对称 / 门禁 SKIP / 性能插桩 / Kotlin 注释 / 构建链中止 / strip no-op → 运行时资产（`check-runtime-assets.mjs`）→ 快照指纹（`check-snapshot-fingerprint.mjs`）→ elf-check → 许可资产拷贝（LICENSES → assets/licenses）→ gradle。
 
-**快照指纹门禁**：干净工作树缺少归档时，默认档打印具名 SKIP 和计数，严格档返回失败。有归档且三份指纹一致时，打印通过和 SKIP=0。覆盖了两档输出后，SKIP 审计不再为本门禁保留缺口登记。
-
 **内嵌快照可解压门禁（0.14.7 / task-9）**：`scripts/check-snapshot-decode.mjs`——用**与设备同一套** streaming 解码器（`org.tukaani:xz` + `commons-compress`，版本对账 `app/build.gradle.kts` 的声明值，不一致即判红）把 `assets/snapshot.tar.xz` 完整解压一遍，判据 = 无异常 + 条目数 > 0 + 实读字节数 == 条目声明 size 之和。**为什么需要它**：`check-snapshot-fingerprint.mjs` 断言的是 `sha256(tar) == snapshot.sha256`，而声明值由同一条构建步骤自己写（自证）；`check-snapshot-asset.ps1` 只比对 APK 内嵌与传入的 xz —— 两条都**不解压**，于是「摘要自洽但字节流解不开」的资产能一路打包进 APK，直到用户真机上以 `CorruptedInputException` 爆出（见坑 285）。**执行点**：本地链 `build-apk-013.ps1` 在 `assemble` 之后 per-ABI 段，云端 `build-apk.mjs` 在组装后均对本次实际资产严格解码；PR CI 的条件 compile 作业无生产快照，在 `.kt` 差异触发后运行 `--self-test-runtime` 生成合成小归档，并用同一 Java streaming probe 验证有效输入通过、截断/字节翻转被拒，另独立自测 SHA-256 指纹门禁正反例。这些合成输入只证明门禁判别力，**不代表最终 APK 的快照已通过解码**。正式构建链仍须对实际资产运行 `--require`，无 Java、jar 或快照时拒绝继续。普通 `--self-test` 保留为不依赖 Java/Gradle 缓存的纯判据自测。**证据边界**：既往真实资产实测曾报告 `entries=49521 bytes=710586232`，这不是本次 PR CI 或最终候选包的验证结果；新版本的运行时合成自测由 CI 独立报告。
 
 **维护文档对账**：Gradle 版本/依赖与活动补丁清单由 `node scripts/check-maintenance-docs.mjs --write` 生成；改声明或 registry 后更新生成区并运行不带 `--write` 的检查。该检查属于维护一致性检查，可按输入路径在 PR 中显示结果，不作为 APK 功能与数据安全门禁的替代。
@@ -345,3 +343,5 @@ Windows 优先用 rustc 1.99.0 的 GNU host toolchain（默认 MSVC 常缺 `link
 - 实测：仓内 2026-10-28 资产判红（缺 `dsh-fs-patch` 与 `linux-bootstrap` 等）；同版本 release 附带的 `snapshot-x86_64.tar.xz` 判绿（378 个引擎包、11 个登记插件齐全）。
 - 接线状态（0.15.0 增补）：`build-apk-debug.mjs` 在**注入之后**对注入后的 tar 跑本门禁（`--snapshot <注入后快照>`）。顺序是硬约束：未注入的快照一个插件都没有，先跑必恒红，而红的是「还没轮到注入」这个事实。`snapshot_source=release` 档跳过本门禁（理由同上节）。
 - 接线状态：`build-apk-dev-fast.mjs` 在重打包前调用本脚本并**硬阻断**：检测到缺失/不一致即构建失败，并打印缺失条目与修复步骤（下载当前 Release 的快照覆盖本地资产后重跑）。作用范围仅限 dev-fast 这条实际消费本地快照的路径；release/Fast/CI/静态检查不经过它。
+
+**快照指纹门禁**：干净工作树缺少归档时，默认档打印具名 SKIP 和计数，严格档返回失败。有归档且三份指纹一致时，打印通过和 SKIP=0。覆盖了两档输出后，SKIP 审计不再为本门禁保留缺口登记。
