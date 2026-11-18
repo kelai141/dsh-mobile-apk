@@ -251,6 +251,20 @@ describe('卡片胶囊：行为', () => {
     expect(pdf!.closest('li')?.querySelector('[role=status]')).toBeNull()
   })
 
+  it('updates existing action names and visible feedback after a language change', async () => {
+    buildSingleCard('/work/hello.txt')
+    const bridge = makeBridge(() => '{"ok":false,"error":"uri-denied"}')
+    capsule = new FileCardCapsule(() => bridge, COPY)
+    capsule.attach()
+    await flush()
+    const button = document.querySelector<HTMLButtonElement>(EXTERNAL)!
+    button.click()
+    capsule.setCopy({ external: name => `打开 ${name}`, share: '转发', failure: () => '无法分享' })
+    expect(button.getAttribute('aria-label')).toBe('打开 hello.txt')
+    expect(document.querySelector(SHARE)?.getAttribute('aria-label')).toBe('转发')
+    expect(document.querySelector('[role=status]')?.textContent).toBe('无法分享')
+  })
+
   it('④c 壳侧答 ok=true 时不收起左段', async () => {
     buildSingleCard('/work/a.md')
     const bridge = makeBridge(() => '{"ok":true}')

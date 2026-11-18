@@ -257,6 +257,7 @@ export interface FileCardCopy {
 export class FileCardCapsule {
   private observer: MutationObserver | null = null
   private lastStatus: HTMLElement | null = null
+  private lastError: string | undefined
   /** 桥面提供者：每次动作时调用，壳侧晚注入也能拿到。 */
   private bridge: () => FileCardBridge
   private copy: FileCardCopy
@@ -285,6 +286,14 @@ export class FileCardCapsule {
   /** locale/change 后换绑文案。 */
   setCopy(copy: FileCardCopy): void {
     this.copy = copy
+    for (const group of document.querySelectorAll<HTMLElement>('[' + CAPSULE_ATTR + ']')) {
+      const anchor = group.parentElement?.querySelector<HTMLElement>('button[aria-describedby]')
+      const path = anchor && this.pathOf(anchor)
+      if (!path) continue
+      this.labelButton(group.querySelector('[' + EXTERNAL_ATTR + ']'), copy.external(nameOf(path)))
+      this.labelButton(group.querySelector('[' + SHARE_ATTR + ']'), copy.share)
+    }
+    if (this.lastStatus?.textContent) this.lastStatus.textContent = copy.failure(this.lastError)
   }
 
   /** 桥可晚注入；可见性与单次打开结果无关。 */
@@ -542,8 +551,7 @@ export class FileCardCapsule {
     const button = document.createElement('button')
     button.type = 'button'
     button.setAttribute(attr, '')
-    button.setAttribute('aria-label', label)
-    button.setAttribute('title', label)
+    this.labelButton(button, label)
     if (chipAttr === undefined) {
       button.append(icon(iconPath))
       return button
@@ -555,6 +563,11 @@ export class FileCardCapsule {
     chip.append(icon(iconPath))
     button.append(chip)
     return button
+  }
+
+  private labelButton(button: Element | null, label: string): void {
+    button?.setAttribute('aria-label', label)
+    button?.setAttribute('title', label)
   }
 
   /** 调用壳桥并返回本次打开或分享的结果。 */
@@ -598,6 +611,7 @@ export class FileCardCapsule {
     // A failed open describes this file at this moment; other formats and
     // future attempts still get the Android chooser.
     status.textContent = result.ok ? '' : this.copy.failure(result.error)
+    this.lastError = result.error
     this.lastStatus = status as HTMLElement
   }
 }

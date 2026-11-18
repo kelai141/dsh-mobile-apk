@@ -2,6 +2,7 @@ package com.dsharnessmobile.shell
 
 import android.content.Intent
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.core.content.FileProvider
 import org.json.JSONObject
 import java.io.File
@@ -19,7 +20,7 @@ import java.io.File
  *   装了就出现在选择器里，没装就不出现（不臆造入口）。
  *
  * 安全：白名单 = FileIncoming 的 canonical 允许面（工作区 / tmp / usr/bin / 导出仓库）
- * 加用户可见的外部存储根（见 isChooserAllowed）；应用私有区的其余部分（含
+ * 加用户通过系统目录选择器授予的工作区（见 isChooserAllowed）；应用私有区的其余部分（含
  * .credentials.yaml）永不进选择器。桥由页面调用，页面内容不可信。
  *
  * 返回 JSON {"ok":true} / {"ok":false,"reason":"..."}：
@@ -45,12 +46,7 @@ object PathOpen {
     if (!file.exists()) return answer(false, "not-exists")
     if (!isChooserAllowed(activity, file)) return answer(false, "not-allowed")
     val folder = file.isDirectory || mode == "folder"
-    val uri = try {
-      FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", file)
-    } catch (e: Exception) {
-      android.util.Log.w("dsh-path", "uri failed: " + e.message)
-      return answer(false, "uri-failed")
-    }
+    val uri = chooserUri(activity, file) ?: return answer(false, "uri-failed")
     val primary = if (folder) folderIntent() else viewIntent(uri, null)
     if (primary.resolveActivity(activity.packageManager) == null) return answer(false, "no-handler")
 
@@ -117,6 +113,33 @@ object PathOpen {
       ChooserAllowlist.permitted(file.canonicalPath, grantedRoots(activity))
     } catch (_: Exception) {
       false
+    }
+  }
+
+  /** Keep the fixed FileProvider roots. SAF grants supply an exact document URI for selected workspaces. */
+  internal fun chooserUri(activity: MainActivity, file: File): Uri? {
+    if (FileIncoming.isReaderAllowed(activity, file)) {
+      return try {
+        FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", file)
+      } catch (_: Exception) {
+        null
+      }
+    }
+    return try {
+      val canonicalPath = file.canonicalPath
+      activity.contentResolver.persistedUriPermissions.firstNotNullOfOrNull { grant ->
+        val tree = grant.uri
+        if (!grant.isReadPermission || tree.authority != "com.android.externalstorage.documents" || !DocumentsContract.isTreeUri(tree)) {
+          return@firstNotNullOfOrNull null
+        }
+        val root = AndroidBridge.resolvePickedPath(tree)
+        if (!root.startsWith("/")) return@firstNotNullOfOrNull null
+        val target = ChooserAllowlist.documentId(canonicalPath, File(root).canonicalPath, DocumentsContract.getTreeDocumentId(tree))
+          ?: return@firstNotNullOfOrNull null
+        DocumentsContract.buildDocumentUriUsingTree(tree, target)
+      }
+    } catch (_: Exception) {
+      null
     }
   }
 
