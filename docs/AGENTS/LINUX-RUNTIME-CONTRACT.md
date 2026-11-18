@@ -91,6 +91,9 @@ READY -> DISABLING -> INSTALLED_DISABLED
 - loader 的**设备侧**判据（改构建面时必须一起看）：`applicationInfo.nativeLibraryDir` 下能看到
   `libbionilux-loader.so` 且是普通文件；MIUI 真机启用 Linux 环境后 `linux_bash` 能执行命令；
   **x86_64 模拟器同样要验一遍**（两个 ABI 的 loader 是不同文件，只测一边证明不了另一边）。
+- APK 发布工作流通过 `bionilux_tag` 固定依赖版本。从 Bionilux 正式发布下载两个 loader，校验构建来源、
+  摘要和 ELF 架构后交给本地构建链。Gradle 保留 loader 原始字节，归集时对两个 APK 中的 loader 再核对摘要，
+  并将 Bionilux 构建来源和摘要随发布产物归档。
 - 启动描述：壳侧把「启动什么」收敛成单通道 `DSH_CONSOLE_LAUNCH`（JSON：schemaVersion / shell / argv /
   cwd / env / unset），中继只消费描述并 spawn，不解释启动策略（ADR-0001）。`ConsoleLaunch` 是唯一生产者。
 - 渲染：控制台页面用 xterm.js（MIT，随 APK 资产分发）渲染 VT/ANSI，PTY 路径原样转发控制序列；

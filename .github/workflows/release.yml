@@ -23,6 +23,11 @@ on:
         required: false
         type: string
         default: ''
+      bionilux_tag:
+        description: '已通过真机验证并正式发布的 Bionilux 版本，带 v'
+        required: true
+        type: string
+        default: 'v0.10.8'
 
 # 并发控制（2026-10-28）：发布链绝不取消，也绝不允许两次并行。两次同时发布会在同一 tag 上
 # 抢传资产，而 GitHub 的资产上传是逐文件覆盖语义，混出来的 Release 事后无法分辨哪个文件来自哪次构建。
@@ -207,6 +212,31 @@ jobs:
         run: |
           yes | sudo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" >/dev/null 2>&1 || true
           find "${ANDROID_HOME}/build-tools" -maxdepth 2 -type f -name apksigner | tail -1
+      - name: 下载并校验 Bionilux 双 ABI loader
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BIONILUX_TAG: ${{ inputs.bionilux_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$BIONILUX_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Bionilux tag 必须是稳定版本号"; exit 1; }
+          repo=kelai141/dsh-bionilux
+          published=$(gh release view "$BIONILUX_TAG" --repo "$repo" --json isDraft,isPrerelease --jq '(.isDraft or .isPrerelease) | not')
+          [ "$published" = true ] || { echo "::error::Bionilux release 必须已正式发布"; exit 1; }
+          loader_dir=$(mktemp -d "$RUNNER_TEMP/dsh-bionilux-loaders.XXXXXX")
+          gh release download "$BIONILUX_TAG" --repo "$repo" --dir "$loader_dir" \
+            --pattern 'bionilux-loader-aarch64.so' --pattern 'bionilux-loader-x86_64.so' \
+            --pattern 'SHA256SUMS' --pattern 'BUILD_INFO.json'
+          node -e 'const fs=require("node:fs"); const info=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(info.tag!==process.env.BIONILUX_TAG || !/^[a-f0-9]{40}$/.test(info.source_sha)) throw Error("Bionilux build identity mismatch")' "$loader_dir/BUILD_INFO.json"
+          for asset in bionilux-loader-aarch64.so bionilux-loader-x86_64.so; do
+            expected=$(awk -v file="$asset" '$2 == file { print $1 }' "$loader_dir/SHA256SUMS")
+            [[ "$expected" =~ ^[a-f0-9]{64}$ ]] || { echo "::error::缺少唯一的 $asset 摘要"; exit 1; }
+            printf '%s  %s\n' "$expected" "$asset" | (cd "$loader_dir" && sha256sum --check --strict -)
+          done
+          for abi in arm64 x86_64; do
+            node scripts/check-native-linux-loader.mjs --source "$loader_dir" --abi "$abi"
+          done
+          echo "DSH_NATIVE_LINUX_LOADER_DIR=$loader_dir" >> "$GITHUB_ENV"
       - name: 准备插件依赖（lock-only 后 npm ci；构建由正式入口统一执行）
         shell: bash
         run: |
@@ -297,10 +327,12 @@ jobs:
       - name: 归集发布资产（APK + 注入后快照 + 子仓 tgz）
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           OUT="release/v${ver}"
           mkdir -p "$OUT/apk" "$OUT/snapshot" "$OUT/plugins" "$OUT/provenance"
           cp .deploy-tmp/source-build/plugin-lock-resolution-release.json "$OUT/provenance/"
+          cp "$DSH_NATIVE_LINUX_LOADER_DIR/BUILD_INFO.json" "$OUT/provenance/bionilux-build-info.json"
+          (cd "$DSH_NATIVE_LINUX_LOADER_DIR" && sha256sum bionilux-loader-aarch64.so bionilux-loader-x86_64.so) > "$OUT/provenance/bionilux-loader-sha256.txt"
           for abi in arm64 x86_64; do
             cp ".deploy-tmp/snapshot-013/plugin-locks-${abi}/plugin-lock-resolution-${abi}.json" "$OUT/provenance/"
           done
@@ -313,6 +345,17 @@ jobs:
           ls -lR "$OUT"
           apk_count=$(find "$OUT/apk" -name '*.apk' | wc -l)
           [ "$apk_count" -ge 2 ] || { echo "::error::APK 少于 2 件（双 ABI 缺件）"; exit 1; }
+          for abi in arm64 x86_64; do
+            apk="$OUT/apk/dsh-mobile-apk-v${ver}-$abi.apk"
+            node scripts/check-native-linux-loader.mjs --apk "$apk" --abi "$abi" --require
+            case "$abi" in
+              arm64) android_abi=arm64-v8a; asset=bionilux-loader-aarch64.so ;;
+              x86_64) android_abi=x86_64; asset=bionilux-loader-x86_64.so ;;
+            esac
+            expected=$(sha256sum "$DSH_NATIVE_LINUX_LOADER_DIR/$asset" | awk '{print $1}')
+            actual=$(unzip -p "$apk" "lib/$android_abi/libbionilux-loader.so" | sha256sum | awk '{print $1}')
+            [ "$actual" = "$expected" ] || { echo "::error::$abi APK loader 摘要与 Bionilux 发布资产不同"; exit 1; }
+          done
           node scripts/check-apk-signatures.mjs --self-test
           # keystore 凭据必须显式声明（issue #1031）：门禁不再回落到 androiddebugkey/android。
           node scripts/check-apk-signatures.mjs --dir "$OUT/apk" --keystore keystore/debug.keystore \
