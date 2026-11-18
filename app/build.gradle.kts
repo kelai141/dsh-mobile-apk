@@ -263,7 +263,10 @@ tasks.withType<Test>().configureEach {
     inputs.dir(File(repoRootDir, "scripts"))
         .withPropertyName("repoScripts")
         .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
-    inputs.dir(File(repoRootDir, "plugins"))
+    inputs.files(fileTree(File(repoRootDir, "plugins")) {
+        // npm 生成的依赖不属于测试读取的仓内输入。Windows 无法快照 WSL 创建的 .bin 链接。
+        exclude("**/node_modules/**")
+    })
         .withPropertyName("repoPlugins")
         .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
     inputs.dir(File(repoRootDir, "dsh-host-web-compat"))
