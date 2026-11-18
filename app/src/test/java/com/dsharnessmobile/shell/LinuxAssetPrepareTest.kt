@@ -421,4 +421,25 @@ class LinuxAssetPrepareTest {
     assertEquals(LinuxAssetPrepare.PHASE_FAILED, state.getString("phase"))
     assertEquals(LinuxAssetIO.CODE_URL_REJECTED, state.getString("code"))
   }
+
+  @Test
+  fun prunesStalePartDirsFromInterruptedDownloadsWhileKeepingValidStagingAndUserDirs() {
+    val bytes = goodArchive()
+    LinuxAssetPrepare.opener = installOpener(bytes)
+
+    val stalePart = File(envRoot, "${LinuxAssetPrepare.DIR_STAGING}-${"a".repeat(64)}.part").apply { mkdirs() }
+    File(stalePart, "asset.tar.xz").writeText("partial")
+    val nonPart = File(envRoot, "${LinuxAssetPrepare.DIR_STAGING}-notsha.part").apply { mkdirs() }
+    val userData = File(envRoot, "user-keep").apply { mkdirs() }
+    File(userData, "note.txt").writeText("keep")
+    val activeStaged = File(File(envRoot, LinuxAssetPrepare.DIR_STAGING), "b".repeat(64)).apply { mkdirs() }
+
+    assertTrue(JSONObject(LinuxAssetPrepare.start(root, specJson(bytes))).getBoolean("ok"))
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+
+    assertFalse("此前中断遗留的 staging-<sha>.part 必须被清理", stalePart.exists())
+    assertTrue("非 sha 命名的目录不得误删", nonPart.isDirectory)
+    assertTrue("无关用户目录不得误删", File(userData, "note.txt").isFile)
+    assertTrue("其它已暂存目录归 bootstrap 清理，prepare 不误删", activeStaged.isDirectory)
+  }
 }

@@ -10,7 +10,12 @@ import {
   selectRuntimeForArch,
   validateManifestShape,
 } from './manifest.js'
-import { installVerifiedPluginBundle } from './asset-bundle.js'
+import {
+  collectManifestAssetDigests,
+  installVerifiedPluginBundle,
+  pruneOldHostStaging,
+  pruneOldPluginSlots,
+} from './asset-bundle.js'
 import { compareVersions, parseVersion } from './version.js'
 
 export const name = 'dsh-linux-bootstrap'
@@ -55,6 +60,7 @@ function initialState(autoUpdate) {
     updateBlocked: false,
     lastCheckAt: null,
     lastError: null,
+    lastCheckError: null,
     runtime: null,
   }
 }
@@ -114,6 +120,8 @@ function statusShape(state, mobileVersion, operation, packageVersion, arch) {
     },
     error: state.lastError,
     lastError: state.lastError,
+    checkError: state.lastCheckError ?? null,
+    lastCheckError: state.lastCheckError ?? null,
     lastCheckAt: state.lastCheckAt,
     lastAutomaticCheckMobileVersion: state.lastAutomaticCheckMobileVersion,
   })
@@ -480,10 +488,21 @@ export function createMobileBootstrap(options = {}) {
       state.updateAvailable = false
       state.updateBlocked = false
       state.lastError = null
+      state.lastCheckError = null
       state.runtime = typeof resolvedManager.status === 'function' ? await resolvedManager.status() : { id: runtime.id, label: runtime.label, architecture: runtime.architecture, backend: runtime.backend }
       await save()
       // issue #1374：全部成功才丢弃旧包备份——提交点必须在激活/manifest 落库之后。
       if (typeof assetHandle?.commit === 'function') await assetHandle.commit()
+      // Post-commit cleanup: only runs after activation, state save, and commit succeed,
+      // so a failed upgrade never deletes the active fallback or user data.
+      const keepShas = collectManifestAssetDigests(state.pinnedManifest, state.runtimeId)
+      if (state.availableManifest && state.availableManifest !== state.pinnedManifest) {
+        for (const sha of collectManifestAssetDigests(state.availableManifest, state.runtimeId)) {
+          keepShas.add(sha)
+        }
+      }
+      await pruneOldPluginSlots(pluginRoot, { keepDirectory: state.pluginDirectory })
+      await pruneOldHostStaging(hostStagingRoot, { keepShas })
       return emit()
     } catch (error) {
       // 顺序：**先回滚资产、再回滚 host scope**（issue #1374）。
@@ -532,7 +551,7 @@ export function createMobileBootstrap(options = {}) {
     await updateMobileVersion()
     if (automatic && (!state.autoUpdateEnabled || !state.enabled || !state.injectionActivated || !state.installedLinuxVersion || !state.installedSystemMobileVersion || !mobileVersion || state.installedSystemMobileVersion === mobileVersion || state.lastAutomaticCheckMobileVersion === mobileVersion)) return emit()
     operation = automatic ? 'automatic-check' : 'checking'
-    state.lastError = null
+    state.lastCheckError = null
     state.updateBlocked = false
     emit()
     try {
@@ -553,7 +572,9 @@ export function createMobileBootstrap(options = {}) {
       }
       return emit()
     } catch (error) {
-      state.lastError = safeError(error)
+      // Keep update-check failures out of state.lastError so offline/rate-limit
+      // checks never mark a healthy installed Linux runtime as failed.
+      state.lastCheckError = safeError(error)
       state.lastCheckAt = new Date().toISOString()
       if (automatic) {
         state.lastAutomaticCheckMobileVersion = mobileVersion
@@ -620,6 +641,13 @@ export function createMobileBootstrap(options = {}) {
     syncInjectionState: () => ready.then(() => serial(async () => { await synchronizeInjectionState(); return emit() })),
     install: ({ runtimeId, confirmed = false, activate = false } = {}) => ready.then(() => serial(async () => {
       if (confirmed !== true || activate !== true) throw new Error('install requires confirmed:true and activate:true')
+      const preparedManifest = state.availableManifest ?? state.pinnedManifest
+      if (requireStagedBundle && preparedManifest) {
+        // The APK prepared this manifest's digests. The upstream "latest"
+        // pointer can advance before the download finishes.
+        const manifest = validateManifestShape(preparedManifest)
+        return installRuntime({ manifest, runtimeId, activate: true })
+      }
       // Asset preparation is already complete on the host at this point: every
       // archive was downloaded, checksum-verified and unpacked into the staging
       // tree before this call. The only thing this refetch adds is a live GitHub
@@ -673,7 +701,11 @@ export function createMobileBootstrap(options = {}) {
         state.runtime = null
         state.updateAvailable = Boolean(state.availableManifest)
         state.updateBlocked = false
+        state.lastError = null
+        state.lastCheckError = null
         await save()
+        await pruneOldPluginSlots(pluginRoot, { keepDirectory: null, removeTempArtifacts: true })
+        await pruneOldHostStaging(hostStagingRoot, { pruneAll: true })
         return emit()
       } catch (error) {
         state.lastError = safeError(error)
@@ -716,7 +748,12 @@ export function apply(ctx, config = {}) {
   return service
 }
 
-export { installVerifiedPluginBundle } from './asset-bundle.js'
+export {
+  collectManifestAssetDigests,
+  installVerifiedPluginBundle,
+  pruneOldHostStaging,
+  pruneOldPluginSlots,
+} from './asset-bundle.js'
 export { compareVersions, parseVersion } from './version.js'
 export {
   validateManifestShape,

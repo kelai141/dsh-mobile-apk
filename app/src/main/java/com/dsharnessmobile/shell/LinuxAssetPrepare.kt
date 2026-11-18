@@ -21,6 +21,8 @@ internal object LinuxAssetPrepare {
   /** 宿主自己的暂存区（**不是** bootstrap 的最终插件目录；最终布局归引擎侧）。 */
   const val DIR_STAGING = "staging"
 
+  private val PART_DIR_PATTERN = Regex("^$DIR_STAGING-([a-f0-9]{64})\\.part$")
+
   const val PHASE_IDLE = "idle"
   const val PHASE_RUNNING = "running"
   const val PHASE_OK = "ok"
@@ -190,6 +192,7 @@ internal object LinuxAssetPrepare {
 
     SnapshotFs.deletePath(staged)
     SnapshotFs.deletePath(staging)
+    pruneStalePartDirs(root, spec.sha256)
     staging.mkdirs()
 
     val archive = File(staging, "asset.tar.xz")
@@ -212,6 +215,24 @@ internal object LinuxAssetPrepare {
       )
     }
     return null
+  }
+
+  /**
+   * 清理此前异常中断遗留的 `staging-<sha256>.part` 临时工作目录。
+   * 单飞锁保证此刻没有其它资产在准备；只删严格匹配 `<sha256>.part` 且落于 [root] 内的目录，
+   * 绝不碰 `staging/<sha256>` 或状态/用户文件。
+   */
+  private fun pruneStalePartDirs(root: File, currentSha256: String) {
+    val rootCanon = try { root.canonicalPath } catch (_: Exception) { return }
+    val entries = root.listFiles() ?: return
+    for (entry in entries) {
+      if (!entry.isDirectory) continue
+      val match = PART_DIR_PATTERN.matchEntire(entry.name) ?: continue
+      if (match.groupValues[1] == currentSha256) continue
+      val entryCanon = try { entry.canonicalPath } catch (_: Exception) { continue }
+      if (!entryCanon.startsWith(rootCanon + File.separator)) continue
+      SnapshotFs.deletePath(entry)
+    }
   }
 
   private fun finish(code: String, detail: String, spec: LinuxAssetIO.Spec): JSONObject {

@@ -536,3 +536,15 @@ test('状态读取失败同样要留真因（detail）', async () => {
   assert.equal(response.payload.reason, 'linux-environment-status-failed')
   h.dispose()
 })
+
+test('normalizeLinuxStatus preserves checkError without marking a healthy runtime as failed', () => {
+  const normalized = normalizeLinuxStatus({
+    installed: true,
+    version: '0.10.7',
+    enabled: true,
+    injectionActivated: true,
+    checkError: 'GitHub request failed (403)',
+  })
+  assert.equal(normalized.checkError, 'GitHub request failed (403)')
+  assert.equal(normalized.error, undefined)
+})
