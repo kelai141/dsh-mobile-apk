@@ -10,13 +10,18 @@ const value = (flag) => { const i = args.indexOf(flag); return i < 0 ? '' : args
 const snapshot = resolve(value('--snapshot'))
 const output = resolve(value('--out'))
 if (!value('--snapshot') || !value('--out')) { console.error('usage: build-hard-manifest.mjs --snapshot <final.tar.xz> --out <manifest.json>'); process.exit(2) }
-const py = String.raw`import json,sys,tarfile,hashlib,posixpath
+const py = String.raw`import json,sys,tarfile,hashlib,posixpath,lzma,shutil,tempfile
+from contextlib import ExitStack
 archive,out=sys.argv[1:3]
 names=[]
-# Python's bundled tarfile reader is used here for Windows/portable compatibility; it scans
-# the compressed archive once (single-threaded xz) and only materializes required composition files.
-# Do not call extract() or seek the xz stream again; release timing can guide a later tar+xz path.
-with tarfile.open(archive,'r:xz') as tf:
+# Bundle manifests can reference entries in any archive order. Spool the tar once
+# so metadata lookups seek the temporary file instead of replaying decompression.
+with ExitStack() as stack:
+  raw = stack.enter_context(tempfile.TemporaryFile())
+  with lzma.open(archive, 'rb') as compressed:
+    shutil.copyfileobj(compressed, raw, length=1024*1024)
+  raw.seek(0)
+  tf = stack.enter_context(tarfile.open(fileobj=raw, mode='r:'))
   all_members={m.name.lstrip('./'):m for m in tf.getmembers()}
   members={path:m for path,m in all_members.items() if m.isfile()}
   yaml_targets=[
