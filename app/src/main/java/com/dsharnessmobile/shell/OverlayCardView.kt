@@ -116,6 +116,13 @@ internal class OverlayCardView(
   // ── 思考行 / 页脚 / 待答区 ────────────────────────────────────────────────
   private val thinkingLine = TextView(context).apply {
     tag = "overlay-card-thinking"
+    val self = this
+    isClickable = true
+    setOnClickListener {
+      thinkingExpanded = !thinkingExpanded
+      self.maxLines = if (thinkingExpanded) 6 else 1
+      listener.onCardContentHeightChanged()
+    }
     textSize = 12f
     setTextColor(colorTextSecondary)
     maxLines = 1
@@ -200,8 +207,12 @@ internal class OverlayCardView(
     }
     addView(scrollBody, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
   }
-  private class RowHolder(val root: View, val dot: View, val title: TextView, val detail: TextView)
+  private class RowHolder(val root: View, val dot: View, val title: TextView, val detail: TextView) { var itemId = "" }
   private val rowHolders = ArrayList<RowHolder>()
+  /** 用户逐行展开的工具行 id；单行是默认信息密度，展开只影响这一行。 */
+  private val expandedToolIds = HashSet<String>()
+  /** 思考行同样可展开：默认一行，点一下换行展示。 */
+  private var thinkingExpanded = false
   private val runningAnimators = ArrayList<android.animation.Animator>()
   private var runningRows = emptyList<Pair<Int, String>>()
   private var runningAnimationSignature = emptyList<Pair<Int, String>>()
@@ -668,6 +679,7 @@ internal class OverlayCardView(
 
   /** 工具行增量：行数不变只改文本/状态色；行数变化只改尾部（§4.3 环形缓冲 = 保留最新）。 */
   private fun renderRows(rows: List<OverlayToolRowItem>) {
+    currentRows = rows
     val plan = overlayRowMergePlan(rowHolders.size, rows.size)
     // 1) 原地更新前 update 行。
     for (i in 0 until plan.updateCount) bindRow(rowHolders[i], rows[i])
@@ -703,28 +715,46 @@ internal class OverlayCardView(
     val detail = TextView(context).apply {
       textSize = 11f
       setTextColor(colorTextSecondary)
-      maxLines = 1
+      maxLines = 6
       ellipsize = TextUtils.TruncateAt.END
+      visibility = View.GONE
     }
-    val row = LinearLayout(context).apply {
+    val head = LinearLayout(context).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER_VERTICAL
-      setPadding(0, dp(3), 0, dp(3))
       addView(dot, LinearLayout.LayoutParams(dp(6), dp(6)).apply { marginEnd = dp(8) })
       addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-      addView(
-        detail,
-        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(8) },
-      )
     }
-    return RowHolder(row, dot, title, detail)
+    val row = LinearLayout(context).apply {
+      orientation = LinearLayout.VERTICAL
+      setPadding(0, dp(3), 0, dp(3))
+      addView(head, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+      addView(detail, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(14) })
+      isClickable = true
+    }
+    val holder = RowHolder(row, dot, title, detail)
+    row.setOnClickListener {
+      val key = holder.itemId
+      if (key.isEmpty()) return@setOnClickListener
+      if (!expandedToolIds.remove(key)) expandedToolIds.add(key)
+      bindRow(holder, currentRows.firstOrNull { it.id == key } ?: return@setOnClickListener)
+      listener.onCardContentHeightChanged()
+    }
+    return holder
   }
 
+  /** 最近一次渲染的行快照：行点击按 id 重新绑定同一份数据。 */
+  private var currentRows: List<OverlayToolRowItem> = emptyList()
+
   private fun bindRow(holder: RowHolder, item: OverlayToolRowItem) {
-    holder.title.setTextIfChanged(overlaySingleLine(item.title))
-    val detail = overlaySingleLine(item.detail)
-    holder.detail.setTextIfChanged(detail)
-    holder.detail.visibility = if (detail.isEmpty()) View.GONE else View.VISIBLE
+    holder.itemId = item.id
+    val summary = overlaySingleLine(item.detail)
+    val expanded = expandedToolIds.contains(item.id)
+    holder.title.setTextIfChanged(
+      if (expanded || summary.isEmpty()) overlaySingleLine(item.title) else overlaySingleLine(item.title) + " · " + summary,
+    )
+    holder.detail.setTextIfChanged(summary)
+    holder.detail.visibility = if (expanded && summary.isNotEmpty()) View.VISIBLE else View.GONE
     val color = when (item.state) {
       OverlayToolRowState.DONE -> colorOk
       OverlayToolRowState.RUNNING -> colorWarn
