@@ -1,7 +1,9 @@
 # Linux 环境在 arm64 真机上装不上：交接（2026-11-16）
 
-> 状态：**未完成**。已越过 exec 权限这道坎，卡在 `Bad system call`（SIGSYS）。
-> 本文只写已经验证过的事实与当前阻塞，不写推测性结论。
+> 状态：**根因已定，修复在途**。`Bad system call` 是 Android 应用域 seccomp 拦掉了
+> glibc 在 libc 初始化阶段必发的 `set_robust_list` / `rseq`；修复在 dsh-bionilux#22，
+> 推导与证据见 `2026-11-16-linux-env-seccomp-sigsys.md`。真机整条安装链还需要一份带
+> 新 loader 的 APK 才能复验（loader 在 `nativeLibraryDir`，只能在打包时替换）。
 
 ## 1. 目标
 
@@ -49,28 +51,27 @@ bionic 把这个拒绝报成 `Permission denied`，与动态链接失败同句�
 | 3 | guest 程序的 glibc loader | `execve failed: EACCES .../rootfs/lib/ld-linux-aarch64.so.1` | 传 `BIONILUX_NATIVE_LIB_DIR`，改用 nativeLibraryDir 里的副本 | **通过（本轮）** |
 | 4 | glibc loader 在 bionic linker 下运行 | `Bad system call` | **未知，未修** | **阻塞** |
 
-## 4. 当前阻塞：`Bad system call`
+## 4. 当前阻塞（已定位）：`Bad system call` = Android seccomp 的默认 TRAP
 
-`Bad system call` = SIGSYS，通常是 **seccomp 拦截了某个 syscall**。
+应用进程（targetSdk >= 29）继承的是 `untrusted_app` 的 seccomp **白名单**，默认动作是
+`SECCOMP_RET_TRAP`。bionic 从不调用 `set_robust_list`(99) 与 `rseq`(293)，两者因此不在
+白名单里；而 glibc 的 loader 在为第一个线程做 TLS 初始化时（`init_tls` → `__tls_init_tp`）
+就发出它们 —— 早于任何重定位，也早于任何 `LD_PRELOAD` 代码；libc 之后在 `start_thread`
+里为每个新线程再发一次 `set_robust_list`，而那一刻全部信号被 block。
 
-它发生在 `guest /usr/bin/dpkg-divert` 被 linker + glibc loader 启动之后。也就是说：
-exec 权限已解决，但 glibc loader 真正跑起来时，它调用的某个系统调用被 Android 的
-seccomp 策略拒绝了。
+真机上用应用控制台 + `ptrace` 抓到的顺序：`... set_tid_address -> set_robust_list`（被杀）；
+把 99 改成 `-ENOSYS` 后下一条被拦的是 `rseq`；两条都改成 `-ENOSYS` 后
+`/usr/bin/true`、`dpkg-divert --listpackage` 均退出 0。应用域 0..469 逐号实测：
+99/293 返回 SIGSYS（共 243 个号被拦）。
 
-### 未验证的假设（接手者请先证伪，不要直接照做）
+原「三个未验证的假设」全部证伪，逐条反证见 `2026-11-16-linux-env-seccomp-sigsys.md` §3：
+预载库构造函数、`LD_PRELOAD` 的 `ifunc` resolver、`LD_AUDIT` 的 `la_version`、
+`GLIBC_PRIVATE` 版本节覆盖、`SIG_IGN` 继承、叠加 `ERRNO`/`USER_NOTIF`/`TRACE` 过滤器 ——
+六条都救不下来；业界先例（cortex / DroidDeck / termux-pacman）也都是改指令或改源码，
+没有人做到「早装处理器」。详见同目录 `2026-11-16-linux-env-seccomp-sigsys.md` §6。
 
-1. **glibc loader 版本太新**：`libbionilux-loader.so` 若基于较新 glibc，可能用到
-   `rseq` / `clone3` 等 Android seccomp 未放行的系统调用。
-2. **`linker64 <glibc-loader>` 这个组合本身**：bionic linker 把 glibc loader 当共享对象
-   映射后，loader 的启动路径可能与常规不同。
-3. **ROM 特定策略**：vivo 的 seccomp 可能比 AOSP 更严。
-
-### 排查建议（按成本从低到高）
-
-- 用 `strace`（需要 root）或 `/proc/<pid>/syscall` 抓被拒绝的具体 syscall 号。
-- 查 bionilux 仓 `libbionilux-loader.so` 的构建配方（glibc 版本、编译选项）。
-- 在 x86_64 模拟器上对比：MuMu 上同样版本能否跑通（若通，说明是 arm64 或 ROM 特定）。
-- 参考 Termux / proot-distro 如何处理 glibc loader 与 seccomp 的共存。
+修复：`svc #0` 改成 `movn x0, #37`（`-ENOSYS`），loader 在构建期打、guest 的 libc 在
+安装阶段打（dsh-bionilux#22）。
 
 ## 5. 已合并的改动
 
@@ -83,6 +84,15 @@ seccomp 策略拒绝了。
 | dsh-bionilux | #21 | `_hostToolEnvironment()` 注入 `BIONILUX_NATIVE_LIB_DIR` | 已合并，**v0.10.6 已发布为 Latest** |
 
 ## 6. 待处理
+
+### 6.0 修复落地顺序（本任务续做）
+
+1. dsh-bionilux#22 → 0.10.7：CI 在构建期给 `bionilux-loader-*.so` 打补丁；运行时在安装
+   阶段给 guest 的 `libc.so.6` 打补丁。**已完成**：PR 全绿，draft release `v0.10.7`
+   已产出且复核了 loader 里两处补丁（**未发布**，等 APK 一起走）。
+2. 用新 loader 重出 arm64 APK：`build-apk-013.ps1 -NativeLinuxLoaderDir <0.10.7 的 loader 目录>`。
+3. 真机复验整链（下载 / 校验 / 准备 / 激活）+ 三层验收（代码层 / CDP 层 / ADB 用户层）。
+   本轮设备在收尾前断开，第 2、3 步未做。
 
 ### 6.1 构建链缺陷：`useLegacyPackaging` 无效（独立问题）
 
@@ -107,9 +117,14 @@ seccomp 策略拒绝了。
 
 ### 6.2 其他
 
-- `dsh-mobile-apk#1807`（执行地图补登记 linux-bootstrap 测试 glob）已开 PR，未合并。
-- `dsh-mobile-apk#1798`（追版 Harness 0.2.2-rc.3）已由子代理 rebase 到最新 main，
-  状态 `MERGEABLE`，只剩 review 要求。它与本任务无关。
+- **后续增量（未进 0.10.7，尚未实现）**：把 SIGSYS 处理器装到 loader 第一行代码之前
+  （入口 stub），让任意被拦调用拿到 `-ENOSYS` 而不是被杀 —— 方案、原型边界与 G1–G4
+  验收计划见 `2026-11-17-linux-env-sigsys-entry-stub.md`。
+- `dsh-mobile-apk#1807`（执行地图补登记 linux-bootstrap 测试 glob）：CI 全绿、`MERGEABLE`，
+  只差 review 与标签；它修掉的正是 main 上唯一一项 code-map 红。
+- `dsh-mobile-apk#1798`（追版 Harness 0.2.2-rc.3）：唯一红是
+  `harness-adoption.yml`「核对上游提交与双 ABI 插件实测证据」——门禁没有缺陷、pin 也对，
+  缺的是 4 份真机证据（两套 APK × 双 ABI × 196 条用例），要设备验证才能补。它与本任务无关。
 - release 包**不可调试**（`run-as` 不可用），设备侧取证只能靠界面错误文本与 logcat。
 
 ## 7. 复现与验证环境
