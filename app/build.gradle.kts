@@ -309,5 +309,7 @@ providers.gradleProperty("nativeLinuxLoaderDir").orNull?.let { loaderDir ->
   android {
     sourceSets.getByName("main").jniLibs.srcDir(file(loaderDir))
     packaging.jniLibs.useLegacyPackaging = true
+    // Keep the release asset byte-for-byte so its published digest covers the APK entry.
+    packaging.jniLibs.keepDebugSymbols.add("**/libbionilux-loader.so")
   }
 }

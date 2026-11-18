@@ -67,7 +67,7 @@ import { ABOUT_ENTRY_CSS } from './mobile/about-entry.css.ts'
 import { AboutSection } from './mobile/about-section.tsx'
 import { GeneralSettings } from './general-settings/GeneralSettings.tsx'
 import { GENERAL_SETTINGS_CSS } from './general-settings/general-settings.css.ts'
-import { tr } from './i18n.ts'
+import { observeDocumentLanguage, tr } from './i18n.ts'
 import { ThemeBridge } from './theme-bridge.ts'
 import { EnterGuard } from './enter-guard.ts'
 import { KeyboardBoundary } from './keyboard-boundary.ts'
@@ -297,22 +297,20 @@ export function apply(ctx: ClientContext): void {
     }
     return { openFileExternal: read('openFileExternal'), shareFile: read('shareFile') }
   }
-  ctx.inject(['locale'], (scope) => {
-    const namespace = 'androidFileCard'
-    const t = scope.locale.bind(namespace)
-    scope.effect(() => scope.locale.register(namespace, { zh: cardZh, en: cardEn }), 'ui-responsive: file card capsule copy')
-    scope.effect(() => {
-      const capsule = new FileCardCapsule(bridgeFace, {
-        external: name => t('openExternal', { name }),
-        share: t('share'), failure: error => t(fileCardErrorKey(error)),
-      })
-      capsule.attach()
-      const unbind = scope.on('locale/change', () => {
-        capsule.setCopy({ external: name => t('openExternal', { name }), share: t('share'), failure: error => t(fileCardErrorKey(error)) })
-      })
-      return () => { unbind(); capsule.detach() }
-    }, 'ui-responsive: delivery file card capsule')
-  })
+  ctx.effect(() => {
+    const copy = () => ({
+      external: (name: string) => tr(cardZh.openExternal, cardEn.openExternal).replace('{name}', () => name),
+      share: tr(cardZh.share, cardEn.share),
+      failure: (error: string | undefined) => {
+        const key = fileCardErrorKey(error)
+        return tr(cardZh[key], cardEn[key])
+      },
+    })
+    const capsule = new FileCardCapsule(bridgeFace, copy())
+    capsule.attach()
+    const unbind = observeDocumentLanguage(() => capsule.setCopy(copy()))
+    return () => { unbind(); capsule.detach() }
+  }, 'ui-responsive: delivery file card capsule')
 
   // Upstream owns unsupported-format detection and places this slot below its hint.
   // Use its resolved absolutePath rather than guessing from the foreground Session.

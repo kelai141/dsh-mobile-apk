@@ -224,8 +224,8 @@ class FileExternalBridgeTest {
     // 父目录的允许面判据在**行为面**由 PathOpenAllowlistTest 驱动真实实现（issue #1571 后
     // 允许面本身已换成 ChooserAllowlist）。这里只保留「调用点在场」这一条形态断言，
     // 不重复扮演判据。
-    assertTrue("父目录也必须过同一道允许面",
-      code.contains("PathOpen.isChooserAllowedFor(activity, dir)"))
+    assertTrue("父目录必须经受限 URI 解析器授权",
+      code.contains("file.parentFile?.let { PathOpen.chooserUri(activity, it) }"))
     assertFalse("不得把文件 Uri 直接当目录项传出去",
       code.contains("folderSpec(fileUri"))
   }
@@ -280,9 +280,12 @@ class FileExternalBridgeTest {
   fun `异常不得冒到页面`() {
     // 用户要求「异常不得崩溃」。执行面每个可能抛的调用都在 try/catch 里，且 catch 回错误码。
     val code = codeOnly(source("FileExternalBridge.kt"))
-    assertTrue("FileProvider 必须包在 try 里并回 uri-denied",
-      code.contains("FileProvider.getUriForFile(") &&
-        code.contains("return errorPayload(ERROR_URI_DENIED"))
+    val pathOpen = codeOnly(source("PathOpen.kt")).substringAfter("internal fun chooserUri(")
+    assertTrue("解析器必须核对固定根或已读授权",
+      pathOpen.contains("FileIncoming.isReaderAllowed(activity, file)") && pathOpen.contains("!grant.isReadPermission"))
+    assertTrue("URI 解析失败要回 uri-denied",
+      pathOpen.contains("catch (_: Exception)") &&
+        code.contains("PathOpen.chooserUri(activity, file) ?: return errorPayload(ERROR_URI_DENIED"))
     assertTrue("startActivity 必须包在 try 里", code.contains("activity.startActivity(chooser("))
     assertTrue("startActivity 失败要回错误码而不是抛",
       code.contains("errorPayload(ERROR_NO_RECEIVER, e.message)"))
