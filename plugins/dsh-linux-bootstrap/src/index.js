@@ -641,11 +641,10 @@ export function createMobileBootstrap(options = {}) {
     syncInjectionState: () => ready.then(() => serial(async () => { await synchronizeInjectionState(); return emit() })),
     install: ({ runtimeId, confirmed = false, activate = false } = {}) => ready.then(() => serial(async () => {
       if (confirmed !== true || activate !== true) throw new Error('install requires confirmed:true and activate:true')
-      if (requireStagedBundle) {
+      const preparedManifest = state.availableManifest ?? state.pinnedManifest
+      if (requireStagedBundle && preparedManifest) {
         // The APK prepared this manifest's digests. The upstream "latest"
         // pointer can advance before the download finishes.
-        const preparedManifest = state.availableManifest ?? state.pinnedManifest
-        if (!preparedManifest) throw new Error('Check for a Linux release before preparing its assets')
         const manifest = validateManifestShape(preparedManifest)
         return installRuntime({ manifest, runtimeId, activate: true })
       }
