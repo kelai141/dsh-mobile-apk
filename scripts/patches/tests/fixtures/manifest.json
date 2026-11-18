@@ -3854,7 +3854,7 @@
         "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-CKTiL8M8.js"
       ]
     },
-    "overlaySha256": "b04c9c2498bb31eca39bb3d062ec98722954d6299d5336525bccc4dc8d3573d0",
+    "overlaySha256": "4443131b548e45ff7d1b42ca1d650c4287f5ec8cc3bfa63a6b9504569cb2a6de",
     "registrySha256": "b300d7407c9232e359f1bbf646a0bb6113a0240e57075ae2deb28e80ba9b9b8e",
     "previousEngine": "0.2.2-rc.1"
   }
