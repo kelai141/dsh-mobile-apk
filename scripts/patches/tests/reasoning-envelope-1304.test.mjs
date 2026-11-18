@@ -138,9 +138,11 @@ test('diagnostic probe outputs only field names/types, original seal remains rep
 test('empty and nonempty summaries both remain visible, streaming and settled; transport activity pulses idle watchdog', () => {
   const ui = patchReasoningUi(read(REASONING_FILES.at(-1)))
   const start = ui.indexOf('function blockIsVisible(')
-  // 0.2.2-rc.1 起 blockIsVisible 后面接的是 hasVisibleContent（原 countVisibleBlocks 已不存在）；
-  // 分隔符跟着换，仍然只截「这一个函数」求值，不放宽到整文件。
-  const end = ui.indexOf('\n\t\tfunction hasVisibleContent', start)
+  // 0.2.2-rc.1 起 blockIsVisible 后面接的是 hasVisibleContent（原 countVisibleBlocks 已不存在）。
+  // 0.2.2-rc.2 起 client bundle 压成单行，函数之间不再有换行缩进，故分隔符不能再带 '\n\t\t' 前缀；
+  // 仍然只截「这一个函数」求值（起点是本函数声明，终点是下一个函数声明的开头），不放宽到整文件。
+  const end = ui.indexOf('function hasVisibleContent', start)
+  assert.ok(start >= 0 && end > start, 'blockIsVisible 与 hasVisibleContent 都必须在本代产物里在场')
   const visible = new Function(ui.slice(start, end) + ';return blockIsVisible')()
   assert.equal(visible({ kind: 'reasoning', text: '' }), true)
   assert.equal(visible({ kind: 'reasoning', text: 'summary' }), true)

@@ -21,33 +21,39 @@
 // 连带面（同一逻辑改动，不可拆）：初态那一行是**占位**，用户若直接点「获取可用模型」→「添加所选」，
 //   adoptPicked 会把 models 全部收进 byId 再 onChange，占位空行会被一起带过去 ⇒ 模型 1 报
 //   「模型 ID 不能为空」，提交按钮永远 disabled。所以采纳时按 id 非空过滤，占位行不进结果。
+//
+// 锚点形态（2026-11 追版 0.2.2-rc.3 重锚）：0.2.2-rc.2 起上游把 client bundle 压成紧凑单行，
+//   换行与缩进被整段抹掉。标识符没有改名，但同一 bundle 内的重名声明会被打包器加 $1 后缀
+//   （本包两处 textOf 同名，后声明的那份因此叫 textOf$1）。
+//   旧锚点按行缩进书写，在 rc.3 上一处都命中不了。下面三处锚点改成紧凑形态，并各带上
+//   前后相邻的上下文，保证「恰好 1 处」这个判据丝毫没放松：0 处与多处一律 throw。
 
 export const MARKER = 'dsh-mobile custom first model row (#960)'
 
-/** 锚点：CustomProviderCard 的 models 初值。 */
-const OLD = '\t\t\tconst [models, setModels] = (0, react.useState)([]);'
+/** 锚点：CustomProviderCard 的 models 初值。前后各带一个相邻 hook 声明，避开同名重声明。 */
+const OLD = 'const[keyDraft,setKeyDraft]=(0,react.useState)(``);const[models,setModels]=(0,react.useState)([]);const[busy,setBusy]=(0,react.useState)(false);'
 
 /** 替换：初态给一行空模型，渲染出第一行输入框。 */
-const NEW = '\t\t\t/* ' + MARKER + ': 初态就有一行，输入框与「至少需要一个模型」不再互相矛盾。 */\n'
-  + '\t\t\tconst [models, setModels] = (0, react.useState)([{ id: "" }]);'
+const NEW = 'const[keyDraft,setKeyDraft]=(0,react.useState)(``);/* ' + MARKER
+  + ': 初态就有一行，输入框与「至少需要一个模型」不再互相矛盾。 */const[models,setModels]=(0,react.useState)([{ id: "" }]);const[busy,setBusy]=(0,react.useState)(false);'
 
 /** 三段必须同时生效；`has` 区分完整补丁与半补丁。 */
-const ROW_INIT = 'const [models, setModels] = (0, react.useState)([{ id: "" }]);'
-const ADOPT_FILTER = 'models.filter((model) => textOf(model, "id").trim().length > 0)'
-const PICKER_OLD = '\t\t\t\tif (listed.has(id) && !isPicked(id)) removedRows.add(at);'
-const PICKER_DROP = 'if (id.trim().length === 0 || listed.has(id) && !isPicked(id)) removedRows.add(at);'
-const PICKER_NEW = '\t\t\t\t/* ' + MARKER + ': 采纳时删除空占位，并同步清理该行编辑状态。 */\n'
-  + '\t\t\t\t' + PICKER_DROP
+const ROW_INIT = 'const[models,setModels]=(0,react.useState)([{ id: "" }]);'
+const ADOPT_FILTER = 'models.filter(model=>textOf$1(model,`id`).trim().length>0)'
+const PICKER_OLD = 'const id=textOf$1(model,`id`);if(listed.has(id)&&!isPicked(id))removedRows.add(at)'
+const PICKER_DROP = 'if(id.trim().length===0||listed.has(id)&&!isPicked(id))removedRows.add(at)'
+const PICKER_NEW = 'const id=textOf$1(model,`id`);/* ' + MARKER
+  + ': 采纳时删除空占位，并同步清理该行编辑状态。 */' + PICKER_DROP
 
 /** 锚点二：CustomProviderCard 提交时把 models 写进 profile 的那一处。
  * 提交过滤只作防御：ready 会先校验整份 models，空行尚在时根本到不了提交。
  * 真正的候选采纳发生在 ModelListEditor，必须先将空行加入 removedRows；这也让
  * rowState.forget 同步清掉索引对应的编辑状态，避免空行状态错配到新模型。 */
-const ADOPT_OLD = '\t\t\t\t\t\tmodels: models.map((model) => ({ ...model }))'
+const ADOPT_OLD = 'baseURL:normalizedBaseURL,models:models.map(model=>({...model}))};'
 
 /** 替换二：占位空行不进写回的 profile，否则模型 1 恒报「模型 ID 不能为空」。 */
-const ADOPT_NEW = '\t\t\t\t\t\t/* ' + MARKER + ': 占位空行不进写回的 profile。 */\n'
-  + '\t\t\t\t\t\tmodels: models.filter((model) => textOf(model, "id").trim().length > 0).map((model) => ({ ...model }))'
+const ADOPT_NEW = 'baseURL:normalizedBaseURL,/* ' + MARKER + ': 占位空行不进写回的 profile。 */models:'
+  + ADOPT_FILTER + '.map(model=>({...model}))};'
 
 /**
  * 补丁是否已施加。

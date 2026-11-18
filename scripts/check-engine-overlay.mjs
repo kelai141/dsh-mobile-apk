@@ -119,16 +119,26 @@ function mountedRowNames(text) {
  * 空集是目标态——每加一条必须在注释里写清为什么不需要覆盖（平台可选 / 宿主既有 / 由 profile 提供）。
  * 不许用「没看见」代替裁决。 */
 const RUNTIME_MISSING_OK = new Set([
-  /* 0.14.2 实测：rc.1 的 dsh-office-to-pdf（web-app bundle 新行）运行时依赖
-   * @deepseek-ai/libreoffice-kit。我们在 profile patch 里**显式禁用该行**（见
-   * scripts/profile-web.cordis.patch.yml 的同名条目），故它不在行面上、也不该进 overlay。
-   * 依据（可复算）：libreoffice-kit 的 platformTarget() 只认 darwin/win32/linux-glibc，
-   * Android 下 process.platform === 'android' ⇒ 返回 undefined ⇒ resolveEngine() 落到
-   * `if (platform !== 'linux') throw new Error('Unsupported LibreOfficeKit host: android-x64')`，
-   * **无条件抛**（152 MB 的 -wasm 引擎也救不了：那一步同样被 platform !== 'linux' 挡掉）。
-   * 上游对「没有转换器」的既定降级路径就是 UI 的 unavailable guidance
-   * （ui-sidebar-documentpreview README：移除 remote.officeToPdf 注入即恢复不可用提示）。
-   * 若日后要恢复该能力，须先给出 Android 上真能跑的引擎实现，再同时删掉本豁免与 profile 的禁用行。 */
+  /* @deepseek-ai/libreoffice-kit：**只登记豁免，不代表本仓禁用任何行**（0.2.2-rc.3 追版后复核）。
+   *
+   * 历史（0.14.2 / rc.1 代）：当时 web-app bundle 挂的是 `office-to-pdf`
+   * （@deepseek-ai/dsh-office-to-pdf），它 `import { createConverter } from '@deepseek-ai/libreoffice-kit'`
+   * 是**静态 import**；而 libreoffice-kit 的 platformTarget() 只认 darwin/win32/linux-glibc，
+   * Android 下 process.platform === 'android' ⇒ resolveEngine() 落到
+   * `if (platform !== 'linux') throw new Error('Unsupported LibreOfficeKit host: android-x64')`
+   * ——无条件抛（152 MB 的 -wasm 引擎也救不了）。静态 import 即使不调用也会解析模块 ⇒ boot 崩。
+   * 当时因此**在 profile 里禁掉该行**，并在此豁免该依赖（两处同进同出）。
+   *
+   * 0.2.2-rc.3 现状（逐字节实测）：上游删掉 office-to-pdf 包与行，改挂 `office-kit`
+   * （@deepseek-ai/dsh-office-kit）。后者对 libreoffice-kit 只有 `import type` 与**延迟解析**
+   * （loadKit() → resolveKitModule(`() => import.meta.resolve('@deepseek-ai/libreoffice-kit')`)，
+   * 仅首次转换请求才跑，missing 分支降级成 OfficeKitError('unavailable')）⇒ boot 不再解析它。
+   * 因此 profile 的禁用行**已删除**（见 scripts/profile-web.cordis.patch.yml 的「Office（0.2.2-rc.3 追版复核）」段）。
+   *
+   * 那这里为什么还留着豁免：office-kit 的行仍在行面上，正向闭包仍会把 libreoffice-kit 算进来，
+   * 而它**确实不进快照**（152 MB 且本平台跑不起来）。豁免的含义是「该缺口已有裁决」，
+   * 不是「该行被禁用」。撤销豁免的**唯一**条件：出现 Android 上真能跑的引擎实现，
+   * 那时它应当进 overlay，本豁免随之删除。 */
   '@deepseek-ai/libreoffice-kit',
 ])
 let presetsEntries = 0

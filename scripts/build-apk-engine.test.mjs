@@ -73,10 +73,10 @@ test('shared terminal engine installs snapshot and fingerprint, builds, then cop
   assert.equal(readFileSync(result).toString(), 'signed-test-apk')
   assert.ok(existsSync(join(f.apkDir, 'app', 'src', 'main', 'assets', 'plugin-hard-manifest.json')))
   assert.equal(existsSync(oldIntermediates), false)
-  // 5 段：hard-manifest -> fingerprint -> Gradle -> 验签 -> 产物形态
+  // 6 段：hard-manifest -> fingerprint -> Gradle -> APK 快照指纹 -> 验签 -> 产物形态
   // （#1077 把验签提到拷贝之前；#1119 在验签之后追加了产物形态一段。
   //  assembleApk 里 selfTest=false —— 调用方三路各自跑过 --self-test，这里不重复。）
-  assert.equal(calls.length, 5)
+  assert.equal(calls.length, 6)
   assert.equal(calls[0].args[0].endsWith('build-hard-manifest.mjs'), true)
   assert.equal(calls[0].args[calls[0].args.indexOf('--snapshot') + 1], resolve(f.snapshot))
   assert.equal(calls[0].args[calls[0].args.indexOf('--out') + 1], join(f.apkDir, 'app', 'src', 'main', 'assets', 'plugin-hard-manifest.json'))
@@ -87,9 +87,11 @@ test('shared terminal engine installs snapshot and fingerprint, builds, then cop
   assert.equal(calls[1].options.shell, false)
   assert.equal(calls[2].options.cwd, resolve(f.apkDir))
   assert.equal(calls[2].options.shell, process.platform === 'win32')
-  assert.equal(calls[3].args[0].endsWith('check-apk-signatures.mjs'), true, '验签必须在拷贝之前')
-  assert.equal(calls[4].args[0].endsWith('check-apk-form.mjs'), true, '产物形态（#1119）必须在拷贝之前')
-  assert.equal(calls[4].options.cwd, resolve(fileURLToPath(new URL('.', import.meta.url))))
+  assert.deepEqual(calls[3].args.slice(1), ['--apk', join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk'),
+    '--sha256', createHash('sha256').update(readFileSync(f.snapshot)).digest('hex')])
+  assert.equal(calls[4].args[0].endsWith('check-apk-signatures.mjs'), true, '验签必须在拷贝之前')
+  assert.equal(calls[5].args[0].endsWith('check-apk-form.mjs'), true, '产物形态（#1119）必须在拷贝之前')
+  assert.equal(calls[5].options.cwd, resolve(fileURLToPath(new URL('.', import.meta.url))))
 })
 
 /**

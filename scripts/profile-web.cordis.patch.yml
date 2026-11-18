@@ -211,22 +211,31 @@
       kind: node-script
       executable: /data/data/com.dsharnessmobile.shell/files/usr/libexec/dsh-node
 
-# Office→PDF（0.14.2 追版决策，2026-09-25 实测）——**显式禁用上游 web-app bundle 的 office-to-pdf 行**。
-# rc.1 新增该行（0.1.5 的 web-app bundle 里 office 零命中），它运行时依赖
-# @deepseek-ai/libreoffice-kit，而该依赖在本平台**无条件不可用**：
-#   libreoffice-kit 的 platformTarget() 只认 darwin/win32/linux-glibc ⇒ Android 下
-#   process.platform === 'android' 返回 undefined ⇒ resolveEngine() 落到
-#   `if (platform !== 'linux') throw new Error('Unsupported LibreOfficeKit host: android-x64')`
-#   —— **无条件抛**。152 MB 的 -wasm 引擎也救不了（同样被 platform !== 'linux' 挡掉），
-#   所以「补依赖」在本平台买不到任何能力，只会：① 快照 +10 MB JS 闭包；② 引入 MPL-2.0 依赖
-#   （本清单原本全为非 copyleft）。不禁该行的后果不是缺能力，而是 **boot 阶段崩**
-#   （Cannot find package '@deepseek-ai/libreoffice-kit'，设备实测），也就是该行本身挡路。
-# 上游对「没有转换器」的既定降级路径就是 UI 的 unavailable 提示（ui-sidebar-documentpreview
-# README：移除 remote.officeToPdf 注入即恢复不可用指引）⇒ 禁行 = 用上游自己的降级面。
-# 凭据：check-engine-overlay 正向闭包的 RUNTIME_MISSING_OK 登记了同一条（两处必须同进同出）。
-# 逆转条件：出现 Android 上真能跑的引擎实现 ⇒ 同时删掉本行与那条豁免。
-- id: office-to-pdf
-  disabled: true
+# Office（0.2.2-rc.3 追版复核，2026-11-15）——**上游已把 office-to-pdf 行换成 office-kit 行，本地禁用项随之下岗**。
+#
+# rc.1 时代：web-app bundle 里是 `office-to-pdf`（包 @deepseek-ai/dsh-office-to-pdf），它
+# `import { createConverter } from '@deepseek-ai/libreoffice-kit'` 是**静态 import**，而
+# libreoffice-kit 在本平台无条件不可用（platformTarget() 只认 darwin/win32/linux-glibc，
+# Android 的 process.platform === 'android' ⇒ resolveEngine() 落到
+# `if (platform !== 'linux') throw new Error('Unsupported LibreOfficeKit host: android-x64')`）。
+# 静态 import 意味着即使不调用也会解析模块 ⇒ boot 阶段崩。故当时禁该行 + 在
+# check-engine-overlay 的 RUNTIME_MISSING_OK 里豁免 libreoffice-kit。
+#
+# rc.3 现状（逐字节实测）：上游删掉了 office-to-pdf 包与行，改挂 `office-kit`
+# （@deepseek-ai/dsh-office-kit）。后者对 libreoffice-kit **只有 `import type` 与延迟解析**：
+#   · 类型 import 在构建后被擦除（产物 lib/index.js 的 10 条 import 里没有 libreoffice-kit）；
+#   · 真正的取用点是 loadKit() → resolveKitModule(() => import.meta.resolve(...))，
+#     只在**第一次转换请求**时才跑，且 missing 分支降级成 OfficeKitError('unavailable')。
+# ⇒ boot 阶段不再解析 libreoffice-kit，禁行失去理由。本行删除。
+#
+# 能力面的如实说明：Android 上仍然**没有** LibreOffice 引擎，所以 Office 转换在设备上会得到
+# unavailable 错误（这正是上游对「没有转换器」的既定降级路径）。差别在于：以前是**启动崩**，
+# 现在是**功能不可用但引擎正常起来**。
+#
+# 配套证据与口径：
+#   · check-engine-overlay 的 RUNTIME_MISSING_OK 仍保留 libreoffice-kit 豁免——office-kit 的行
+#     在传递闭包里仍会指向它，而它确实不进快照（两者同进同出，不单独删）。
+#   · 逆转条件：出现 Android 上真能跑的引擎实现 ⇒ 删掉那条豁免并恢复行面消费。
 # Official 0.2.0-rc.2 desktop product telemetry/analytics are not Android services.
 # Retain the shared otel service and official ui-settings-session-log upload control.
 - id: desktop-product-telemetry
@@ -234,25 +243,32 @@
 - id: product-analytics
   disabled: true
 
-# 持久 Shell 后端（issue #1344）：@deepseek-ai/dsh-terminal-bash 的**两个入口**
-# （optional-terminal-bash / optional-terminal-pwsh）都按包内 Config.backendType 的默认值 "shell"
-# 注册 PTY 后端（lib/index.js:38 z.string().default("shell")，两个入口都没有覆盖它）⇒ 后者撞名即抛
+# 持久 Shell 后端（issue #1344）：**上游在 0.2.2-rc.2 已自行拆掉双入口，本地禁用项随之下岗**。
+#
+# 缺陷形态（0.14.x 实测，红米 K Pad / Android 16）：@deepseek-ai/dsh-experimental-terminal-bundle
+# 的补丁里，持久终端组同时挂了 optional-terminal-bash 与 optional-terminal-pwsh，两个入口都指向
+# @deepseek-ai/dsh-terminal-bash，而该包的 Config.backendType 默认值是 "shell"（rc.1 的
+# lib/index.js:38 `z.string().default("shell")`），两个入口都没覆盖它 ⇒ 后激活者撞名即抛
 #   TerminalError: a PTY backend named "shell" is already registered
-# 插件页出现红色「组件启用失败」，且每次都重放。
-# 上游把「pwsh 只在 Windows 开」写成可选 bundle 补丁里的 !!js 表达式
-# （@deepseek-ai/dsh-experimental-terminal-bundle/cordis.patch.yml，rc.2/rc.3 同为 646 字节：
-#   optional-terminal-pwsh: disabled: !!js process.platform !== 'win32'），
-# 而该表达式由 cordis loader 以 `with (ctx) { return eval(expr) }` 求值（cordis-plugin-loader
-# lib/index.js:233-237）——现场（红米 K Pad / Android 16）里两个入口同时激活，说明这道 !!js 判据
-# 在该环境没兜住。本仓不复用那道表达式：profile 层的 id 定向禁用是**字面量**，在所有 bundle 层之后应用，
-# 不依赖任何求值成功与否。
-# 为什么是禁用而不是「改个后端名共存」：Android 快照里没有 pwsh 可执行文件
-# （copy dsh-pwsh-local 的 resolvePwshPath 在非 win32 直接返回 "pwsh"，不校验存在），
-# 共存只会把「启动失败」换成「显示运行中、真用时报 spawn ENOENT」——语义错误比红点更贵。
-# bash 入口保持 "shell"，工具与终端 UI 一行不变（消费者按 "shell" 取名，不受影响）。
-# 逆转条件：上游按 shell 类型区分两个入口的后端名（issue #1344 建议修法 1）后删掉本行与这段注释。
-- id: optional-terminal-pwsh
-  disabled: true
+# 上游本意是让 !!js 表达式（`process.platform !== 'win32'`）只开一个，但该表达式经 cordis loader
+# 以 `with (ctx) { return eval(expr) }` 求值，现场两个入口同时激活，判据没兜住。故本仓在 profile 层
+# 用**字面量** `disabled: true` 定向关掉 pwsh 入口（profile 层在所有 bundle 层之后应用，不依赖求值）。
+#
+# rc.3 现状（逐字节实测）：上游把这个组重写成**只剩 bash 一个入口**——
+#   packages/experimental/terminal-bundle/cordis.patch.yml 现在是
+#   optional-persistent-terminals → { optional-terminal-registry(dsh-terminal),
+#   optional-terminal-panel(dsh-terminal-panel), optional-tool-terminal(dsh-tool-terminal) }，
+#   optional-terminal-bash / optional-terminal-pwsh 两行**都删了**，bash 后端改由
+#   web-app 的 agent-preset minimal 在 `persistent-shell` 组里挂（id: terminal-bash，
+#   disabled: !!js process.platform === 'win32'；pwsh 那行 disabled: !== 'win32'），
+#   且两行**仍然都用默认 backendType="shell"** —— 即上游没有采纳 issue #1344 建议的修法 1，
+#   而是把双入口从可选 bundle 挪到了 preset 层。
+#
+# ⇒ 本行禁用项随之失效：id `optional-terminal-pwsh` 在上游行面已不存在，保留它只是空指向。
+# 撞名风险的现时判据 = preset 层两行的 !!js 是否真的互斥。这一条由
+# scripts/check-terminal-entries.test.mjs 守着（它以内联的上游行副本做合成判定，含负控）。
+# 逆转条件：上游若把双入口重新放回可选 bundle ⇒ 先看 check-terminal-entries.test.mjs 的判红，
+# 再恢复本行的字面量禁用。
 
 # 删除对话（issue #493）：会话行菜单「删除对话」+ 受鉴权 host 路由 /api/session-delete。
 # 引擎没有 session/delete RPC，插件负责先卸载内存会话，再删磁盘目录；运行中的会话拒绝删除。

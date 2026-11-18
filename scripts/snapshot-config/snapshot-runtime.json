@@ -1,7 +1,7 @@
 {
-  "$schema": "dsh-mobile snapshot runtime evidence（0.2.2-rc.1 适配期取证，供 check-snapshot-node-floor.mjs 消费）",
+  "$schema": "dsh-mobile snapshot runtime evidence（0.2.2-rc.3 适配期取证，供 check-snapshot-node-floor.mjs 消费）",
   "checkedOn": "2026-11-04",
-  "requiredBy": "@deepseek-ai/dsh@0.2.2-rc.1 package.json engines.node",
+  "requiredBy": "@deepseek-ai/dsh@0.2.2-rc.3 package.json engines.node",
   "requiredRangeAtRecord": ">=24.9.0",
   "nodeVersion": "24.18.0",
   "nodeMajor": 24,

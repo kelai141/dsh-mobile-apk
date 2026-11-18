@@ -712,10 +712,11 @@ class FactoryProfilePatchTest {
     assertTrue("零改动时不得有改动说明", result.changes.isEmpty())
 
     val blocks = FactoryProfilePatch.topLevelBlocks(text)
-    // 23 = 22 个 `- ` 顶层条目 + 1 个「首个条目之前的注释头」块（parseBlocks 会把它们冲成独立块）。
+    // 21 = 20 个 `- ` 顶层条目 + 1 个「首个条目之前的注释头」块。
     // 历史锚点：0.14.2 时代 20 个条目 ⇒ 21 块；0.14.8 退役 undo 装配项后仍为 20 个条目；
     // 0.14.3 起 22 个条目（+2 遥测/分析禁用行）；issue #1344 起 23 个条目（+1 pwsh 入口禁用行），原生手机控制合并后移除独立 vdisplay 条目。
-    assertEquals("顶层条目数（工厂件结构改变时同步本断言）", 23, blocks.size)
+    // Harness rc.3 删除了 office-to-pdf 和 optional-terminal-pwsh，本地两个禁用条目随之删除。
+    assertEquals("顶层条目数（工厂件结构改变时同步本断言）", 21, blocks.size)
     val groups = blocks.map { FactoryProfilePatch.blockIds(it) }.filter { it.size > 1 }
     assertEquals("唯一多子条目组 = shell-termux + host-web-compat", 1, groups.size)
     assertEquals(listOf("shell-termux", "host-web-compat"), groups.single())
@@ -746,7 +747,11 @@ class FactoryProfilePatchTest {
 
     assertTrue("D10：缺失的组内兄弟必须被补回", result.text.contains("id: host-web-compat"))
     assertTrue("补回的是同一个组（shell-termux 仍是组首）", result.text.contains("id: shell-termux"))
-    assertEquals("顶层条目数不变（补进组内，不是追加成新块）", 23, FactoryProfilePatch.topLevelBlocks(result.text).size)
+    assertEquals(
+      "顶层条目数不变（补进组内，不是追加成新块）",
+      FactoryProfilePatch.topLevelBlocks(factory).size,
+      FactoryProfilePatch.topLevelBlocks(result.text).size,
+    )
     val group = FactoryProfilePatch.topLevelBlocks(result.text)
       .first { FactoryProfilePatch.blockIds(it).contains("shell-termux") }
     assertEquals(listOf("shell-termux", "host-web-compat"), FactoryProfilePatch.blockIds(group))

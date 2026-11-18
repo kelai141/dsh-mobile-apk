@@ -74,8 +74,12 @@ function ChatContent({ useSession, useConversation, renderFactorySlot }: PropsRu
   const session = useSession(s => s)
   const conversation = useConversation(s => s)
   const active = conversation.activeTargets.size > 0 || !session.blank || session.running
-  const settling = (session.openState === 'loading' && !active)
-    || (session.subagent?.address.mode === 'continuable' && session.subagent.parentAvailable === undefined)
+  // settling 只认「加载中且还没有任何活动目标」。
+  // 0.2.2-rc.3 删除了 SessionSnapshot.subagent.parentAvailable（rc.1 的字段注释是
+  // 「Absent until the direct-parent catalog resolves」），故原先那条「可续子智能体等父目录解析」的
+  // 附加条件失去依据，随本代移除。判据没有变软：上游自己的 settling（ui-conversation 的
+  // ConversationMainPanel）本来就只看 shellPhase/openState/summaryBlank，不看 subagent。
+  const settling = session.openState === 'loading' && !active
   const hero = !active && session.openState === 'open'
   return renderFactorySlot('conversation.content', {
     variant: 'embedded', phase: settling ? 'settling' : hero ? 'hero' : 'active', hero,

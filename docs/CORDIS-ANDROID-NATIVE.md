@@ -1,6 +1,6 @@
 # Cordis 与 Android 原生服务的边界
 
-基线：Harness `0.2.2-rc.1`，提交 `66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db`。
+基线：Harness `0.2.2-rc.3`，提交 `38a6a5c965aa99ab525161efb7cc5cf1fe62fced`。
 本说明记录迁移边界与验收口径。当前没有替换 Cordis，也没有启用新的跨进程服务。
 
 Cordis 的 `Context` 用 Proxy、原型链和 Symbol 表达隔离与继承；`provide` 的对象由当前

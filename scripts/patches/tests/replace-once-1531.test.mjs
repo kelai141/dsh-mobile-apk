@@ -128,7 +128,10 @@ function scratchPackage(rootPkgDir, packageName, source) {
 }
 
 const H1_TARGET = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-resources'
-const H1_ANCHOR = /(if \(parsed\.protocol !== \`dsh-resource:\`\) return void 0;)(\r?\n)([ \t]*)return parsed\.hostname === "" \? void 0 : parsed\.hostname\.toLowerCase\(\);/
+// 重锚（2026-11 追版 0.2.2-rc.3）：0.2.2-rc.2 起上游把 client bundle 压成紧凑单行，换行与缩进被
+// 整段抹掉，旧的三段式（\r?\n + 行首缩进）在真产物上一处都匹配不到。这里与 apply-patches.mjs 的
+// 锚点保持同一形态：分组 1 = 协议判定，分组 2 = hostname 返回语句，两者之间没有 EOL 与缩进。
+const H1_ANCHOR = /(if\(parsed\.protocol!==\`\$\{\`dsh-resource\`\}:\`\)return void 0;)(return parsed\.hostname===\`\`\?void 0:parsed\.hostname\.toLowerCase\(\))/
 
 /** 上游原始字节（版本化夹具，不在此写死版本）。 */
 function h1Source() {

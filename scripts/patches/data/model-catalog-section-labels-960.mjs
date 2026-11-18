@@ -12,13 +12,16 @@
 //   再给隐藏面板补 aria-hidden，把它移出无障碍树——issue 里两条期望都落实。
 //
 // 为什么不改 t("models")：那是全页共用的词条，改了会连带影响标题与其它引用。
+//
+// 锚点形态（2026-11 追版 0.2.2-rc.3 重锚）：0.2.2-rc.2 起上游把 client bundle 压成紧凑单行，
+//   换行与缩进被整段抹掉（标识符没改名）。旧锚点按行缩进书写，在 rc.3 上一处都命中不了。
+//   下面两处锚点改成紧凑形态，并各带上前后相邻的上下文，保证「恰好 1 处」这个判据没有放松：
+//   0 处与多处一律 throw。
 
 export const MARKER = 'dsh-mobile model catalog section labels (#960)'
 
 /** 锚点：ModelListEditor 的 section 头（含唯一的 aria-label: t("models")）。 */
-const OLD = '\t\t\treturn (0, react_jsx_runtime.jsxs)("section", {\n'
-  + '\t\t\t\tclassName: ModelsSection_module_css_default["modelCatalog"],\n'
-  + '\t\t\t\t"aria-label": t("models"),'
+const OLD = 'return(0,react_jsx_runtime.jsxs)(`section`,{className:ModelsSection_module_css_default[`modelCatalog`],"aria-label":t(`models`),'
 
 /**
  * 替换：label 追加归属标识。
@@ -26,23 +29,20 @@ const OLD = '\t\t\treturn (0, react_jsx_runtime.jsxs)("section", {\n'
  * 归属标识取「有 provider 用 provider，没有（自定义卡片）用 custom」：custom 卡片的 probe 本来
  * 就没有 provider 字段，这正是它和目录型 provider 的天然区别。
  */
-const NEW = '\t\t\treturn (0, react_jsx_runtime.jsxs)("section", {\n'
-  + '\t\t\t\tclassName: ModelsSection_module_css_default["modelCatalog"],\n'
-  + '\t\t\t\t/* ' + MARKER + ': 每个目录区带上归属，读屏与按 label 定位都不再撞名。 */\n'
-  + '\t\t\t\t"data-dsh-model-catalog": probe.provider === void 0 ? "custom" : probe.provider,\n'
-  + '\t\t\t\t"aria-label": t("models") + " · " + (probe.provider === void 0 ? t("customTag") : probe.provider),'
+const NEW = 'return(0,react_jsx_runtime.jsxs)(`section`,{className:ModelsSection_module_css_default[`modelCatalog`],/* ' + MARKER
+  + ': 每个目录区带上归属，读屏与按 label 定位都不再撞名。 */"data-dsh-model-catalog":probe.provider===void 0?"custom":probe.provider,'
+  + '"aria-label":t(`models`)+" · "+(probe.provider===void 0?t(`customTag`):probe.provider),'
 
 /** 替换里那两段；`has` 用它们区分「完整施加」与「半补丁」。 */
-const LABEL_MARK = '"data-dsh-model-catalog": probe.provider === void 0 ? "custom" : probe.provider,'
-const ARIA_HIDDEN = '"aria-hidden": mode !== "catalog",'
+const LABEL_MARK = '"data-dsh-model-catalog":probe.provider===void 0?"custom":probe.provider,'
+const ARIA_HIDDEN = '"aria-hidden":mode!==`catalog`,'
 
 /** 锚点二：catalog 面板的 hidden 属性（面板内是官方 ProviderEditor 的目录区）。 */
-const HIDE_OLD = '\t\t\t\t\t\t\t\t\thidden: mode !== "catalog",'
+const HIDE_OLD = 'hidden:mode!==`catalog`,className:ModelsSection_module_css_default[`addPanel`]'
 
 /** 替换二：隐藏面板同时移出无障碍树。 */
-const HIDE_NEW = '\t\t\t\t\t\t\t\t\t/* ' + MARKER + ': 隐藏面板不进无障碍树。 */\n'
-  + '\t\t\t\t\t\t\t\t\thidden: mode !== "catalog",\n'
-  + '\t\t\t\t\t\t\t\t\t"aria-hidden": mode !== "catalog",'
+const HIDE_NEW = '/* ' + MARKER + ': 隐藏面板不进无障碍树。 */hidden:mode!==`catalog`,' + ARIA_HIDDEN
+  + 'className:ModelsSection_module_css_default[`addPanel`]'
 
 /**
  * 补丁是否已施加。

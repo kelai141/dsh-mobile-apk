@@ -19,14 +19,16 @@ import { versionedFixture } from './lib/fixture.mjs'
 
 const source = readFileSync(versionedFixture('dsh-client-ui-sidebar', 'lib', 'client.js'), 'utf8')
 
+// 断言按**紧凑形态**写（0.2.2-rc.2 起上游把 client bundle 压成单行，空格不参与语义）。
+// 判据本身不放宽：仍然是「这一段判据必须逐字节在场」，只是换成新代的真字节。
 test('上游 wide 判据已把 drawer 计入（B2 锚点一的目标态）', () => {
-  const wide = 'const wide = drawer || (windowsTitlebar ? !collapsed : !collapsed || !settled);'
+  const wide = 'const wide=drawer||(windowsTitlebar?!collapsed:!collapsed||!settled);'
   assert.equal(source.split(wide).length - 1, 1,
     '上游 SidebarRoot 的 wide 判据不再是「drawer || ...」——B2 的锚点一失去替代物，必须重新施加补丁')
 })
 
 test('上游抽屉形态不写冻结内联宽度（B2 锚点二的目标态）', () => {
-  const style = 'style: wide ? { width: !drawer && collapsed ? lastWideWidth.current : width } : void 0,'
+  const style = 'style:wide?{width:!drawer&&collapsed?lastWideWidth.current:width}:void 0,'
   assert.equal(source.split(style).length - 1, 1,
     '上游内联宽度表达式不再排除 drawer——B2 的锚点二失去替代物，复活 56px 压缩抽屉缺陷')
 })

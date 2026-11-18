@@ -201,6 +201,22 @@ function labelsAreUnique(measured: Measured): boolean {
   return labels.length > 0 && labels.every((label) => label.length > 0) && new Set(labels).size === labels.length
 }
 
+/**
+ * 负控的「改坏」操作要跨发布形态稳定。
+ *
+ * 0.2.2-rc.2 起上游把客户端 bundle 压成**紧凑单行**（换行与缩进被抹掉，标识符未改名），
+ * 于是按多行 + 空格书写的 replace 目标在新夹具上 0 命中 —— 负控会静默退化成「什么都没改」，
+ * 而 `expect(negative).not.toBe(...)` 会因此判红。这里两份形态都留，命中哪份用哪份；
+ * 两份都不命中就直接抛错，绝不静默返回原串（否则负控变成假绿）。
+ */
+function mutateOnce(source: string, variants: readonly string[], replacement: string, label: string): string {
+  for (const variant of variants) {
+    if (source.includes(variant)) return source.replace(variant, replacement)
+  }
+  throw new Error(label + '：两种发布形态都没命中，负控目标已漂移（期望其中之一在场）：'
+    + variants.map((v) => JSON.stringify(v.slice(0, 60))).join(' | '))
+}
+
 describe.skipIf(upstream === null)('issue #960 自定义 provider 表单', () => {
   const patched = (): string => patchModelCatalogSectionLabels(patchCustomFirstModelRow(upstream as string))
 
@@ -233,7 +249,12 @@ describe.skipIf(upstream === null)('issue #960 自定义 provider 表单', () =>
   })
 
   it('B 负控：只在提交时过滤，空占位会让创建一直禁用', async () => {
-    const negative = patched().replace('if (id.trim().length === 0 || listed.has(id) && !isPicked(id))', 'if (listed.has(id) && !isPicked(id))')
+    const negative = mutateOnce(patched(), [
+      // rc.1 及更早（多行 + 空格）
+      'if (id.trim().length === 0 || listed.has(id) && !isPicked(id))',
+      // rc.2 起（紧凑单行，无空格）
+      'if(id.trim().length===0||listed.has(id)&&!isPicked(id))',
+    ], 'if (listed.has(id) && !isPicked(id))', 'B 负控')
     expect(negative).not.toBe(patched())
     const broken = await measure(negative, true, true)
     expect(broken.modelIds).toEqual(['', 'endpoint-model'])
@@ -255,10 +276,13 @@ describe.skipIf(upstream === null)('issue #960 自定义 provider 表单', () =>
   })
 
   it('C 负控：把 label 退回共用词条，唯一性判据立刻变红', async () => {
-    const negative = patched().replace(
+    const negative = mutateOnce(patched(), [
+      // rc.1 及更早（多行 + 空格）
       '"aria-label": t("models") + " · " + (probe.provider === void 0 ? t("customTag") : probe.provider),',
-      '"aria-label": t("models"),',
-    )
+      // rc.2 起（紧凑单行，模板串）
+      '"aria-label":t(`models`) + " · " + (probe.provider === void 0 ? t(`customTag`) : probe.provider),',
+      '"aria-label":t(`models`)+" · "+(probe.provider===void 0?t(`customTag`):probe.provider),',
+    ], '"aria-label": t("models"),', 'C 负控')
     expect(negative).not.toBe(patched())
     expect(labelsAreUnique(await measure(negative, true))).toBe(false)
   })
