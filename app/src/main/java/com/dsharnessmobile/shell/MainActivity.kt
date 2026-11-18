@@ -734,36 +734,24 @@ class MainActivity : ComponentActivity() {
       insets
     }
     ViewCompat.requestApplyInsets(root)
-    // 键盘**弹出**动画期间逐帧推 IME 高度。
-    // setOnApplyWindowInsetsListener 拿到的 IME inset 是跳变的：动画进行中它保持旧值，
-    // 动画走完才一次性归零/到位，卡片因此总是慢半拍才吸上去。onProgress 提供的是插值，
-    // 每帧一次，卡片就能跟着键盘一起走。收起方向另有 focusout 兜底（见 ComposerImeOffset）。
+    // 动画期间使用系统插值，输入卡跟随实际键盘高度。
     ViewCompat.setWindowInsetsAnimationCallback(
       root,
       object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
-        override fun onStart(
-          animation: WindowInsetsAnimationCompat,
-          bounds: WindowInsetsAnimationCompat.BoundsCompat,
-        ): WindowInsetsAnimationCompat.BoundsCompat {
-          if (animation.typeMask and WindowInsetsCompat.Type.ime() != 0) {
-            // 动画一开头就按**终点**推一次，卡片立刻贴到位。
-            // 之前把推送放在 onEnd，等于让卡片白等一整个键盘动画时长才动。
-            // upperBound 是 androidx 的 Insets（物理 px），目标高度直接取 .bottom。
-            pushComposerImePx(bounds.upperBound.bottom)
-          }
-          return bounds
-        }
-
         override fun onProgress(
           insets: WindowInsetsCompat,
           runningAnimations: MutableList<WindowInsetsAnimationCompat>,
-        ): WindowInsetsCompat = insets
+        ): WindowInsetsCompat {
+          if (runningAnimations.any { it.typeMask and WindowInsetsCompat.Type.ime() != 0 }) {
+            pushComposerImePx(insets.getInsets(WindowInsetsCompat.Type.ime()).bottom)
+          }
+          return insets
+        }
 
         override fun onEnd(animation: WindowInsetsAnimationCompat) {
           if (animation.typeMask and WindowInsetsCompat.Type.ime() == 0) return
-          // 动画落定后补推一次终值，防 onStart 的 upperBound 与最终 insets 有差。
-          val settled = ViewCompat.getRootWindowInsets(root)
-          pushComposerImePx(settled?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0)
+          val settled = ViewCompat.getRootWindowInsets(root) ?: return
+          pushComposerImePx(settled.getInsets(WindowInsetsCompat.Type.ime()).bottom)
         }
       },
     )
@@ -2174,9 +2162,7 @@ class MainActivity : ComponentActivity() {
       // 任何键盘信号；而 `--dsh-android-ime-bottom` 只有虚拟屏键条在消费，主界面没有
       // 消费者。壳侧已知道 IME 高度，就直接把 composer 抬到键盘上沿，别指望页面自己让位。
       // 与上面的变量推送合成一次 IPC：insets 变化时 WebView 侧只排一次队列。
-      // composer 位移每次照推：onStart 已经按终点推过一次，这里同值会被去重跳过；
-      // 不能再拿「动画进行中」当抑制条件——那是靠 onEnd 复位的，而系统取消动画时
-      // onEnd 不会触发，标志会永远卡住，卡片从此再也回不来。
+      // 原生 inset 回调也发送终值，覆盖系统取消动画和页面重载。
       lastComposerImeCssPx = webImeBottomInset
       view.evaluateJavascript(insetsScript + ";" + ComposerImeOffset.script(webImeBottomInset), null)
     } catch (_: Exception) {
