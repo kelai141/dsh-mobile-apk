@@ -7,9 +7,7 @@ import org.junit.Test
 /**
  * ComposerImeOffset：注入脚本的契约。
  *
- * 判据盯的是几何关系与**两个方向的不对称**——真机缺陷有两层：卡片底边没落到
- * `innerHeight - ime` 上（抬不起来），以及收起时等 insets 导致慢半拍（粘滞）。
- * 所以断言查两件事：对齐算法，和 focusout 那条立即回落的挂载。
+ * 输入卡片应在键盘上方，浏览历史与焦点变化期间继续跟随原生 IME 高度。
  */
 class ComposerImeOffsetTest {
   @Test fun targetsComposerCardBeforeTheDockFallback() {
@@ -42,10 +40,14 @@ class ComposerImeOffsetTest {
     val script = ComposerImeOffset.script(0)
     assertTrue(script.contains("api.set(0)"))
     // 位移那段代码在字符串里恒存在，能不能执行由提前返回决定——所以判据是顺序。
-    assertTrue(
-      "零值必须在设位移之前返回",
-      script.indexOf("if(v<=0)return;") in 0 until script.indexOf("translateY"),
-    )
+    val clearShift = script.indexOf("if(v<=0){root.style.removeProperty('${ComposerImeOffset.SHIFT_PROPERTY}');return;}")
+    assertTrue("零值必须在设位移之前返回", clearShift in 0 until script.indexOf("translateY"))
+  }
+
+  @Test fun exposesActualCardLiftForTheReturnBubble() {
+    val script = ComposerImeOffset.script(351)
+    assertTrue(script.contains("root.style.setProperty('${ComposerImeOffset.SHIFT_PROPERTY}',d+'px')"))
+    assertTrue(script.contains("Math.max(0,Math.round(r.bottom-"))
   }
 
   @Test fun negativeImeIsTreatedAsHidden() {
@@ -58,23 +60,17 @@ class ComposerImeOffsetTest {
     assertTrue("重复注入不得重复注册监听器", script.contains("if(!api){"))
   }
 
-  @Test fun pointerDownCollapsesBeforeFocusOutFires() {
+  @Test fun touchingTranscriptAndLosingFocusDoNotCollapseAVisibleKeyboardOffset() {
     val script = ComposerImeOffset.script(351)
-    assertTrue(script.contains("addEventListener('pointerdown'"))
-    // 按下即回落：pointerdown 分支必须直接调 collapse
-    assertTrue(script.contains("api.collapse()"))
-    assertTrue(
-      "pointerdown 必须早于 focusout 注册",
-      script.indexOf("addEventListener('pointerdown'") < script.indexOf("addEventListener('focusout'"),
-    )
+    assertFalse(script.contains("addEventListener('pointerdown'"))
+    assertFalse(script.contains("addEventListener('focusout'"))
+    assertFalse(script.contains("api.collapse()"))
   }
 
-  @Test fun collapseSuppressesStaleInsetsUntilTheySettle() {
+  @Test fun everyNativeKeyboardHeightIsApplied() {
     val script = ComposerImeOffset.script(351)
-    // 抑制窗口是防横跳的唯一手段：回落之后、insets 归零之前，忽略一切「键盘还在」的推送
-    assertTrue(script.contains("suppressed"))
-    assertTrue("抑制期内正高度必须被丢弃", script.contains("if(suppressed){if(v>0)return;suppressed=false}"))
-    assertTrue("点回卡片要能解除抑制，否则会卡死不抬高", script.contains("release:function(){suppressed=false}"))
+    assertTrue(script.contains("api={set:apply}"))
+    assertFalse(script.contains("suppressed"))
   }
 
   @Test fun clearingAlwaysKillsTransition() {
