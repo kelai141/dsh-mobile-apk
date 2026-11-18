@@ -487,12 +487,6 @@ const AUDIT_BASELINE = new Map([
   // 这样有快照时真跑通过、无快照时是「明确结案」而不是「零判据」——登记表随之不再需要，
   // 销账倒挂也消失：删登记这个动作在双环境下原本不可能同时成立（本地有快照→缺口不复现，
   // CI 无快照→恒 SKIP），现在两侧都自洽。
-  ['check-snapshot-fingerprint.mjs', {
-    requires: ['snapshot'],
-    kinds: ['no-verdict'],
-    reason: '净检出无 tar 时以 SKIP 结案，不打印 PASS/FAIL 判据行',
-    until: '2026-12-31',
-  }],
 ])
 
 const ZERO_CRITERIA_REGISTER = new Map([

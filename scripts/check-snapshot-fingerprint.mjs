@@ -210,8 +210,8 @@ if (process.argv.includes('--self-test')) {
     // #920：CI 净检出（无 tar，连带无清单）→ 仍 SKIP 且计数可见，不得静默绿
     ['净检出（无 tar）→ SKIP 且 SKIP=1 计数可见，不因清单缺席而 red',
       runGate(['--root', noTar]),
-      (r) => r.code === 0 && r.out.includes('SKIP=1')],
-    ['tar 与声明一致 → PASSED 且 exit 0', runGate(['--root', match]), (r) => r.code === 0 && r.out.includes('SNAPSHOT-FINGERPRINT CHECK PASSED')],
+      (r) => r.code === 0 && r.out.includes('CHECK-SNAPSHOT-FINGERPRINT SKIPPED（快照缺席；SKIP=1）')],
+    ['tar 与声明一致 → PASSED 且 exit 0', runGate(['--root', match]), (r) => r.code === 0 && r.out.includes('SNAPSHOT-FINGERPRINT CHECK PASSED（SKIP=0）')],
     ['声明与 tar 不一致 → FAILED 且指出「手工替换」', runGate(['--root', mismatch]), (r) => r.code === 1 && r.out.includes('指纹与快照不一致') && r.out.includes('手工替换')],
     ['声明缺席 → FAILED（无法对账）', runGate(['--root', noSha]), (r) => r.code === 1 && r.out.includes('指纹声明缺席')],
     ['声明格式非法 → FAILED（不是 64 位小写十六进制）', runGate(['--root', badSha]), (r) => r.code === 1 && r.out.includes('指纹声明格式非法')],
@@ -254,7 +254,8 @@ const fail = (msg) => {
   process.exit(1)
 }
 const skip = (msg) => {
-  console.log('SKIP  ' + msg + '（SKIP=1；发布链要求 SKIP=0，构建链以 --require 调用）')
+  console.log('SKIP(#1)  ' + msg)
+  console.log('CHECK-SNAPSHOT-FINGERPRINT SKIPPED（快照缺席；SKIP=1）')
   process.exit(0)
 }
 
@@ -329,4 +330,4 @@ if (staleFingerprint !== null) {
     + '        或删掉 assets 下三份陈旧产物（snapshot.tar.xz / snapshot.sha256 / plugin-hard-manifest.json）后重跑构建链。')
 }
 console.log('PASS  ' + rel(HARD) + ' fingerprint == tar sha256（' + String(actual).slice(0, 12) + '…）')
-console.log('SNAPSHOT-FINGERPRINT CHECK PASSED')
+console.log('SNAPSHOT-FINGERPRINT CHECK PASSED（SKIP=0）')
