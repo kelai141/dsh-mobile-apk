@@ -256,6 +256,7 @@ export interface FileCardCopy {
  */
 export class FileCardCapsule {
   private observer: MutationObserver | null = null
+  private lastStatus: HTMLElement | null = null
   /** 桥面提供者：每次动作时调用，壳侧晚注入也能拿到。 */
   private bridge: () => FileCardBridge
   private copy: FileCardCopy
@@ -314,6 +315,7 @@ export class FileCardCapsule {
     this.pending.clear()
     this.batchScheduled = false
     this.generation += 1
+    this.lastStatus = null
     for (const capsule of document.querySelectorAll(CAPSULE_SELECTOR)) capsule.remove()
   }
 
@@ -581,6 +583,10 @@ export class FileCardCapsule {
   private showResult(button: HTMLButtonElement, result: CardBridgeResult): void {
     const capsule = button.parentElement
     if (capsule === null) return
+    if (this.lastStatus?.previousElementSibling !== capsule) {
+      this.lastStatus?.remove()
+      this.lastStatus = null
+    }
     let status = capsule.nextElementSibling
     if (status?.hasAttribute(STATUS_ATTR) !== true) {
       if (result.ok) return
@@ -592,5 +598,6 @@ export class FileCardCapsule {
     // A failed open describes this file at this moment; other formats and
     // future attempts still get the Android chooser.
     status.textContent = result.ok ? '' : this.copy.failure(result.error)
+    this.lastStatus = status as HTMLElement
   }
 }
