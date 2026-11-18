@@ -66,7 +66,10 @@ function fixture(t) {
   }, null, 2)}\n`)
   const ndkBin = join(root, 'ndk', 'toolchains', 'llvm', 'prebuilt', 'windows-x86_64', 'bin')
   mkdirSync(ndkBin, { recursive: true })
-  for (const name of ['clang.exe', 'llvm-ar.exe', 'llvm-readelf.exe']) writeFileSync(join(ndkBin, name), '')
+  for (const name of ['clang', 'llvm-ar', 'llvm-readelf']) {
+    writeFileSync(join(ndkBin, name), '')
+    writeFileSync(join(ndkBin, `${name}.exe`), '')
+  }
   return { root, apkDir, crateDir, config, ndk: { root: join(root, 'ndk'), bin: ndkBin, hostTag: 'windows-x86_64', version: config.ndkVersion } }
 }
 
@@ -124,7 +127,7 @@ test('builds selected ABIs through rustup, verifies ELF, and records a safe mani
   assert.ok(cargoCall.args.includes('--locked'))
   assert.ok(cargoCall.args.includes('--release'))
   assert.ok(cargoCall.args.includes('aarch64-linux-android'))
-  assert.ok(cargoCall.options.env.CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER.endsWith('clang.exe'))
+  assert.match(cargoCall.options.env.CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER, /clang(?:\.exe)?$/)
   const rustflags = cargoCall.options.env.CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS
   assert.match(rustflags, /max-page-size=16384/)
   assert.match(rustflags, /common-page-size=16384/)

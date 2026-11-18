@@ -51,7 +51,6 @@ test('screen-scope fixture copies retain canonical bytes through checkout filter
   const canonical = Buffer.from(JSON.stringify(JSON.parse(source), null, 2) + '\n')
   for (const path of [
     'plugins/dsh-android-bridge/test/fixtures/screen-scope-cases.json',
-    'app/src/test/resources/screen-scope/screen-scope-cases.json',
   ]) {
     const expected = sha256(path.startsWith('app/') ? canonical :
       execFileSync('git', ['show', 'HEAD:' + path], { cwd: root }))

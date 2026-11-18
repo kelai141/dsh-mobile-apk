@@ -786,7 +786,7 @@ describe('installOverlayHost', () => {
     const uninstall = installOverlayHost(host)
     const installed = (window as unknown as Record<string, unknown>)[OVERLAY_HOST_GLOBAL] as Record<string, unknown>
     expect(installed).toBeDefined()
-    expect(installed.version).toBe(2)
+    expect(installed.version).toBe(3)
     for (const name of ['state', 'sessions', 'commands', 'execute', 'send', 'removeAttachment', 'openSession']) {
       expect(typeof installed[name]).toBe('function')
     }
@@ -803,5 +803,24 @@ describe('installOverlayHost', () => {
     uninstall()
     expect(target[OVERLAY_HOST_GLOBAL]).toBe(previous)
     delete target[OVERLAY_HOST_GLOBAL]
+  })
+})
+
+describe('newSession', () => {
+  it('calls uiWorkspace.startSession and reports ok', () => {
+    const starts: string[] = []
+    const host = new OverlayHost(standardFaces(fakeInput().input, {
+      uiWorkspace: () => ({ openSession: () => {}, startSession: () => starts.push('start') }),
+    }))
+    const result = parse(host.newSession())
+    expect(result.ok).toBe(true)
+    expect(starts).toEqual(['start'])
+  })
+
+  it('reports a clear error when the page has no startSession', () => {
+    const host = new OverlayHost(standardFaces(fakeInput().input))
+    const result = parse(host.newSession())
+    expect(result.ok).toBe(false)
+    expect(String(result.error)).toBe('new-session-unavailable')
   })
 })

@@ -203,6 +203,7 @@ internal data class OverlayComposerData(
   val busy: Boolean,
   val sendEnabled: Boolean,
   val answeringQuestion: Boolean = false,
+  val drawerEmptyLabel: String = "",
 )
 
 /**
@@ -240,6 +241,9 @@ internal interface OverlayCardListener {
    * 视图层固定传 true（问题没有拒绝语义，真正的答复文本走输入区）。
    */
   fun onCardPendingAction(eventId: String, kind: String, approve: Boolean)
+
+  /** 卡片内展开/收起某一行后内容高度变化：服务侧据此重算窗口高度。 */
+  fun onCardContentHeightChanged()
 }
 
 /**

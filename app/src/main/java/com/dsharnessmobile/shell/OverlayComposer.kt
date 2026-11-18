@@ -138,19 +138,10 @@ internal class OverlayComposer(
   }
 
   // ── 输入行 ────────────────────────────────────────────────────────────────
-  private val plusButton = TextView(context).apply {
+  // 加号与发送按钮共用同一组几何比例（见 OverlayPlusGlyphView）：字体字形在 44dp 圆里
+  // 笔画偏细、视觉偏小，和自绘箭头放在一行会读成两个不同尺寸的按钮。
+  private val plusButton = OverlayPlusGlyphView(context).apply {
     tag = "overlay-composer-plus"
-    text = "\uFF0B"
-    textSize = 18f
-    setTextColor(colorTextSecondary)
-    gravity = Gravity.CENTER
-    minWidth = dp(MIN_TOUCH_TARGET_DP)
-    minHeight = dp(MIN_TOUCH_TARGET_DP)
-    background = GradientDrawable().apply {
-      shape = GradientDrawable.OVAL
-      setColor(colorChip)
-      setStroke(dp(1), colorBorder)
-    }
     contentDescription = UiText.t(context, "更多：附件与命令", "More: attachments and commands")
     isClickable = true
     setOnClickListener { listener.onComposerToggleDrawer() }
@@ -434,6 +425,7 @@ internal class OverlayComposer(
       onAttach = { kind ->
         listener.onComposerAttach(kind)
       },
+      emptyLabel = data.drawerEmptyLabel,
     )
   }
 
@@ -468,6 +460,13 @@ internal class OverlayComposer(
    * 在手机上和其它浮层（卡片逐行淡入、sheet 淡入上抬）观感完全不一致。
    * 这里只动 alpha 与 translationY，不碰窗口几何与布局，避免和 IME 顶起抢时序。
    */
+  /** 窗口 addView 之前先把首帧压到透明位；否则系统会先绘一帧满透明度，再被动画覆盖成「闪现」。 */
+  fun prepareEnter() {
+    view.animate().cancel()
+    view.alpha = 0f
+    view.translationY = composerEnterRisePx
+  }
+
   fun fadeComposerIn() {
     if (!motionEnabled || !attached) {
       view.alpha = 1f

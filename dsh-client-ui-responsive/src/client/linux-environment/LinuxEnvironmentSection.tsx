@@ -24,7 +24,7 @@
  * 会以 `already installed; use reinstall()` 拒绝降级/重复安装。失败时不渲染「已就绪」提示，
  * 只保留「返回对话」，避免把失败读成成功。
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { tr } from '../i18n.ts'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -55,8 +55,12 @@ const POLL_MS = 2000
  * 与引擎侧串行队列互补（那边 busy 时回 409）。
  */
 let inFlight = false
+/** 挂载级自动查新单飞守卫，防止并发重复 POST /check 撞 409。 */
+let inFlightAutoCheck: Promise<LinuxStatus> | null = null
+const AUTO_CHECK_FRESH_MS = 60_000
 
 type Phase = 'idle' | 'manifest' | 'assets' | 'installing' | 'checking' | 'uninstalling' | 'done' | 'failed'
+type AutoCheckState = 'idle' | 'checking' | 'done' | 'failed'
 
 interface ProgressState {
   stage: 'manifest' | 'assets' | 'installing'
@@ -177,6 +181,10 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
   const [progress, setProgress] = useState<ProgressState | null>(null)
   const [error, setError] = useState('')
   const [phase, setPhase] = useState<Phase>('idle')
+  const [autoCheckState, setAutoCheckState] = useState<AutoCheckState>('idle')
+  const [autoCheckError, setAutoCheckError] = useState('')
+  const autoCheckStartedRef = useRef(false)
+  const autoCheckedAtRef = useRef(0)
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -189,9 +197,41 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
 
   useEffect(() => {
     let active = true
+    const runAutoCheck = (): void => {
+      setAutoCheckState('checking')
+      setAutoCheckError('')
+      const pending = inFlightAutoCheck ?? (inFlightAutoCheck = checkForUpdates().finally(() => {
+        inFlightAutoCheck = null
+      }))
+      void pending.then(
+        (checked) => {
+          if (!active) return
+          autoCheckedAtRef.current = Date.now()
+          if (checked !== null && typeof checked === 'object') setStatus(checked)
+          setStatusError('')
+          setAutoCheckState('done')
+          setAutoCheckError('')
+        },
+        (cause: unknown) => {
+          if (!active) return
+          // Offline / rate-limit update check failures stay non-fatal: existing
+          // installed environment, reinstall and uninstall remain operable.
+          setAutoCheckState('failed')
+          setAutoCheckError(failureText(cause))
+        },
+      )
+    }
     const load = (): void => {
       void fetchStatus().then(
-        (next) => { if (active) { setStatus(next); setStatusError('') } },
+        (next) => {
+          if (!active) return
+          setStatus(next)
+          setStatusError('')
+          if (!autoCheckStartedRef.current) {
+            autoCheckStartedRef.current = true
+            if (next.busy !== true && !inFlight) runAutoCheck()
+          }
+        },
         (cause: unknown) => { if (active) setStatusError(failureText(cause)) },
       )
     }
@@ -243,18 +283,25 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
     inFlight = true
     setError('')
     try {
+      if (inFlightAutoCheck !== null) {
+        try { await inFlightAutoCheck } catch { /* non-fatal */ }
+      }
       if (!reinstall) {
         setPhase('manifest')
         setProgress({ stage: 'manifest' })
-        // Refresh the persisted manifest first: GET /manifest reads state and
-        // never touches the network, so a release published since the last check
-        // would otherwise leave us preparing one version's assets while the
-        // engine installs another's. A failure here is not fatal — the cached
-        // manifest is still installable, and install() has its own fallback.
-        try {
-          await checkForUpdates()
-        } catch {
-          // Keep going on the persisted manifest.
+        // Refresh the persisted manifest first unless the page-open auto-check
+        // just succeeded moments ago, keeping GitHub API calls lean while
+        // still falling back to the persisted manifest when offline/403.
+        const recentlyChecked = autoCheckState === 'done' && (Date.now() - autoCheckedAtRef.current) < AUTO_CHECK_FRESH_MS
+        if (!recentlyChecked) {
+          try {
+            await checkForUpdates()
+            autoCheckedAtRef.current = Date.now()
+            setAutoCheckState('done')
+            setAutoCheckError('')
+          } catch {
+            // Keep going on the persisted manifest.
+          }
         }
         await refresh()
         const manifest = await fetchManifest()
@@ -297,13 +344,25 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
     setError('')
     setPhase(nextPhase)
     try {
+      if (inFlightAutoCheck !== null) {
+        try { await inFlightAutoCheck } catch { /* non-fatal */ }
+      }
       // 动作返回的宿主状态先落地：手动 check 刚刷新出的 updateAvailable 不会被紧随其后的
       // 状态轮询（可能还是上一拍缓存）抹掉。
       const next = await action()
       if (next !== null && typeof next === 'object') setStatus(next)
+      if (nextPhase === 'checking') {
+        autoCheckedAtRef.current = Date.now()
+        setAutoCheckState('done')
+        setAutoCheckError('')
+      }
       await refresh()
       setPhase('idle')
     } catch (cause) {
+      if (nextPhase === 'checking') {
+        setAutoCheckState('idle')
+        setAutoCheckError('')
+      }
       setPhase('failed')
       setError(failureText(cause))
     } finally {
@@ -337,6 +396,31 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
       <p className="dsh-linux-env-status" role="status" aria-live="polite" data-linux-status="summary">
         {statusError !== '' ? tr('状态暂不可读：', 'Status unavailable: ') + statusError : statusText(status)}
       </p>
+      {autoCheckState === 'checking' && !attempting && phase !== 'failed' && (
+        <p className="dsh-linux-env-hint" role="status" data-linux-auto-check="checking">
+          {tr('正在自动查询上游最新版本…', 'Checking upstream for the latest version…')}
+        </p>
+      )}
+      {autoCheckState === 'done' && !attempting && phase !== 'failed' && status?.updateAvailable === true && status?.availableVersion && (
+        <p className="dsh-linux-env-hint" data-linux-auto-check="update-available">
+          {installed
+            ? tr(
+              '发现上游新版本 ' + status.availableVersion + '，可一键下载并覆盖更新（保留用户数据并自动清理旧版残余）。',
+              'Upstream release ' + status.availableVersion + ' is available for one-click upgrade (preserves user data and cleans old leftovers).',
+            )
+            : tr('已查询到上游最新版本 ' + status.availableVersion + '。', 'Latest upstream release: ' + status.availableVersion + '.')}
+        </p>
+      )}
+      {autoCheckState === 'done' && !attempting && phase !== 'failed' && installed && status?.updateAvailable === false && status?.updateBlocked !== true && (
+        <p className="dsh-linux-env-hint" data-linux-auto-check="up-to-date">
+          {tr('已查询上游最新版本：当前已是最新。', 'Checked upstream: already up to date.')}
+        </p>
+      )}
+      {autoCheckState === 'failed' && autoCheckError !== '' && !attempting && phase !== 'failed' && (
+        <p className="dsh-linux-env-hint" data-linux-auto-check="failed">
+          {tr('自动查询上游更新失败（不影响现有环境与重装/卸载）：', 'Automatic update check failed (existing environment, reinstall, and removal remain available): ') + autoCheckError}
+        </p>
+      )}
       {operation !== '' && (
         <p className="dsh-linux-env-hint" role="status" data-linux-operation={status?.operation}>{operation}</p>
       )}
@@ -383,7 +467,7 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
           {progress.stage === 'manifest'
             ? tr('正在读取发布清单…', 'Reading the release manifest…')
             : progress.stage === 'installing'
-              ? tr('资产已就绪，正在由引擎安装并激活…', 'Assets are ready; the engine is installing and activating…')
+              ? tr('资产已就绪，正在覆盖安装并清理旧版残余…', 'Assets are ready; installing update and cleaning old leftovers…')
               : (progress.index === undefined || progress.index === 0
                 ? tr('正在准备下载 ', 'Preparing ') + String(progress.total ?? 0) + tr(' 个资产', ' assets')
                   + (progress.bytes !== undefined && progress.bytes > 0 ? tr('（约 ', ' (about ') + fmtBytes(progress.bytes) + '）' : '')

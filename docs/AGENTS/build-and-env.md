@@ -343,3 +343,5 @@ Windows 优先用 rustc 1.99.0 的 GNU host toolchain（默认 MSVC 常缺 `link
 - 实测：仓内 2026-10-28 资产判红（缺 `dsh-fs-patch` 与 `linux-bootstrap` 等）；同版本 release 附带的 `snapshot-x86_64.tar.xz` 判绿（378 个引擎包、11 个登记插件齐全）。
 - 接线状态（0.15.0 增补）：`build-apk-debug.mjs` 在**注入之后**对注入后的 tar 跑本门禁（`--snapshot <注入后快照>`）。顺序是硬约束：未注入的快照一个插件都没有，先跑必恒红，而红的是「还没轮到注入」这个事实。`snapshot_source=release` 档跳过本门禁（理由同上节）。
 - 接线状态：`build-apk-dev-fast.mjs` 在重打包前调用本脚本并**硬阻断**：检测到缺失/不一致即构建失败，并打印缺失条目与修复步骤（下载当前 Release 的快照覆盖本地资产后重跑）。作用范围仅限 dev-fast 这条实际消费本地快照的路径；release/Fast/CI/静态检查不经过它。
+
+**快照指纹门禁**：干净工作树缺少归档时，默认档打印具名 SKIP 和计数，严格档返回失败。有归档且三份指纹一致时，打印通过和 SKIP=0。覆盖了两档输出后，SKIP 审计不再为本门禁保留缺口登记。

@@ -21,6 +21,13 @@ import java.io.File
  * 「读得到」恰恰是缺陷成立的前提，不是许可。
  */
 internal object ChooserAllowlist {
+  /** Map a canonical path to a single document within an authorized primary-storage tree. */
+  fun documentId(canonicalPath: String, root: String, treeId: String): String? {
+    if (!treeId.startsWith("primary:") || !root.startsWith("/") || !permitted(canonicalPath, listOf(root))) return null
+    if (canonicalPath == root) return treeId
+    val relative = canonicalPath.removePrefix(root).trimStart('/')
+    return if (treeId.endsWith(":")) treeId + relative else "$treeId/$relative"
+  }
 
   /**
    * 规范化路径是否落在任一允许根之下（含根本身）。

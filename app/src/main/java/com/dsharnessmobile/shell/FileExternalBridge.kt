@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
-import androidx.core.content.FileProvider
 import java.io.File
 import org.json.JSONObject
 
@@ -437,26 +436,11 @@ internal object FileExternalBridge {
       android.util.Log.w("dsh-open", kind + ": outside allowlist: " + path)
       return errorPayload(ERROR_URI_DENIED, path)
     }
-    val fileUri = try {
-      FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", file)
-    } catch (e: Exception) {
-      android.util.Log.w("dsh-open", kind + ": uri failed: " + path + " -> " + e.message)
-      return errorPayload(ERROR_URI_DENIED, e.message)
-    }
+    val fileUri = PathOpen.chooserUri(activity, file) ?: return errorPayload(ERROR_URI_DENIED, path)
     val effective = effectiveMime(mime, file.name)
     // 目录项只在父目录**也能授权**时才提供：否则文件管理器收到一个打不开的 Uri，
     // 宁可不给（用户口径：不要硬塞一个打不开的 URI）。
-    val parentUri = file.parentFile?.let { dir ->
-      if (!PathOpen.isChooserAllowedFor(activity, dir)) {
-        null
-      } else {
-        try {
-          FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", dir)
-        } catch (_: Exception) {
-          null
-        }
-      }
-    }
+    val parentUri = file.parentFile?.let { PathOpen.chooserUri(activity, it) }
     val plan = if (kind == KIND_SHARE) {
       sharePlan(fileUri.toString(), effective, parentUri?.toString())
     } else {

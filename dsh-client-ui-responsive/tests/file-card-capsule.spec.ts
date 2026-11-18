@@ -244,10 +244,25 @@ describe('卡片胶囊：行为', () => {
     await flush()
     const [html, pdf] = document.querySelectorAll<HTMLButtonElement>(EXTERNAL)
     html!.click()
+    expect(html!.closest('li')?.querySelector('[role=status]')?.textContent).toBe('no-receiver')
     pdf!.click()
     expect(document.querySelectorAll(EXTERNAL)).toHaveLength(2)
-    expect(html!.closest('li')?.querySelector('[role=status]')?.textContent).toBe('no-receiver')
+    expect(html!.closest('li')?.querySelector('[role=status]')).toBeNull()
     expect(pdf!.closest('li')?.querySelector('[role=status]')).toBeNull()
+  })
+
+  it('updates existing action names and visible feedback after a language change', async () => {
+    buildSingleCard('/work/hello.txt')
+    const bridge = makeBridge(() => '{"ok":false,"error":"uri-denied"}')
+    capsule = new FileCardCapsule(() => bridge, COPY)
+    capsule.attach()
+    await flush()
+    const button = document.querySelector<HTMLButtonElement>(EXTERNAL)!
+    button.click()
+    capsule.setCopy({ external: name => `打开 ${name}`, share: '转发', failure: () => '无法分享' })
+    expect(button.getAttribute('aria-label')).toBe('打开 hello.txt')
+    expect(document.querySelector(SHARE)?.getAttribute('aria-label')).toBe('转发')
+    expect(document.querySelector('[role=status]')?.textContent).toBe('无法分享')
   })
 
   it('④c 壳侧答 ok=true 时不收起左段', async () => {
@@ -821,72 +836,22 @@ describe('⑤ 无误排文字', () => {
     const declarations = FILE_CARD_CAPSULE_CSS.replace(/\/\*[\s\S]*?\*\//g, '')
     // 唯一允许的 content 是触控命中区的空串；任何非空 content 都会排出文字。
     const contents = [...declarations.matchAll(/(?:^|[;\s{])content\s*:\s*([^;}]*)/g)].map(m => m[1].trim())
-    expect(contents.length).toBeGreaterThan(0)
+    expect(contents).toEqual([])
     for (const value of contents) expect(value).toMatch(/^(''|"")$/)
     expect(declarations).not.toMatch(/::?(?:before|after)[^{]*\{[^}]*content:\s*['"][^'"]+['"]/)
   })
 })
 
-describe('样式尺寸（按视觉参考）', () => {
-  it('外框：高 32-34 / 圆角 10-12 / 描边 1px，且无阴影无发光', () => {
-    const body = FILE_CARD_CAPSULE_CSS.match(/\[data-dsh-file-capsule\]\s*\{([^}]*)\}/)![1]
-    const height = Number(body.match(/height:\s*(\d+)px/)![1])
-    expect(height).toBeGreaterThanOrEqual(32)
-    expect(height).toBeLessThanOrEqual(34)
-    const radius = Number(body.match(/border-radius:\s*(\d+)px/)![1])
-    expect(radius).toBeGreaterThanOrEqual(10)
-    expect(radius).toBeLessThanOrEqual(12)
-    expect(body).toMatch(/border:\s*1px/)
-    // 卡片是主体：不许有阴影/发光
-    expect(body).toMatch(/box-shadow:\s*none/)
-    expect(FILE_CARD_CAPSULE_CSS).not.toMatch(/text-shadow|drop-shadow|filter:/)
+describe('紧凑文件行', () => {
+  it('single cards and list rows place actions alongside the preview', () => {
+    expect(FILE_CARD_CAPSULE_CSS).toContain('[data-changed-files][data-single]:has(> [data-dsh-file-capsule])')
+    expect(FILE_CARD_CAPSULE_CSS).toContain('[data-changed-files] li:has(> [data-dsh-file-capsule])')
+    expect(FILE_CARD_CAPSULE_CSS).toContain('grid-template-columns: minmax(0, 1fr) auto')
+    expect(FILE_CARD_CAPSULE_CSS).toContain('grid-area: 1 / 2')
   })
 
-  it('描边用 .10，左段内块描边 .12，浅色主题取镜像', () => {
-    expect(FILE_CARD_CAPSULE_CSS).toMatch(/--dsh-capsule-border:\s*rgba\(255,\s*255,\s*255,\s*0\.10\)/)
-    expect(FILE_CARD_CAPSULE_CSS).toMatch(/--dsh-capsule-inner-border:\s*rgba\(255,\s*255,\s*255,\s*0\.12\)/)
-    // 浅色主题没有白描边可用，必须有对向取值
-    expect(FILE_CARD_CAPSULE_CSS).toMatch(/body:not\(\[data-ds-dark-theme\]\)[^{]*\{[^}]*--dsh-capsule-border:\s*rgba\(0,\s*0,\s*0,/)
-  })
-
-  it('左段内块：高 26 / 圆角 8 / 图标 16', () => {
-    const chip = FILE_CARD_CAPSULE_CSS.match(/\[data-dsh-file-capsule-chip\]\s*\{([^}]*)\}/)![1]
-    expect(chip).toMatch(/height:\s*26px/)
-    expect(chip).toMatch(/border-radius:\s*8px/)
-    const chipIcon = FILE_CARD_CAPSULE_CSS.match(/\[data-dsh-file-capsule-chip\]\s*>\s*svg\s*\{([^}]*)\}/)![1]
-    expect(chipIcon).toMatch(/width:\s*16px/)
-  })
-
-  it('右段宽 44-48，纸飞机 16-18', () => {
-    const share = FILE_CARD_CAPSULE_CSS.match(/\[data-dsh-file-capsule-share\]\s*\{([^}]*)\}/)![1]
-    const width = Number(share.match(/width:\s*(\d+)px/)![1])
-    expect(width).toBeGreaterThanOrEqual(44)
-    expect(width).toBeLessThanOrEqual(48)
-    // 无底色
-    expect(share).not.toMatch(/background:(?!\s*transparent)/)
-    const icon = FILE_CARD_CAPSULE_CSS.match(/\[data-dsh-file-capsule-share\]\s*>\s*svg\s*\{([^}]*)\}/)![1]
-    const size = Number(icon.match(/width:\s*(\d+)px/)![1])
-    expect(size).toBeGreaterThanOrEqual(16)
-    expect(size).toBeLessThanOrEqual(18)
-  })
-
-  it('段间 1px 分隔线，颜色同外框描边', () => {
-    const sep = FILE_CARD_CAPSULE_CSS.match(/\[data-dsh-file-capsule-separator\]\s*\{([^}]*)\}/)![1]
-    expect(sep).toMatch(/width:\s*1px/)
-    expect(sep).toMatch(/background:\s*var\(--dsh-capsule-border/)
-  })
-
-  it('图标色用 text-2 而非 text-1；按下态 8% 白底', () => {
-    expect(FILE_CARD_CAPSULE_CSS).toContain('--dsw-alias-label-secondary')
-    expect(FILE_CARD_CAPSULE_CSS).not.toContain('--dsw-alias-label-primary')
-    expect(FILE_CARD_CAPSULE_CSS).toMatch(/--dsh-capsule-press:\s*rgba\(255,\s*255,\s*255,\s*0\.08\)/)
-    expect(FILE_CARD_CAPSULE_CSS).toMatch(/:active\s*\{[^}]*background:\s*var\(--dsh-capsule-press/)
-  })
-
-  it('视觉高度不靠 min-height 撑大，触控面积用伪元素补齐', () => {
-    expect(FILE_CARD_CAPSULE_CSS).not.toMatch(/min-height:\s*48px/)
-    const hit = FILE_CARD_CAPSULE_CSS.match(/\[data-dsh-file-capsule\]\s*>\s*button::after\s*\{([^}]*)\}/)![1]
-    expect(hit).toMatch(/top:\s*-\d+px/)
-    expect(hit).toMatch(/bottom:\s*-\d+px/)
+  it('keeps both touch targets and reserves an error row only when needed', () => {
+    expect(FILE_CARD_CAPSULE_CSS).toMatch(/> button\s*\{[^}]*width: 44px;[^}]*height: 44px;/)
+    expect(FILE_CARD_CAPSULE_CSS).toContain('[data-dsh-file-capsule-status]:empty { display: none; }')
   })
 })

@@ -199,6 +199,8 @@ internal class OverlayCommandDrawer(
 
   /** 上一次渲染的列表签名：列表文本没变就不重建行（本类被高频 render 时不产生子树重建）。 */
   private var lastSignature: String? = null
+  /** 空列表/加载/失败态的展示文案；变化时必须重绘，不能沿用旧标签。 */
+  private var lastEmptyLabel = ""
 
   init {
     // 瓦片在 init 里装配：attachRow 的字段初始化必须先完成，否则 attachTile 里回读
@@ -223,11 +225,14 @@ internal class OverlayCommandDrawer(
     commands: List<OverlayCommandItem>,
     onPick: (String) -> Unit,
     onAttach: (String) -> Unit,
+    emptyLabel: String? = null,
   ) {
     onPickCb = onPick
     onAttachCb = onAttach
-    val signature = commands.joinToString("\u0001") { it.name + "\u0002" + it.label + "\u0002" + it.description }
+    val label = emptyLabel ?: UiText.t(context, "列表为空", "Nothing here")
+    val signature = label + "\u0000" + commands.joinToString("\u0001") { it.name + "\u0002" + it.label + "\u0002" + it.description }
     lastCommands = commands
+    if (label != lastEmptyLabel) { lastEmptyLabel = label; lastSignature = "" }
     if (signature == lastSignature) return
     lastSignature = signature
     rebuildRows()
@@ -274,7 +279,7 @@ internal class OverlayCommandDrawer(
     reveal.settleAll()
     listColumn.removeAllViews()
     if (rows.isEmpty()) {
-      listColumn.addView(emptyRow())
+      listColumn.addView(emptyRow(lastEmptyLabel))
       return
     }
     var index = 0
@@ -355,9 +360,9 @@ internal class OverlayCommandDrawer(
   }
 
   /** 空列表占位：中性文案，不暗示这里「应该是命令」。 */
-  private fun emptyRow(): View = TextView(context).apply {
+  private fun emptyRow(label: String): View = TextView(context).apply {
     tag = "overlay-drawer-empty"
-    text = UiText.t(context, "列表为空", "Nothing here")
+    text = label
     textSize = 11f
     setTextColor(colorTextSecondary)
     setPadding(dp(16), dp(12), dp(16), dp(12))

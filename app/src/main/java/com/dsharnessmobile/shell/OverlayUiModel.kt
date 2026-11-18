@@ -348,6 +348,24 @@ internal object OverlayUiModel {
   fun setCompletionLabel(m: OverlayCardModel, label: String): OverlayCardModel =
     m.copy(completionLabel = label, completionKind = "")
 
+  /**
+   * 顶部卡片的状态文案（渲染层唯一真源）。
+   *
+   * 连接维优先于轮次维：离线只说明引擎没连上，不能把一次正常失败的轮次显示成「引擎离线」；
+   * 反过来重连后也不能继续展示离线文案。渲染层不得再自己写一份 when 分支。
+   */
+  fun cardStateLabel(m: OverlayCardModel, english: Boolean, elapsed: String = ""): String {
+    if (!m.engineOnline) return UiText.t(english, "引擎离线", "Engine offline")
+    return when (m.agent) {
+      OverlayAgentState.RUNNING -> UiText.t(english, "工作中", "Working") + elapsed
+      OverlayAgentState.WAITING -> UiText.t(english, "等待你的回答", "Waiting for you")
+      OverlayAgentState.ERROR ->
+        completionLabelOf(m, english).ifEmpty { UiText.t(english, "本轮失败", "Last turn failed") }
+      OverlayAgentState.IDLE ->
+        completionLabelOf(m, english).ifEmpty { UiText.t(english, "空闲", "Idle") }
+    }
+  }
+
   /** 新视图按语义切语言；旧调用方的缓存label及自定义label兼容原样保留。 */
   fun completionLabelOf(m: OverlayCardModel, english: Boolean): String =
     if (m.completionKind.isBlank()) m.completionLabel

@@ -325,12 +325,22 @@ describe('LinuxEnvironmentSection', () => {
   }, 20000)
 
   it('disables the primary action when the installed version is current and keeps reinstall available', async () => {
-    // 宿主状态可变：手动 check 之后才报 updateAvailable。
-    let updateAvailable = false
-    const status = (): Record<string, unknown> => ({ ...STATUS_INSTALLED, updateAvailable, availableVersion: updateAvailable ? '1.3.0' : undefined })
+    // 宿主状态可变：首轮自动 check 时已是最新（updateAvailable=false），之后上游才发 1.3.0。
+    let upstreamReleased = false
+    let checkCount = 0
+    const status = (): Record<string, unknown> => ({
+      ...STATUS_INSTALLED,
+      updateAvailable: upstreamReleased,
+      availableVersion: upstreamReleased ? '1.3.0' : undefined,
+    })
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url.endsWith('/status')) return { ok: true, status: 200, json: async () => status() }
-      if (url.endsWith('/check')) { updateAvailable = true; return { ok: true, status: 200, json: async () => status() } }
+      if (url.endsWith('/check')) {
+        checkCount += 1
+        // 挂载自动 check（第 1 次）报当前已是最新；手动点击 check（第 2 次）时上游已发 1.3.0。
+        if (checkCount >= 2) upstreamReleased = true
+        return { ok: true, status: 200, json: async () => status() }
+      }
       throw new Error('unexpected fetch: ' + url)
     }))
 
@@ -339,6 +349,7 @@ describe('LinuxEnvironmentSection', () => {
     expect(primary.disabled).toBe(true)
     expect(primary.getAttribute('data-linux-primary')).toBe('current')
     expect(primary.textContent).toContain('已是最新版本')
+    expect(element.querySelector('[data-linux-auto-check="up-to-date"]')).not.toBeNull()
     // 重新安装与检查更新不受影响。
     expect((element.querySelector('[data-linux-action="reinstall"]') as HTMLButtonElement).disabled).toBe(false)
     const check = element.querySelector('[data-linux-action="check"]') as HTMLButtonElement
@@ -352,6 +363,135 @@ describe('LinuxEnvironmentSection', () => {
     expect(primary.disabled).toBe(false)
     expect(primary.getAttribute('data-linux-primary')).toBe('update')
     expect(primary.textContent).toContain('1.3.0')
+  }, 20000)
+
+  it('auto-queries upstream on open, deduplicates 2s polls, and performs one-click upgrade to the new release', async () => {
+    let installedVersion = '1.2.0'
+    let updateAvailable = false
+    const calls: string[] = []
+    const nextManifest = {
+      ...MANIFEST,
+      version: '1.3.0',
+      plugins: { runtime: { url: 'https://github.com/o/r/releases/download/v1.3.0/linux-runtime-plugin.tar.xz', sha256: 'e'.repeat(64), size: 12 } },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      calls.push(url)
+      if (url.endsWith('/status')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ...STATUS_INSTALLED,
+            version: installedVersion,
+            updateAvailable,
+            availableVersion: updateAvailable ? '1.3.0' : undefined,
+          }),
+        }
+      }
+      if (url.endsWith('/check')) {
+        updateAvailable = installedVersion !== '1.3.0'
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ...STATUS_INSTALLED,
+            version: installedVersion,
+            updateAvailable,
+            availableVersion: '1.3.0',
+          }),
+        }
+      }
+      if (url.endsWith('/manifest')) {
+        return { ok: true, status: 200, json: async () => ({ manifest: nextManifest }) }
+      }
+      if (url.endsWith('/install')) {
+        installedVersion = '1.3.0'
+        updateAvailable = false
+        return { ok: true, status: 200, json: async () => ({ ...STATUS_INSTALLED, version: '1.3.0', updateAvailable: false }) }
+      }
+      throw new Error('unexpected fetch: ' + url)
+    }))
+    const { prepared, bridge } = makeBridge()
+    Object.defineProperty(window, 'androidBridge', { value: bridge, configurable: true, writable: true })
+
+    vi.useFakeTimers()
+    let element!: HTMLElement
+    try {
+      host = document.createElement('div')
+      document.body.appendChild(host)
+      root = createRoot(host)
+      await act(async () => { root!.render(<LinuxEnvironmentSection close={vi.fn()} />) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(10) })
+      element = host
+
+      // Opening the page automatically queried upstream once and enabled the update button.
+      expect(calls.filter((u) => u.endsWith('/check')).length).toBe(1)
+      const primary = element.querySelector('[data-linux-action="update"]') as HTMLButtonElement
+      expect(primary.disabled).toBe(false)
+      expect(primary.textContent).toContain('1.3.0')
+      expect(element.querySelector('[data-linux-auto-check="update-available"]')).not.toBeNull()
+
+      // Across multiple 2s status polls and visibility events, /check must NOT re-trigger.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6500)
+        document.dispatchEvent(new Event('visibilitychange'))
+        await vi.advanceTimersByTimeAsync(10)
+      })
+      expect(calls.filter((u) => u.endsWith('/status')).length).toBeGreaterThanOrEqual(4)
+      expect(calls.filter((u) => u.endsWith('/check')).length).toBe(1)
+
+      // One-click upgrade prepares the new release's assets and posts install without re-hitting /check.
+      await act(async () => {
+        primary.click()
+        await vi.advanceTimersByTimeAsync(100)
+      })
+      expect(prepared[0].sha256).toBe('e'.repeat(64))
+      expect(calls.some((u) => u.endsWith('/install'))).toBe(true)
+      expect(calls.filter((u) => u.endsWith('/check')).length).toBe(1)
+      expect(element.querySelector('[data-linux-ready="true"]')).not.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  }, 20000)
+
+  it('keeps existing controls operable in zh and en when the automatic check fails offline', async () => {
+    for (const [lang, expectedHint] of [['zh', '自动查询上游更新失败'], ['en', 'Automatic update check failed']] as const) {
+      document.documentElement.lang = lang
+      const calls: string[] = []
+      vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+        calls.push(url)
+        if (url.endsWith('/status')) return { ok: true, status: 200, json: async () => STATUS_INSTALLED }
+        if (url.endsWith('/check')) {
+          return { ok: false, status: 500, json: async () => ({ error: 'check failed', detail: 'GitHub request failed (403)' }) }
+        }
+        if (url.endsWith('/reinstall')) return { ok: true, status: 200, json: async () => STATUS_INSTALLED }
+        throw new Error('unexpected fetch: ' + url)
+      }))
+
+      const close = vi.fn()
+      const element = await render(close)
+      expect(element.querySelector('[data-linux-ready="true"]')).not.toBeNull()
+      const autoHint = element.querySelector('[data-linux-auto-check="failed"]')
+      expect(autoHint?.textContent).toContain(expectedHint)
+      expect(autoHint?.textContent).toContain('GitHub request failed (403)')
+      expect((element.querySelector('[data-linux-action="reinstall"]') as HTMLButtonElement).disabled).toBe(false)
+      expect((element.querySelector('[data-linux-action="uninstall"]') as HTMLButtonElement).disabled).toBe(false)
+      expect((element.querySelector('[data-linux-action="back"]') as HTMLButtonElement).disabled).toBe(false)
+
+      await act(async () => {
+        (element.querySelector('[data-linux-action="reinstall"]') as HTMLButtonElement).click()
+        await new Promise((resolve) => { setTimeout(resolve, 50) })
+      })
+      expect(calls.some((u) => u.endsWith('/reinstall'))).toBe(true)
+      // Offline reinstall must preserve the failed check state rather than claiming up-to-date.
+      expect(element.querySelector('[data-linux-auto-check="up-to-date"]')).toBeNull()
+      expect(element.querySelector('[data-linux-auto-check="failed"]')).not.toBeNull()
+
+      await act(async () => { root!.unmount() })
+      root = undefined
+      host?.remove()
+      host = undefined
+    }
   }, 20000)
 
   it('keeps the one-tap install action enabled before anything is installed', async () => {

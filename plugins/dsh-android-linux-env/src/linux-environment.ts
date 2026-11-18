@@ -24,6 +24,8 @@ export interface BootstrapStatus {
   enabled?: boolean
   pluginReleaseUrls?: { bootstrap?: string; runtime?: string }
   lastCheckAt?: string | null
+  checkError?: string | null
+  lastCheckError?: string | null
   error?: string | null
   /** Earlier proposal; kept accepted so an older bootstrap still normalizes. */
   autoUpdateEnabled?: boolean
@@ -361,6 +363,7 @@ export function normalizeLinuxStatus(status: BootstrapStatus) {
     updateBlocked: status.updateBlocked,
     latestReleaseVersion: status.latestReleaseVersion ?? undefined,
     operation: status.operation ?? undefined,
+    ...((status.checkError ?? status.lastCheckError) ? { checkError: status.checkError ?? status.lastCheckError } : {}),
     error: status.error ?? status.lastError ??
       (updateBlocked ? '此系统版本与当前应用不兼容，暂不能安装更新。' : undefined),
   }

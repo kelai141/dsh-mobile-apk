@@ -101,6 +101,8 @@ internal class OverlayV2(private val svc: OverlayService) {
   private var entryParams: WindowManager.LayoutParams? = null
   private var entryX = 0
   private var entryY = 0
+  /** 细条当前贴哪一边；转换形态时沿用，避免左侧球被强制弹回右侧。 */
+  private var entryStripRight = true
   private var card: OverlayCardView? = null
   private var cardParams: WindowManager.LayoutParams? = null
   private var pill: OverlayPillView? = null
@@ -114,7 +116,16 @@ internal class OverlayV2(private val svc: OverlayService) {
   private var pageState: OverlayPageHost.PageState? = null
   private var pageCommands: List<OverlayPageHost.PageCommand> = emptyList()
   private var drawerMode = DrawerMode.NONE
+  /** 选择器异步加载态：空列表不等于「没有内容」，先区分加载中/失败/真空。 */
+  private var drawerLoading = false
+  private var drawerError = ""
+  private var drawerRetryToken = 0
+  /** 会话选择器里「新建会话」行的稳定 id，不会与真实会话 id 冲突。 */
+  private val newConversationItemId = "__dsh_new_conversation__"
   private var cardExpanded = false
+  /** 收卡片时的窗口代次与进行中标记：淡出期间不得让迟到的移除回调收掉新卡片。 */
+  private var cardWindowGeneration = 0
+  private var cardClosing = false
   private var entryHiddenByUser = false
   private var hostForeground = OverlayHostVisibility.foreground
   private var selectedPendingEventId = ""
@@ -188,10 +199,12 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (styleEnum == OverlayEntryStyle.STRIP) {
       w = OverlayWindowFrames.stripWindowWidthPx(s.density)
       h = OverlayWindowFrames.stripWindowHeightPx(s.density)
-      // 细条贴边：默认贴右（上次拖到哪边就继续贴那边，右侧是主手位）。
+      // 细条贴边：默认贴右，从上一次的位置判断该贴哪边（左侧同样必须成立）。
       // 首次挂载必须离开 y=0：那是状态栏的触摸死区，条会「看得见点不到」。
+      val right = if (initialEntry) true else entryX + w / 2 >= s.widthPx / 2
+      entryStripRight = right
       val placement = OverlayWindowFrames.stripPlacement(
-        s, true, if (initialEntry) s.heightPx / 3 else entryY, h,
+        s, right, if (initialEntry) s.heightPx / 3 else entryY, h,
       )
       entryX = placement.first
       entryY = placement.second
@@ -285,7 +298,7 @@ internal class OverlayV2(private val svc: OverlayService) {
           val dx = ev.rawX - downRawX
           val dy = ev.rawY - downRawY
           when (router.onUp(dx, dy, SystemClock.uptimeMillis())) {
-            EntryGesture.DRAG_END -> settleEntry(lp, strip)
+            EntryGesture.DRAG_END -> settleEntry(lp, strip, dx)
             EntryGesture.TAP -> {
               // 先把「这一次要不要展开」算成一个明确的决定，再交给 onEntryTap：
               // 同一次空白触摸已经收掉了卡片时，这里必须是 false。
@@ -322,11 +335,31 @@ internal class OverlayV2(private val svc: OverlayService) {
     windows.update(OverlayWindows.Slot.ENTRY, lp)
   }
 
-  private fun settleEntry(lp: WindowManager.LayoutParams, strip: Boolean) {
+  /**
+   * 拖动结算：球贴边后继续朝边框方向拖 = 收成白条；白条朝屏内拖 = 拉回球。
+   *
+   * 语义来自「常驻入口只有一种形态会误导」：贴边的球既挡点击又挡系统手势，
+   * 用户朝边框推它就是在说「收起来」，不是「再往边上挪 2px」。
+   */
+  private fun settleEntry(lp: WindowManager.LayoutParams, strip: Boolean, dx: Float = 0f) {
     val s = screen()
+    val density = s.density
+    val pull = 24f * density
     if (strip) {
+      val right = entryStripRight
+      val inward = if (right) dx <= -pull else dx >= pull
+      if (inward) {
+        style = STYLE_BALL
+        prefs(svc).edit().putString(KEY_ENTRY_STYLE, style).apply()
+        val ball = (OverlayWindowFrames.ENTRY_BALL_DP * density).toInt()
+        entryX = if (right) (s.widthPx - ball).coerceAtLeast(0) else 0
+        entryY = OverlayWindowFrames.clampPillY(lp.y, ball, ball, s)
+        removeEntryWindow()
+        showEntry()
+        hapticConfirm(entryView?.view)
+        return
+      }
       // 松手后吸附到最近的水平边缘：细条必须是「贴边拉手」，浮在屏中间毫无意义。
-      val right = lp.x + lp.width / 2 >= s.widthPx / 2
       val placement = OverlayWindowFrames.stripPlacement(s, right, entryY, lp.height)
       entryX = placement.first
       entryY = placement.second
@@ -339,6 +372,22 @@ internal class OverlayV2(private val svc: OverlayService) {
       entryY = OverlayWindowFrames.clampPillY(lp.y, lp.width, lp.height, s)
       lp.x = entryX
       lp.y = entryY
+      val edge = (8f * density).toInt()
+      val nearRight = lp.x + lp.width >= s.widthPx - edge
+      val nearLeft = lp.x <= edge
+      val collapseRight = dx >= pull && nearRight
+      val collapseLeft = dx <= -pull && nearLeft
+      if (collapseRight || collapseLeft) {
+        style = STYLE_STRIP
+        entryStripRight = collapseRight
+        prefs(svc).edit().putString(KEY_ENTRY_STYLE, style).apply()
+        entryY = OverlayWindowFrames.clampStripY(lp.y, OverlayWindowFrames.stripWindowHeightPx(density), s)
+        entryX = if (collapseRight) s.widthPx else 0
+        removeEntryWindow()
+        showEntry()
+        hapticConfirm(entryView?.view)
+        return
+      }
     }
     windows.update(OverlayWindows.Slot.ENTRY, lp)
   }
@@ -350,10 +399,17 @@ internal class OverlayV2(private val svc: OverlayService) {
    * TAP；如果这里只看 cardVisible()，就会立刻把刚收掉的卡片重新打开 —— 用户点空白反而弹出卡片。
    */
   private fun onEntryTap(open: Boolean) {
+    hapticConfirm(entryView?.view)
     if (open) showCard() else hideCard()
   }
 
+  /** 轻量确认震动：只挂在真实用户动作上，不跟渲染或轮询绑定。 */
+  private fun hapticConfirm(view: View?) {
+    view?.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM)
+  }
+
   private fun onEntryLongPress() {
+    hapticConfirm(entryView?.view)
     // 长按 = 卡片 + 输入区同时展开；**不自动聚焦输入框**（刚长按完就弹键盘会挡住卡片）。
     showCard()
     showComposer(focusInput = false)
@@ -404,6 +460,14 @@ internal class OverlayV2(private val svc: OverlayService) {
   private fun cardVisible(): Boolean = windows.contains(OverlayWindows.Slot.CARD)
 
   internal fun showCard() {
+    // 淡出途中又被打开：先撤销旧移除，否则几帧后回调会把刚打开的卡片收掉。
+    if (cardClosing) {
+      cardWindowGeneration++
+      card?.view?.animate()?.cancel()
+      card?.view?.alpha = 1f
+      card?.view?.translationY = 0f
+      cardClosing = false
+    }
     if (destroyed) return
     if (card == null) {
       val view = OverlayCardView(svc, object : OverlayCardListener {
@@ -412,6 +476,8 @@ internal class OverlayV2(private val svc: OverlayService) {
           handleCardHandleDrag(phase, dyPx, velocityPxPerS)
         override fun onCardPendingAction(eventId: String, kind: String, approve: Boolean) =
           onPendingAction(eventId, kind, approve)
+
+        override fun onCardContentHeightChanged() = resizeCardIfNeeded()
         override fun onCardHideEntry() = hideEntry()
       })
       card = view
@@ -443,6 +509,10 @@ internal class OverlayV2(private val svc: OverlayService) {
     }
     cardParams = lp
     renderCard()
+    // 首帧必须在 addView 之前就压到透明位：addView 后下一帧才会跑属性动画，
+    // 中间那一帧会以满透明度合成，用户看到的就是「啪一下闪现」。
+    c.view.alpha = 0f
+    c.view.translationY = -8 * s.density
     val ok = windows.add(OverlayWindows.Slot.CARD, c.view, lp)
     if (!ok) {
       cardParams = null
@@ -450,8 +520,7 @@ internal class OverlayV2(private val svc: OverlayService) {
       return
     }
     c.view.alpha = 0f
-    val rise = 8 * s.density
-    c.view.translationY = -rise
+
     if (DSUiAnimationsEnabled()) {
       c.view.animate().alpha(1f).translationY(0f).setDuration(CARD_ANIM_MS).start()
     } else {
@@ -463,12 +532,39 @@ internal class OverlayV2(private val svc: OverlayService) {
   }
 
 
-  internal fun hideCard() {
+  internal fun hideCard() { hideCard(animated = true) }
+
+  internal fun hideCard(animated: Boolean) {
     if (!cardVisible()) return
     stopClock()
-    windows.remove(OverlayWindows.Slot.CARD)
-    cardParams = null
-    cardExpanded = false
+    val c = card
+    val generation = ++cardWindowGeneration
+    cardClosing = true
+    val finish = {
+      if (generation == cardWindowGeneration && !destroyed) {
+        cardClosing = false
+        windows.remove(OverlayWindows.Slot.CARD)
+        cardParams = null
+        cardExpanded = false
+      }
+    }
+    if (!animated || c == null || !DSUiAnimationsEnabled()) {
+      c?.view?.animate()?.cancel()
+      c?.view?.alpha = 1f
+      c?.view?.translationY = 0f
+      finish()
+      return
+    }
+    // 收起和展开共用一条位移/淡出通道：硬 remove 会让卡片整块消失，下方内容像被「跳」了一下。
+    c.view.animate().cancel()
+    c.view.animate().alpha(0f).translationY(-8f * screen().density)
+      .setDuration(CARD_ANIM_MS)
+      .setInterpolator(OverlayEasing.ACCELERATE.interpolator())
+      .withEndAction {
+        c.view.alpha = 1f
+        c.view.translationY = 0f
+        finish()
+      }.start()
   }
 
   /**
@@ -493,8 +589,10 @@ internal class OverlayV2(private val svc: OverlayService) {
   }
 
   private fun collapseToPill() {
-    hideCard()
-    showPill()
+    // 记录卡片顶边：药丸从卡片原位淡入，而不是跳到卡片下沿，收起时不会「整体下移一级」。
+    val anchor = cardParams?.y
+    hideCard(animated = true)
+    showPill(anchor)
   }
 
   private fun handleCardHandleDrag(phase: OverlayDragPhase, dyPx: Float, velocityPxPerS: Float) {
@@ -565,16 +663,19 @@ internal class OverlayV2(private val svc: OverlayService) {
 
   private fun pillVisible(): Boolean = windows.contains(OverlayWindows.Slot.PILL)
 
-  private fun showPill() {
+  private fun showPill(anchorTopPx: Int? = null) {
     if (destroyed) return
     if (pill == null) {
       pill = OverlayPillView(svc, object : OverlayPillListener {
         override fun onPillTap() {
+          hapticConfirm(pill?.view)
           hidePill(false)
           showCard()
         }
-        override fun onPillDrag(phase: OverlayDragPhase, dxPx: Float, dyPx: Float, velocityPxPerS: Float) =
+        override fun onPillDrag(phase: OverlayDragPhase, dxPx: Float, dyPx: Float, velocityPxPerS: Float) {
           handlePillDrag(phase, dxPx, dyPx, velocityPxPerS)
+          if (phase == OverlayDragPhase.UP) hapticConfirm(pill?.view)
+        }
       })
     }
     val p = pill ?: return
@@ -588,7 +689,10 @@ internal class OverlayV2(private val svc: OverlayService) {
     val w = OverlayWindowFrames.pillWidthPx(p.measureContentWidthPx(maxPillWidth), s)
     val posX = OverlayWindowFrames.clampPillX((s.widthPx - w) / 2, w, s)
     val posY = OverlayWindowFrames.clampPillY(
-      cardParams?.let { it.y + it.height + (8 * s.density).toInt() } ?: (s.heightPx / 3), w, h, s,
+      anchorTopPx ?: cardParams?.let { it.y + it.height + (8 * s.density).toInt() } ?: (s.heightPx / 3),
+      w,
+      h,
+      s,
     )
     val lp = WindowManager.LayoutParams(
       w, h,
@@ -602,6 +706,7 @@ internal class OverlayV2(private val svc: OverlayService) {
       y = posY
     }
     pillParams = lp
+    p.prepareEnter()
     if (!windows.add(OverlayWindows.Slot.PILL, p.view, lp)) {
       pillParams = null
       toast(t("状态药丸创建失败", "Could not create the status pill"))
@@ -850,6 +955,8 @@ internal class OverlayV2(private val svc: OverlayService) {
       }
       composerParams = lp
       renderComposer()
+      // 首帧透明位先于 addView，避免满透明度那一帧的闪现。
+      c.prepareEnter()
       if (!windows.add(OverlayWindows.Slot.COMPOSER, c.view, lp)) {
         composerParams = null
         toast(t("输入区创建失败", "Could not create the input area"))
@@ -1145,6 +1252,7 @@ internal class OverlayV2(private val svc: OverlayService) {
 
   /** 「＋」切换抽屉：命令 → 会话 → 工作区 → 收起，循环一格。 */
   private fun toggleDrawer() {
+    hapticConfirm(composer?.view)
     if (!composerVisible()) return
     when (drawerMode) {
       DrawerMode.NONE -> {
@@ -1168,6 +1276,7 @@ internal class OverlayV2(private val svc: OverlayService) {
 
   /** 返回键三段式：先收抽屉，再收输入窗；不发送、不停止后台任务。 */
   private fun onComposerBackPressed() {
+
     // 答题态下按返回 = 放弃回答：把进入前留档的消息草稿还回去，不能吞掉用户写了一半的话。
     if (messageDraftBeforeAnswer != null) {
       leaveQuestionAnswer(false)
@@ -1524,6 +1633,18 @@ internal class OverlayV2(private val svc: OverlayService) {
   private fun onDrawerPick(name: String) {
     when (drawerMode) {
       DrawerMode.SESSIONS -> {
+        if (name == newConversationItemId) {
+          hapticConfirm(composer?.view)
+          if (OverlayPageHost.available()) {
+            OverlayPageHost.newSession { ok ->
+              if (!ok) svc.flashStatus(t("无法新建会话", "Could not start a new conversation"))
+            }
+          } else {
+            svc.flashStatus(t("新建会话需要主界面在线", "Start a conversation in the main app"))
+          }
+          renderComposer()
+          return
+        }
         drawerMode = DrawerMode.NONE
         if (OverlayPageHost.available()) {
           OverlayPageHost.openSession(name) { ok ->
@@ -1561,24 +1682,66 @@ internal class OverlayV2(private val svc: OverlayService) {
 
   private fun openSessionPicker() {
     drawerMode = DrawerMode.SESSIONS
+    drawerLoading = true
+    drawerError = ""
+    sessionChoices = emptyList()
     renderComposer()
     syncDrawerWindow()
     // 会话列表复用页面 state 的 workspaces/session 字段不够（只有当前会话），
     // 这里走 page host 的会话列表（页面真源）；页面不可用时退回 RPC session/list。
+    loadSessions(++drawerRetryToken, 0)
+  }
+
+  /**
+   * 拉会话列表：pending 不是空列表，先短轮询再判失败，失败后收起并提示。
+   *
+   * 为什么不在打开时就把空数组当结果：页面宿主在未就绪时返回 ok:false，
+   * 直接渲染会显示「列表为空」，而用户根本没看到加载态；失败也不该留一个空 sheet。
+   */
+  private fun loadSessions(token: Int, attempt: Int) {
     if (OverlayPageHost.available()) {
-      OverlayPageHost.sessions { list ->
-        sessionChoices = list
-        renderComposer()
+      OverlayPageHost.sessionsOrNull { list ->
+        if (destroyed || token != drawerRetryToken || drawerMode != DrawerMode.SESSIONS) return@sessionsOrNull
+        when {
+          list != null -> {
+            drawerLoading = false
+            drawerError = ""
+            sessionChoices = list
+            renderComposer()
+          }
+          attempt < 4 -> main.postDelayed({ loadSessions(token, attempt + 1) }, 120L)
+          else -> failPicker(t("会话列表不可用", "Sessions unavailable"))
+        }
       }
     } else {
-      fetchSessionsFromRpc()
+      fetchSessionsFromRpc(token)
     }
+  }
+
+  /**
+   * 选择器失败或内容真空：显示真实状态后收起，不留下一个永远空着的浮层。
+   * 只在同一代次、同一模式仍有效时执行，避免关闭动画期间又打开的选择器被旧回调收掉。
+   */
+  private fun failPicker(message: String) {
+    drawerLoading = false
+    drawerError = message
+    renderComposer()
+    val mode = drawerMode
+    main.postDelayed({
+      if (destroyed || mode == DrawerMode.NONE || drawerMode != mode) return@postDelayed
+      toast(message)
+      drawerMode = DrawerMode.NONE
+      renderComposer()
+      refreshComposerWindowHeight()
+      hideDrawer(true)
+    }, 1200L)
   }
 
   private var sessionChoices: List<OverlayPageHost.PageSession> = emptyList()
 
-  private fun fetchSessionsFromRpc() {
+  private fun fetchSessionsFromRpc(token: Int) {
     svc.postRpc("session/list", JSONObject().put("_request", JSONObject())) { code, body ->
+      if (destroyed || token != drawerRetryToken || drawerMode != DrawerMode.SESSIONS) return@postRpc
       val out = ArrayList<OverlayPageHost.PageSession>()
       if (code == 200) {
         try {
@@ -1602,6 +1765,12 @@ internal class OverlayV2(private val svc: OverlayService) {
         } catch (_: Throwable) {
         }
       }
+      if (code != 200) {
+        failPicker(t("会话列表不可用", "Sessions unavailable"))
+        return@postRpc
+      }
+      drawerLoading = false
+      drawerError = ""
       sessionChoices = out
       renderComposer()
     }
@@ -1609,9 +1778,36 @@ internal class OverlayV2(private val svc: OverlayService) {
 
   private fun openWorkspacePicker() {
     drawerMode = DrawerMode.WORKSPACES
-    if (pageState?.workspaces.isNullOrEmpty()) refreshPageState()
+    drawerLoading = true
+    drawerError = ""
     renderComposer()
     syncDrawerWindow()
+    loadWorkspaces(++drawerRetryToken, 0)
+  }
+
+  /**
+   * 工作区列表的三态来源是页面宿主的 workspacesReady/workspacesError：
+   * 它们分别表示「还在加载」与「读取失败」，不能都折叠成空数组。
+   */
+  private fun loadWorkspaces(token: Int, attempt: Int) {
+    refreshPageState {
+      if (destroyed || token != drawerRetryToken || drawerMode != DrawerMode.WORKSPACES) return@refreshPageState
+      val s = pageState
+      when {
+        s == null -> failPicker(t("工作区列表不可用", "Workspaces unavailable"))
+        s.workspacesError.isNotEmpty() -> failPicker(t("工作区列表不可用", "Workspaces unavailable"))
+        !s.workspacesReady -> {
+          if (attempt < 3) main.postDelayed({ loadWorkspaces(token, attempt + 1) }, 150L)
+          else failPicker(t("工作区列表不可用", "Workspaces unavailable"))
+        }
+        else -> {
+          drawerLoading = false
+          drawerError = ""
+          renderComposer()
+          if (s.workspaces.isEmpty()) failPicker(t("暂无工作区", "No workspaces"))
+        }
+      }
+    }
   }
 
   // ── 数据接入 ────────────────────────────────────────────────────────────
@@ -1655,7 +1851,8 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (engineRunningCache == running && model.engineOnline == running) return
     engineRunningCache = running
     model = OverlayUiModel.onEngineStatus(model, running, System.currentTimeMillis())
-    if (!running) model = model.copy(agent = OverlayAgentState.ERROR)
+    // 连接维只改 engineOnline：把 agent 写成 ERROR 会让重连后仍停在失败态，
+    // 也会把一次正常的轮次失败误报成「引擎离线」（见 OverlayUiModel.cardStateLabel）。
     if (running) startClockIfNeeded() else stopClock()
     scheduleRender()
   }
@@ -1777,19 +1974,12 @@ internal class OverlayV2(private val svc: OverlayService) {
       val sec = ((System.currentTimeMillis() - model.turnStartedAt) / 1000L).coerceAtLeast(0L)
       " · " + sec + "s"
     } else ""
-    val stateLabel = when (model.agent) {
-      OverlayAgentState.RUNNING -> t("工作中", "Working") + elapsed
-      OverlayAgentState.WAITING -> t("等待你的回答", "Waiting for you")
-      OverlayAgentState.ERROR -> t("引擎离线", "Engine offline")
-      // 完成态文案走语义翻译，不改 model：模型是跨层真源，渲染层就地改写会让下一次
-      // 状态比较误判「已变化」，触发多余的重建。
-      OverlayAgentState.IDLE -> {
-        val completionLabel = OverlayUiModel.completionLabelOf(model, english)
-        when {
-          completionLabel.isNotEmpty() -> completionLabel
-          else -> t("空闲", "Idle")
-        }
-      }
+    // 完成态文案走语义翻译，不改 model：离线时仍由 cardStateLabel 优先给出离线文案。
+    val completionLabel = OverlayUiModel.completionLabelOf(model, english)
+    val stateLabel = when {
+      !model.engineOnline -> OverlayUiModel.cardStateLabel(model, english, elapsed)
+      completionLabel.isNotEmpty() -> completionLabel
+      else -> OverlayUiModel.cardStateLabel(model, english, elapsed)
     }
     val questionLabel = if (model.pending.isNotEmpty() && model.pending.any { it.kind == "question" }) {
       t("需要回答", "Question")
@@ -1854,9 +2044,22 @@ internal class OverlayV2(private val svc: OverlayService) {
     }
     val attachments = state?.attachments?.map { OverlayAttachmentChip(it.name, it.kind) } ?: emptyList()
     val items = when (drawerMode) {
-      DrawerMode.SESSIONS -> sessionChoices.map { OverlayCommandItem(it.id, it.title, it.id.take(8)) }
+      DrawerMode.SESSIONS -> buildList {
+        // 会话选择器永远保留「新建会话」：没有它，零会话时只剩一个空菜单。
+        add(OverlayCommandItem(newConversationItemId, t("新建会话", "New conversation"), ""))
+        addAll(sessionChoices.map { OverlayCommandItem(it.id, it.title, it.id.take(8)) })
+      }
       DrawerMode.WORKSPACES -> (state?.workspaces ?: emptyList()).map { OverlayCommandItem(it.id, it.title, "") }
       else -> pageCommands.map { OverlayCommandItem(it.name, it.label, it.description) }
+    }
+    // 加载/失败文案只属于选择器；命令抽屉沿用中性「列表为空」，不继承上一次的失败态。
+    val drawerEmptyLabel = when (drawerMode) {
+      DrawerMode.SESSIONS, DrawerMode.WORKSPACES -> when {
+        drawerLoading -> t("加载中…", "Loading…")
+        drawerError.isNotEmpty() -> drawerError
+        else -> ""
+      }
+      else -> ""
     }
     val pendingHint = model.pending.firstOrNull()?.title.orEmpty()
     c.render(
@@ -1867,6 +2070,7 @@ internal class OverlayV2(private val svc: OverlayService) {
         commands = items,
         pendingHint = pendingHint,
         busy = svc.sessionBusy,
+        drawerEmptyLabel = drawerEmptyLabel,
         sendEnabled = true,
       ),
     )
@@ -1885,6 +2089,10 @@ internal class OverlayV2(private val svc: OverlayService) {
 
   /** 文件名 → 工作区名的兜底（页面不可用时只显示「工作区」）。 */
   private fun refreshPageState() {
+    refreshPageState(null)
+  }
+
+  private fun refreshPageState(onDone: (() -> Unit)?) {
     val generation = ++pageReadGeneration
     if (!OverlayPageHost.available()) {
       // 页面不可用：工作区列表退回本仓文件真源（只读展示，切换语义未定，design.md §6.3）。
@@ -1907,6 +2115,7 @@ internal class OverlayV2(private val svc: OverlayService) {
       if (cardVisible()) renderCard()
       if (pillVisible()) renderPill()
       if (composerVisible()) renderComposer()
+      onDone?.invoke()
       return
     }
     OverlayPageHost.state { s ->
@@ -1921,6 +2130,7 @@ internal class OverlayV2(private val svc: OverlayService) {
       // 否则用户看到的永远是他上次展开时的旧输出。
       if (composerVisible()) renderComposer()
       if (pillVisible()) renderPill()
+      onDone?.invoke()
     }
   }
 
