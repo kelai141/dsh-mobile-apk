@@ -279,6 +279,52 @@ class LinuxAssetPrepareTest {
     assertFalse(File(envRoot, "rootfs-candidates/${result.getString("rootfsCandidate")}").exists())
   }
 
+  @Test
+  fun identicalRootfsAtAnotherReleaseUrlUsesVerifiedPrivateCopy() {
+    val bytes = goodArchive()
+    val cache = Files.createDirectory(File(root, "archive-cache").toPath()).toFile()
+    val spec = JSONObject(specJson(bytes)).put("kind", "rootfs").put("rootfsCandidate", true)
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    LinuxAssetPrepare.start(root, spec.toString(), cache)
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+    val cached = File(cache, LinuxRootfsArchiveCache.NAME)
+    assertEquals(sha256(bytes), sha256(cached.readBytes()))
+
+    LinuxAssetPrepare.opener = LinuxAssetIO.Opener { _, _, _ -> throw AssertionError("Unexpected network request") }
+    spec.put("url", goodUrl.replace("v1.2.0", "v1.2.1"))
+    val result = JSONObject(LinuxAssetPrepare.start(root, spec.toString(), cache))
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+    val candidate = File(envRoot, "rootfs-candidates/${result.getString("rootfsCandidate")}")
+    val archive = File(candidate, "asset.tar.xz")
+    assertFalse(Files.isSameFile(archive.toPath(), cached.toPath()))
+    assertEquals(sha256(bytes), sha256(archive.readBytes()))
+    assertEquals(spec.getString("url"), JSONObject(File(candidate, "receipt.json").readText()).getString("url"))
+  }
+
+  @Test
+  fun badCachedBytesAreReplacedOnlyAfterVerifiedDownloadAndExtraction() {
+    val bytes = goodArchive()
+    val cache = Files.createDirectory(File(root, "archive-cache").toPath()).toFile()
+    val cached = File(cache, LinuxRootfsArchiveCache.NAME)
+    val damaged = bytes.clone().apply { this[0] = (this[0].toInt() xor 1).toByte() }
+    cached.writeBytes(damaged)
+    val spec = JSONObject(specJson(bytes)).put("kind", "rootfs").put("rootfsCandidate", true)
+    LinuxAssetPrepare.opener = installOpener(damaged)
+    val failed = JSONObject(LinuxAssetPrepare.start(root, spec.toString(), cache))
+    assertEquals(LinuxAssetIO.CODE_DIGEST_MISMATCH, status().getString("code"))
+    assertFalse(File(envRoot, "rootfs-candidates/${failed.getString("rootfsCandidate")}").exists())
+    assertEquals(sha256(damaged), sha256(cached.readBytes()))
+    var requests = 0
+    LinuxAssetPrepare.opener = LinuxAssetIO.Opener { url, target, limit ->
+      requests++
+      installOpener(bytes).fetch(url, target, limit)
+    }
+    LinuxAssetPrepare.start(root, spec.toString(), cache)
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+    assertEquals(1, requests)
+    assertEquals(sha256(bytes), sha256(cached.readBytes()))
+  }
+
   // ── 五个负控：摘要、字节数、穿越、符号链接逃逸、炸弹 ────────────────────────
 
   @Test

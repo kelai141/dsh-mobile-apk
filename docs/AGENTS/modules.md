@@ -346,3 +346,5 @@ Android API 面登记见 `docs/AGENTS/ANDROID-API-USAGE.md` §1/§3/§4/§8；�
 `ShellOps.isRuntimeCommandName`：壳侧执行前的屏幕范围复查，对 ANSI-C / 本地化命令名 fail-closed；与引擎侧共享 fixture，详见 `docs/contrib/Ni-ShuWu/2026-11-13-screen-scope-1610.md`。
 
 LinuxXzInputStream.java owns the Android Linux archive reader and its native decoder lifetime. The Rust library in native/linux-asset-codec supplies bounded XZ decoding through JNI. LinuxAssetExtractor retains responsibility for entry limits, paths, links, executable modes and file publication.
+
+LinuxRootfsArchiveCache keeps one compressed rootfs in Android cache storage. Each candidate receives a separately verified private copy.

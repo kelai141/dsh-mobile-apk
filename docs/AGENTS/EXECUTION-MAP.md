@@ -2519,6 +2519,8 @@ plugins/dsh-android-linux-env/src/linux-tool-contract.ts
 <!-- COVERAGE
 app/src/main/java/com/dsharnessmobile/shell/LinuxAssetExtractor.kt
 app/src/main/java/com/dsharnessmobile/shell/LinuxXzInputStream.java
+app/src/main/java/com/dsharnessmobile/shell/LinuxRootfsArchiveCache.kt
+app/src/androidTest/java/com/dsharnessmobile/shell/LinuxRootfsArchiveCacheTest.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/LinuxNativeXzTest.kt
 dsh-client-ui-responsive/src/client/linux-environment/LinuxEnvironmentSection.tsx
 dsh-client-ui-responsive/src/client/linux-environment/linux-environment.css.ts
@@ -2558,3 +2560,5 @@ app/src/androidTest/java/com/dsharnessmobile/shell/nativecontrol/NativeShizukuTe
 During a C rootfs candidate handoff, the Linux host adapter verifies the retained archive on the engine thread, then waits for a dedicated worker to finish checking directory entries and normalizing guest links. A failed worker or check prevents the tree move and activation.
 
 For file-backed Linux assets, LinuxAssetExtractor opens LinuxXzInputStream before applying the existing tar entry checks. The reader duplicates the verified archive descriptor and decodes through the packaged dsh_linux_xz library. When a block requires more native memory than allowed, the Java decoder resumes at the same decoded offset. Invalid archive bytes propagate to the existing installation failure path.
+
+Before downloading a rootfs candidate, LinuxAssetPrepare tries the last compressed rootfs in the app cache. Both the local copy and a fresh download go through LinuxAssetIO size, SHA-256 and source validation before extraction. The installer independently revalidates the candidate before activation.

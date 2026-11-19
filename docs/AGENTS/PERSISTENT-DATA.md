@@ -120,3 +120,5 @@ Do not copy raw preference files into ordinary diagnostics or exports: several c
 ## 原生插件管理的待重启状态
 
 `PluginManagementRepository` 新增 SharedPreferences `plugin_management_pending`。键绑定插件 entryId 与 moduleName，只保存已被运行时确认持久化、但需要重启的期望启用状态；运行时实际状态匹配后移除。实际配置仍由引擎 `pluginManager` 写入原有 profile patch。配置编辑走 `settings/mutate` 与 revision 校验，省略的字段（包括脱敏 secret）保持原值。本改动不迁移或重写用户文件。
+
+The disposable Android cache file `cache/linux-rootfs-last.tar.xz` retains at most one compressed rootfs for updates. Clearing the app cache causes the next matching update to fetch the archive again. Workspace files and the active runtime live separately.

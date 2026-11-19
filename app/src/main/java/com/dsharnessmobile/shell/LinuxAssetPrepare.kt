@@ -72,7 +72,7 @@ internal object LinuxAssetPrepare {
    * 请求体只有资产清单（`url`/`sha256`/`size`，可选 `kind`），**落点由宿主自己推导**（按 sha256 命名），
    * 客户端无法指定目标路径。
    */
-  fun start(filesDir: File?, specJson: String): String {
+  fun start(filesDir: File?, specJson: String, cacheDir: File? = null): String {
     val spec: LinuxAssetIO.Spec
     val candidateId: String?
     try {
@@ -125,7 +125,7 @@ internal object LinuxAssetPrepare {
     val root = File(filesDir!!, LinuxAssetIO.ENV_DIR)
     runner {
       val failure = try {
-        if (candidateId == null) prepareInto(root, spec) else prepareCandidate(root, spec, candidateId)
+        if (candidateId == null) prepareInto(root, spec) else prepareCandidate(root, spec, candidateId, cacheDir)
       } catch (e: Exception) {
         // 解包器已按失败关闭返回；这里兜住平台级异常（如无符号链接权限的 SecurityException），
         // 否则后台线程会死掉而状态永远停在 running。
@@ -191,7 +191,7 @@ internal object LinuxAssetPrepare {
     return LinuxAssetIO.resolveInside(root, "$DIR_STAGING-$sha256.part")
   }
 
-  private fun prepareCandidate(root: File, spec: LinuxAssetIO.Spec, id: String): LinuxAssetIO.Failure? {
+  private fun prepareCandidate(root: File, spec: LinuxAssetIO.Spec, id: String, cacheDir: File?): LinuxAssetIO.Failure? {
     val parent = File(root, ROOTFS_CANDIDATES)
     parent.mkdir()
     if (!Files.isDirectory(parent.toPath(), NOFOLLOW_LINKS) || parent.canonicalFile.parentFile != root.canonicalFile) {
@@ -206,9 +206,11 @@ internal object LinuxAssetPrepare {
     var prepared = false
     try {
       val archive = File(candidate, "asset.tar.xz")
-      LinuxAssetIO.download(spec, archive, root, opener, debugBuild)?.let { return it }
+      val restored = LinuxRootfsArchiveCache.restore(cacheDir, archive, spec, root, debugBuild)
+      if (!restored) LinuxAssetIO.download(spec, archive, root, opener, debugBuild)?.let { return it }
       val unpacked = Files.createDirectory(File(candidate, "unpacked").toPath()).toFile()
       LinuxAssetIO.extract(archive, unpacked, root, spec.kind, LinuxAssetIO.limitsFor(spec.kind))?.let { return it }
+      if (!restored) LinuxRootfsArchiveCache.remember(cacheDir, archive)
       val receipt = JSONObject().put("id", id).put("url", spec.url).put("sha256", spec.sha256)
         .put("size", spec.size).put("kind", spec.kind.wire).put("createdAt", now)
       val receiptPart = File(candidate, "receipt.part")
