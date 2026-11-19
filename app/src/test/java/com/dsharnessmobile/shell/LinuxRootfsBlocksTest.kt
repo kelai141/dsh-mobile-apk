@@ -11,6 +11,7 @@ import java.nio.file.Files
 import java.util.Random
 import java.util.Collections
 import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -116,6 +117,22 @@ class LinuxRootfsBlocksTest {
     }
     assertTrue(attempt(encode(data.filterIndexed { i, _ -> i != 0 && i != data.lastIndex }), remote))
     assertEquals(3, remote.ranges.size)
+    assertArrayEquals(payload, target.readBytes())
+  }
+
+  @Test fun fourSmallDisjointRangesCompleteInPairs() {
+    val payload = encode(data)
+    val tailStart = payload.size - 4096L
+    val pair = CyclicBarrier(2)
+    val active = AtomicInteger()
+    val remote = Network(payload) { start, _ ->
+      if (start != tailStart) {
+        assertTrue(active.incrementAndGet() <= 2)
+        try { pair.await(5, TimeUnit.SECONDS) } finally { active.decrementAndGet() }
+      }
+    }
+    assertTrue(attempt(encode(data.filterIndexed { i, _ -> i % 2 != 0 }), remote))
+    assertEquals(5, remote.ranges.size)
     assertArrayEquals(payload, target.readBytes())
   }
 

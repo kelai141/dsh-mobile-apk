@@ -83,11 +83,20 @@ internal object LinuxRootfsBlocks {
     return head
   }
 
-  private fun prefetchPair(spans: List<Span>, read: (Long, Int) -> ByteArray): Map<Long, ByteArray> {
-    if (spans.size != 2 || spans.sumOf { it.length } > PARALLEL_BYTES) return emptyMap()
+  private fun prefetchRanges(spans: List<Span>, read: (Long, Int) -> ByteArray): Map<Long, ByteArray> {
+    if (spans.size < 2) return emptyMap()
+    // Overlap as many small requests as fit. Larger spans stream directly into the output file.
+    val selected = mutableListOf<Span>()
+    var budget = PARALLEL_BYTES
+    for (span in spans.sortedBy { it.length }) {
+      if (span.length > budget) break
+      selected.add(span)
+      budget -= span.length
+    }
+    if (selected.size < 2) return emptyMap()
     val pool = Executors.newFixedThreadPool(2)
     try {
-      return pool.invokeAll(spans.map { span ->
+      return pool.invokeAll(selected.map { span ->
         Callable { span.start to read(span.start, span.length.toInt()) }
       }).associate { it.get() }
     } catch (error: ExecutionException) {
@@ -169,7 +178,7 @@ internal object LinuxRootfsBlocks {
         }
         if (runs.size > MAX_MISSING_RANGES || runs.sumOf { it.length } > spec.size / 2) return@Opener -1L
         val network = runs.filter { it.start < tailStart }.map { Span(it.start, minOf(it.end, tailStart)) }
-        val prefetched = prefetchPair(network, ::edge)
+        val prefetched = prefetchRanges(network, ::edge)
         temp.outputStream().buffered(128 * 1024).use { output ->
           output.write(edges.head)
           val buffer = ByteBuffer.allocate(128 * 1024)
