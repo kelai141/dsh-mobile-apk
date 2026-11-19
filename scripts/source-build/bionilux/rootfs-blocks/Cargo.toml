@@ -1,0 +1,9 @@
+[package]
+name = "dsh-rootfs-blocks"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[dependencies]
+fastcdc = "=3.2.1"

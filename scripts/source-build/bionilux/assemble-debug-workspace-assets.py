@@ -5,6 +5,8 @@ import argparse
 import hashlib
 import io
 import json
+import lzma
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -104,7 +106,29 @@ def descriptor(path: Path, template: dict, unpacked: int) -> dict:
             'size': path.stat().st_size, 'unpackedSize': unpacked, 'sha256': sha256(path)}
 
 
-def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path) -> None:
+def pack_rootfs_blocks(archive: Path, work: Path, planner: Path) -> None:
+    raw = work / 'rootfs-source.tar'
+    with lzma.open(archive, 'rb') as source, raw.open('xb') as output:
+        shutil.copyfileobj(source, output, length=256 * 1024)
+    with raw.open('rb') as source:
+        lengths = subprocess.run([str(planner.resolve(strict=True))], stdin=source, stdout=subprocess.PIPE,
+                                 text=True, check=True).stdout.splitlines()
+    sizes = [int(value) for value in lengths]
+    if not 2 <= len(sizes) <= 512 or any(n <= 0 or n > (8 << 20) for n in sizes) or sum(sizes) != raw.stat().st_size:
+        raise ValueError('Invalid rootfs block boundaries')
+    packed = work / 'rootfs-blocks.tar.xz'
+    block_list = ','.join(map(str, sizes))
+    environment = {key: value for key, value in os.environ.items() if key not in ('XZ_DEFAULTS', 'XZ_OPT')}
+    with packed.open('xb') as output:
+        subprocess.run(['xz', '-T2', '--check=crc64', f'--block-list={block_list}', '--lzma2=dict=4MiB',
+                        '-c', '--', str(raw)], stdout=output, env=environment, check=True)
+    with lzma.open(packed, 'rb') as decoded:
+        if hashlib.file_digest(decoded, 'sha256').hexdigest() != sha256(raw):
+            raise ValueError('Blocked rootfs differs from the original tar stream')
+    packed.replace(archive)
+
+
+def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path, block_planner: Path | None = None) -> None:
     if output.exists() or output.is_symlink():
         raise ValueError(f'Asset destination already exists: {output}')
     destination = output.parent.resolve(strict=True) / output.name
@@ -140,6 +164,8 @@ def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path) -> 
         rootfs_target = result / 'debian-workspace-lite-x86_64-diagnostic.tar.xz'
         shutil.copyfile(rootfs, rootfs_target)
         verify(rootfs_target, ROOTFS_SHA256)
+        if block_planner is not None:
+            pack_rootfs_blocks(rootfs_target, work, block_planner)
         with tarfile.open(rootfs_target, 'r:xz') as archive:
             unpacked = sum(member.size for member in archive)
         manifest['runtimes'].append({**baseline, 'id': 'debian-workspace-lite-x64',
@@ -160,9 +186,11 @@ def main() -> None:
     parser.add_argument('libc', type=Path, help='verified Android compatibility libc build')
     parser.add_argument('node', type=Path, help='verified Android guest Node.js executable')
     parser.add_argument('output', type=Path, help='new directory for fixture assets')
+    parser.add_argument('--rootfs-block-planner', type=Path, metavar='BINARY',
+                        help='build content-defined XZ blocks with the compiled dsh-rootfs-blocks planner')
     args = parser.parse_args()
     try:
-        assemble(args.base, args.rootfs, args.libc, args.node, args.output)
+        assemble(args.base, args.rootfs, args.libc, args.node, args.output, args.rootfs_block_planner)
     except (OSError, ValueError, tarfile.TarError, subprocess.CalledProcessError) as error:
         parser.exit(1, f'{parser.prog}: {error}\n')
 
