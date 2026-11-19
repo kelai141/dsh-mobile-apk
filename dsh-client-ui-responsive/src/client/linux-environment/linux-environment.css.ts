@@ -88,10 +88,14 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 }
 
 .dsh-linux-env .dsh-linux-env-primary:not(:disabled) {
-  background: var(--dsw-alias-interactive-bg-active, #4d6bfe);
+  background: var(--dsw-alias-button-primary-fill, #162035);
   border-color: transparent;
-  color: var(--dsw-alias-interactive-label-active, #fff);
+  color: var(--dsw-alias-label-primary-foreground, #fff);
   font-weight: 600;
+}
+
+.dsh-linux-env .dsh-linux-env-primary:not(:disabled):hover {
+  background: var(--dsw-alias-button-primary-hover, #303b50);
 }
 
 .dsh-linux-env-row select {
