@@ -19,9 +19,10 @@
  * 路径由 **manifest 的摘要**推导，调用方不能指定落点（与 Kotlin 侧同一个判据口径）：
  * `<filesDir>/linux-environment/staging/<sha256>/`。
  */
+import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, lstatSync } from 'node:fs'
-import { cp, lstat, mkdir, readdir, readFile, readlink, rename, rm, symlink, unlink } from 'node:fs/promises'
+import { cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, symlink, unlink } from 'node:fs/promises'
 import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
@@ -173,7 +174,7 @@ if (!isMainThread && parentPort && workerData?.task === ROOTFS_WORKER_TASK) {
   }
 }
 
-function verifyClaimedRootfs(tree: string): Promise<void> {
+function verifyRootfsInWorker(tree: string): Promise<void> {
   const worker = new Worker(new URL(import.meta.url), {
     workerData: { task: ROOTFS_WORKER_TASK, tree },
     execArgv: [],
@@ -190,6 +191,35 @@ function verifyClaimedRootfs(tree: string): Promise<void> {
       if (failure) reject(failure)
       else if (code === 0 && verified) resolve()
       else reject(new Error('Rootfs verification worker exited without verifying the tree'))
+    })
+  })
+}
+
+// The host supplies ApplicationInfo.nativeLibraryDir. Older shells have only the worker.
+async function tryNativeRootfsVerification(tree: string, nativeLibDir?: string): Promise<boolean> {
+  if (process.platform !== 'android' || !nativeLibDir) return false
+  const directory = resolve(nativeLibDir)
+  const parts = relative('/data/app', directory).split(sep)
+  if (!directory.startsWith('/data/app/') || !parts.at(-3)?.startsWith('com.dsharnessmobile.shell-') ||
+      parts.at(-2) !== 'lib' || !['arm64', 'x86_64'].includes(parts.at(-1) ?? '')) {
+    return false
+  }
+  const binary = join(directory, 'libdsh_rootfs_verify.so')
+  let installed: string
+  try {
+    installed = await realpath(binary)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+  if (installed !== binary) throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, 'Unexpected native verifier path')
+  return new Promise<boolean>((accept, reject) => {
+    execFile('/system/bin/linker64', [installed, tree], { env: {}, maxBuffer: 16 * 1024 }, (error, stdout, stderr) => {
+      if (error?.code === 3) return accept(false)
+      if (error || stdout !== 'dsh-rootfs-verified-v1\n') {
+        return reject(new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, stderr.trim() || 'Native rootfs verification failed'))
+      }
+      accept(true)
     })
   })
 }
@@ -234,7 +264,7 @@ async function verifyCandidateReceipt(directory: string, id: string, asset: Root
  *
  * @param filesDir 壳侧 `DSH_FILES_DIR`；暂存根 = `<filesDir>/linux-environment`。
  */
-export function createHostAssetIO(options: { filesDir: string }): HostAssetIO {
+export function createHostAssetIO(options: { filesDir: string, nativeLibDir?: string }): HostAssetIO {
   const { filesDir } = options
   if (typeof filesDir !== 'string' || filesDir === '') throw new TypeError('filesDir is required')
 
@@ -320,8 +350,11 @@ export function createHostAssetIO(options: { filesDir: string }): HostAssetIO {
         const tree = join(owned, UNPACKED_DIR)
         const treeStarted = performance.now()
         await assertPlainDirectory(tree, CODE_HOST_TREE_UNSAFE, 'Candidate rootfs tree')
-        await verifyClaimedRootfs(tree)
-        recordTiming?.('candidate_tree_verify', performance.now() - treeStarted)
+        const native = await tryNativeRootfsVerification(tree, options.nativeLibDir)
+        if (!native) await verifyRootfsInWorker(tree)
+        const elapsed = performance.now() - treeStarted
+        recordTiming?.('candidate_tree_verify', elapsed)
+        recordTiming?.(native ? 'candidate_tree_verify_native' : 'candidate_tree_verify_worker', elapsed)
         const moveStarted = performance.now()
         await rename(tree, target)
         recordTiming?.('candidate_tree_move', performance.now() - moveStarted)
@@ -354,7 +387,7 @@ export function createLinuxBootstrapConfig(options: {
 }): Record<string, unknown> {
   const { filesDir, appVersion, releaseUrl = LINUX_RELEASE_URL, nativeLibDir } = options
   const dataDir = linuxEnvironmentRoot(filesDir)
-  const linuxAssetIO = createHostAssetIO({ filesDir })
+  const linuxAssetIO = createHostAssetIO({ filesDir, nativeLibDir })
   return {
     dataDir,
     releaseUrl,

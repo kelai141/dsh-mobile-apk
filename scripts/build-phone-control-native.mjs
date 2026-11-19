@@ -32,7 +32,10 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 export const DEFAULT_APK_DIR = resolve(SCRIPT_DIR, '..')
 const CONFIG_RELATIVE = join('native', 'phone-control-core', 'build-config.json')
 const ELF_HEADER_BYTES = 64
-const DEFAULT_OUT_RELATIVE = join('app', 'build', 'generated', 'phone-control-jni')
+const linuxComponents = new Map([
+  ['linux-xz', { crate: 'native/linux-asset-codec', library: 'dsh_linux_xz' }],
+  ['linux-rootfs', { crate: 'native/linux-rootfs-verifier', library: 'dsh_rootfs_verify', binary: 'dsh-rootfs-verify' }],
+])
 
 export const SUPPORTED_ABIS = Object.freeze(['arm64-v8a', 'x86_64'])
 export const ELF_MACHINES = Object.freeze({ 'arm64-v8a': 183, x86_64: 62 })
@@ -63,8 +66,9 @@ export function loadBuildConfig(apkDir = DEFAULT_APK_DIR, component = 'phone-con
   } catch (error) {
     throw new Error(`invalid build config ${path}: ${error.message}`)
   }
-  if (component === 'linux-xz') {
-    config = { ...config, crate: 'native/linux-asset-codec', library: 'dsh_linux_xz' }
+  if (linuxComponents.has(component)) {
+    const { crate, library } = linuxComponents.get(component)
+    config = { ...config, crate, library }
   } else if (component !== 'phone-control') {
     throw new Error('Unknown Android native component: ' + component)
   }
@@ -149,7 +153,7 @@ export function parseArgs(argv) {
     switch (arg) {
       case '--component':
         options.component = value()
-        if (!['phone-control', 'linux-xz'].includes(options.component)) throw new Error('Unsupported native component')
+        if (options.component !== 'phone-control' && !linuxComponents.has(options.component)) throw new Error('Unsupported native component')
         break
       case '--abis': {
         const raw = value().trim()
@@ -681,7 +685,7 @@ export async function buildPhoneControlNative(options = {}, deps = {}) {
   const apkDir = resolve(options.apkDir ?? DEFAULT_APK_DIR)
   const config = deps.config ?? loadBuildConfig(apkDir, options.component)
   const abis = options.abis ?? SUPPORTED_ABIS
-  const outDir = resolve(options.out ?? join(apkDir, options.component === 'linux-xz' ? 'app/build/generated/linux-xz-jni' : DEFAULT_OUT_RELATIVE))
+  const outDir = resolve(options.out ?? join(apkDir, 'app', 'build', 'generated', `${options.component ?? 'phone-control'}-jni`))
   const log = options.log ?? (() => {})
   const crateDir = join(apkDir, config.crate)
   if (options.verify) {
@@ -718,7 +722,8 @@ export async function buildPhoneControlNative(options = {}, deps = {}) {
       cwd: apkDir,
       env: buildEnv,
     })
-    const source = join(crateDir, 'target-android', target, 'release', expectedLibraryName(config))
+    const artifact = linuxComponents.get(options.component)?.binary ?? expectedLibraryName(config)
+    const source = join(crateDir, 'target-android', target, 'release', artifact)
     const destination = abiLibraryPath(outDir, abi, config)
     const facts = copyVerified(source, destination, { abi, config })
     const manifest = {

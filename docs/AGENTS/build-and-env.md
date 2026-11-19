@@ -171,6 +171,8 @@ python3 scripts/source-build/bionilux/assemble-debug-workspace-assets.py \
 
 For differential updates, build the optional planner with `cargo build --locked --release --manifest-path scripts/source-build/bionilux/rootfs-blocks/Cargo.toml` and pass its executable to the assembler with `--rootfs-block-planner`. It partitions the original tar with FastCDC (1 MiB minimum, 4 MiB target, 8 MiB maximum) and writes independent CRC64 XZ blocks. The assembler decodes the result and checks the original tar digest before publishing the fixture. Omitting the planner preserves the pinned solid archive.
 
+Gradle packages the Linux rootfs verifier under the Android native library directory as `libdsh_rootfs_verify.so`. The builder's `--component linux-rootfs` mode verifies the pinned Rust/NDK toolchain, ELF architecture, page alignment and source-input manifest for each ABI before staging this executable.
+
 ### Harness 上游候选巡检
 
 `巡检 Harness 上游候选` 每周、巡检或基线文件变更的 PR，以及手动触发时，将官方默认分支与

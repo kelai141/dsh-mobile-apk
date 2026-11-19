@@ -75,11 +75,15 @@ val linuxXzJni = registerRustJniLibrary(
   "LinuxXzNative", "native/linux-asset-codec", "dsh_linux_xz", "linux-xz-jni", listOf("--component", "linux-xz"),
 )
 
+val linuxRootfsVerifier = registerRustJniLibrary(
+  "LinuxRootfsVerifier", "native/linux-rootfs-verifier", "dsh_rootfs_verify", "linux-rootfs-jni", listOf("--component", "linux-rootfs"),
+)
+
 android {
   namespace = "com.dsharnessmobile.shell"
   compileSdk = 36
 
-  sourceSets.getByName("main").jniLibs.srcDirs(nativeControlJni, linuxXzJni)
+  sourceSets.getByName("main").jniLibs.srcDirs(nativeControlJni, linuxXzJni, linuxRootfsVerifier)
 
   defaultConfig {
     applicationId = "com.dsharnessmobile.shell"

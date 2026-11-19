@@ -1,0 +1,13 @@
+[package]
+name = "dsh-rootfs-verify"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+nix = { version = "=0.31.3", features = ["dir", "fs"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
