@@ -95,7 +95,7 @@ class OverlayV2RecreationTest {
     assertTrue("explicit focus must recheck when posted AND pass the same guard to deferred IME work",
       showComposer.contains("if (focusInput) main.post { if (canFocus()) c.focusInput(canFocus) }"))
     assertTrue("non-input presentation remains root-only, without automatically requesting IME",
-      showComposer.contains("else if (canFocus()) c.focusRoot()"))
+      showComposer.contains("else if (attaching && canFocus()) c.focusRoot()"))
   }
 
   @Test fun pureAttachmentsCanSendButUnconfirmedOrUnavailableAttachmentsCannotFallBackToText() {

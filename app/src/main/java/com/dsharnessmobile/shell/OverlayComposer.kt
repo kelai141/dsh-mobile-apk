@@ -161,26 +161,15 @@ internal class OverlayComposer(
     setPadding(dp(12), dp(8), dp(12), dp(8))
     background = null
     // apply 里的 this 不能从匿名 TextWatcher 内部直接取，先存成局部引用（self），
-    // 避免在属性自身初始化表达式中回读该属性。
-    val self = this
     addTextChangedListener(object : TextWatcher {
       override fun beforeTextChanged(s: CharSequence, start: Int, count: Int, after: Int) = Unit
       override fun onTextChanged(s: CharSequence, start: Int, before: Int, count: Int) = Unit
       override fun afterTextChanged(s: Editable) {
         // 有字/没字决定发送按钮画箭头还是画方块，必须跟着内容立刻变。
         applyActionButton()
-        // 行数变化会改输入区高度（1..4 行），服务需要重算窗口；放到下一帧读 lineCount，
-        // 因为换行后的行数要等一次 layout 才是最终值。
-        self.post {
-          if (self.lineCount != lastInputLineCount) {
-            lastInputLineCount = self.lineCount
-            listener.onComposerLayoutChanged()
-          }
-        }
       }
     })
   }
-  private var lastInputLineCount = 1
 
   /**
    * 发送/停止按钮：蓝色圆形，空闲画上箭头，输入为空时画白色方块，忙碌时也画方块。
@@ -340,6 +329,7 @@ internal class OverlayComposer(
       }
 
       override fun onViewDetachedFromWindow(v: View) {
+        cancelPendingImeShow()
         root.removeCallbacks(update)
         queued = false
         observer?.let {
@@ -405,8 +395,6 @@ internal class OverlayComposer(
     if (signature != attachmentSignature) {
       attachmentSignature = signature
       renderAttachments(data.attachments)
-      // 附件条增删改变输入区高度，服务需要重算窗口。
-      listener.onComposerLayoutChanged()
     }
 
     busy = data.busy && !data.answeringQuestion
@@ -588,23 +576,45 @@ internal class OverlayComposer(
 
   /** 非输入展示路径聚焦根（窗口 softInputMode 由编排层设为 ALWAYS_HIDDEN）。 */
   fun focusRoot() {
+    cancelPendingImeShow()
     input.clearFocus()
     view.requestFocus()
   }
 
-  /** 聚焦输入框并弹键盘（长按入口 → 同时展开卡片与输入区时**不**自动调用，避免刚长按就弹键盘）。 */
-  fun focusInput(canFocus: () -> Boolean = { true }) {
-    if (!view.isAttachedToWindow || !canFocus()) return
-    input.requestFocus()
-    input.post {
-      // A picker/close/config generation may have taken ownership after requestFocus.
-      if (!view.isAttachedToWindow || !input.hasFocus() || !canFocus()) return@post
-      val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-      imm?.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
-    }
+  private var pendingImeShow: ViewTreeObserver.OnWindowFocusChangeListener? = null
+
+  private fun cancelPendingImeShow() {
+    pendingImeShow?.let { view.viewTreeObserver.removeOnWindowFocusChangeListener(it) }
+    pendingImeShow = null
   }
 
-  // ── 内部渲染 ──────────────────────────────────────────────────────────────
+  fun isEditing(): Boolean = input.hasFocus() && view.hasWindowFocus()
+
+  /** Show the IME once the window has an input connection. */
+  fun focusInput(canFocus: () -> Boolean = { true }) {
+    if (!view.isAttachedToWindow || !canFocus()) return
+    cancelPendingImeShow()
+    input.requestFocus()
+    fun showWhenServed() {
+      input.post {
+        if (!view.isAttachedToWindow || !input.hasFocus() || !view.hasWindowFocus() || !canFocus()) return@post
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+      }
+    }
+    if (view.hasWindowFocus()) {
+      showWhenServed()
+    } else {
+      val listener = ViewTreeObserver.OnWindowFocusChangeListener { focused ->
+        if (focused) {
+          cancelPendingImeShow()
+          showWhenServed()
+        }
+      }
+      pendingImeShow = listener
+      view.viewTreeObserver.addOnWindowFocusChangeListener(listener)
+    }
+  }
 
   private fun applyActionButton() {
     // 形态语义（用户 2026-11-14 明确纠正，不要自行推导）：
@@ -697,7 +707,6 @@ internal class OverlayComposer(
             setOnClickListener {
               val expanded = layoutParams.width == dp(40)
               layoutParams = LinearLayout.LayoutParams(dp(if (expanded) 160 else 40), dp(if (expanded) 160 else 40))
-              listener.onComposerLayoutChanged()
             }
           }
           addView(preview, LinearLayout.LayoutParams(dp(40), dp(40)))

@@ -80,7 +80,6 @@ class MainActivity : ComponentActivity() {
   private var webSystemTopInset = 0
   private var webImeBottomInset = 0
   /** 上一次投递给页面的 composer 位移高度（CSS px），用于动画期逐帧推送去重。 */
-  private var lastComposerImeCssPx = -1
   /** apk #182-2：横屏 + 侧边挖孔（short edge = 左右）时页面需要左右 inset 才能避让。 */
   private var webSystemLeftInset = 0
   private var webSystemRightInset = 0
@@ -696,6 +695,22 @@ class MainActivity : ComponentActivity() {
     // The accessibility control service carries the model-facing browser* ops; it reaches this
     // Activity-owned isolated WebView only through the process-wide holder.
     BrowserHostHolder.host = browserHost
+    val imeLayout = MainWebImeLayout(window, root, webView)
+    val imeType = WindowInsetsCompat.Type.ime()
+    val imeAnimations = mutableSetOf<WindowInsetsAnimationCompat>()
+    fun updateWebIme(bottom: Int) {
+      imeLayout.update(bottom)
+      webImeBottomInset = pxToCssPx(bottom, resources.displayMetrics.density)
+      scheduleWebInsetsPush()
+    }
+    // Already accounted for in the WebView's layout, including on WebViews
+    // that would otherwise also shrink their visual viewport from insets.
+    ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
+      ViewCompat.onApplyWindowInsets(view, WindowInsetsCompat.Builder(insets)
+        .setInsets(imeType, androidx.core.graphics.Insets.NONE)
+        .setVisible(imeType, false)
+        .build())
+    }
     ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
       val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
       val cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
@@ -711,16 +726,8 @@ class MainActivity : ComponentActivity() {
       // #182-2：左右同样取系统栏与挖孔的较大者（横屏且侧边挖孔时 cutout.left/right > 0）。
       webSystemLeftInset = pxToCssPx(maxOf(bars.left, cutout.left), density)
       webSystemRightInset = pxToCssPx(maxOf(bars.right, cutout.right), density)
-      webImeBottomInset = pxToCssPx(ime, density)
-      // #197（机制①）：edge-to-edge 下 WebView 的**布局尺寸从不随 IME 变化**（布局视口恒 800），
-      // 页面只把 frame 高度钉成 visualViewport.height → 输入框在布局里仍在页面底部，Chrome 按
-      // 「把它滚进可视区」平移视觉视口；页面随后缩短 frame，Chrome 不重算 → offsetTop 残留
-      // （实测 ime=371 ↔ vvTop=371），表现为键盘弹起后底部一大片空白。
-      // 修法：把 IME inset 施加到 WebView 自身的**布局尺寸**上（底 padding 收缩内容盒）——
-      // 布局视口真的变短，浏览器就没有可平移的余地，机制① 从根上消失；只推 CSS 变量做不到这点。
-      if (webViewReady) {
-        webView.setPadding(0, 0, 0, ime)
-      }
+      // onApply receives the destination before the first animation frame.
+      if (imeAnimations.isEmpty()) updateWebIme(ime)
       scheduleWebInsetsPush()
       if (guideViewReady) {
         val gutter = resources.getDimensionPixelSize(R.dimen.ds_guide_gutter)
@@ -733,28 +740,31 @@ class MainActivity : ComponentActivity() {
       }
       insets
     }
-    ViewCompat.requestApplyInsets(root)
-    // 动画期间使用系统插值，输入卡跟随实际键盘高度。
     ViewCompat.setWindowInsetsAnimationCallback(
       root,
       object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+        override fun onPrepare(animation: WindowInsetsAnimationCompat) {
+          if (animation.typeMask and imeType != 0) imeAnimations.add(animation)
+        }
+
         override fun onProgress(
           insets: WindowInsetsCompat,
           runningAnimations: MutableList<WindowInsetsAnimationCompat>,
         ): WindowInsetsCompat {
-          if (runningAnimations.any { it.typeMask and WindowInsetsCompat.Type.ime() != 0 }) {
-            pushComposerImePx(insets.getInsets(WindowInsetsCompat.Type.ime()).bottom)
+          if (runningAnimations.any { it.typeMask and imeType != 0 }) {
+            updateWebIme(insets.getInsets(imeType).bottom)
           }
           return insets
         }
 
         override fun onEnd(animation: WindowInsetsAnimationCompat) {
-          if (animation.typeMask and WindowInsetsCompat.Type.ime() == 0) return
+          if (!imeAnimations.remove(animation) || imeAnimations.isNotEmpty()) return
           val settled = ViewCompat.getRootWindowInsets(root) ?: return
-          pushComposerImePx(settled.getInsets(WindowInsetsCompat.Type.ime()).bottom)
+          updateWebIme(settled.getInsets(imeType).bottom)
         }
       },
     )
+    ViewCompat.requestApplyInsets(root)
     configureWebView()
     // §2.4（0.14.1 块C）：内核版本必须在**首启路径**上落盘，不只进诊断包——老设备白屏时
     // 页面根本跑不起来，用户拿不到版本就无法自助；落 boot-diag.log 后 `run-as cat` 即可取。
@@ -2155,37 +2165,11 @@ class MainActivity : ComponentActivity() {
           "'--dsh-android-navbar-bottom',navbar);root.style.setProperty('--dsh-android-ime-bottom',ime);" +
           "root.style.setProperty('--dsh-android-system-left',left);" +
           "root.style.setProperty('--dsh-android-system-right',right);" +
+          "root.toggleAttribute('data-dsh-ime',parseFloat(ime)>0);" +
           "})()"
-      // #197 机制① 的真机残留：`webView.setPadding` 改的是 View 的 padding，不改
-      // WebView 的 CSS 布局视口——IME 弹出时 innerHeight / visualViewport /
-      // VirtualKeyboard 三者全部恒定（0.14.11 真机实测 873 / 873 / 0），页面拿不到
-      // 任何键盘信号；而 `--dsh-android-ime-bottom` 只有虚拟屏键条在消费，主界面没有
-      // 消费者。壳侧已知道 IME 高度，就直接把 composer 抬到键盘上沿，别指望页面自己让位。
-      // 与上面的变量推送合成一次 IPC：insets 变化时 WebView 侧只排一次队列。
-      // 原生 inset 回调也发送终值，覆盖系统取消动画和页面重载。
-      lastComposerImeCssPx = webImeBottomInset
-      view.evaluateJavascript(insetsScript + ";" + ComposerImeOffset.script(webImeBottomInset), null)
+      view.evaluateJavascript(insetsScript, null)
     } catch (_: Exception) {
-      // 页面/WebView 尚未就绪：onPageFinished 会补推当前缓存值。
-    }
-  }
-
-  /**
-   * 键盘动画期间逐帧推送 composer 位移。
-   *
-   * `setOnApplyWindowInsetsListener` 收到的 IME inset 是跳变的（动画走完才到位），
-   * 只靠它卡片会慢半拍。`WindowInsetsAnimationCompat.Callback.onProgress` 给的是插值，
-   * 每帧一次；相同高度不重复投递，一帧键盘动画通常只有十几帧真正变化。
-   */
-  private fun pushComposerImePx(imePhysicalPx: Int) {
-    if (!pageUiActive || !webViewReady) return
-    val css = pxToCssPx(imePhysicalPx, resources.displayMetrics.density)
-    if (css == lastComposerImeCssPx) return
-    lastComposerImeCssPx = css
-    try {
-      webView.evaluateJavascript(ComposerImeOffset.script(css), null)
-    } catch (_: Exception) {
-      // 页面尚未就绪：动画结束后的 insets 回调会补推终值。
+      // onPageFinished republishes the current insets after navigation.
     }
   }
 

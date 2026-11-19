@@ -195,7 +195,7 @@ class OverlayChipWindowsTest {
     assertTrue(show.contains("composerWindowGeneration == focusGeneration"))
     assertTrue(show.contains("!destroyed && !uiSuspended && !hostForeground && !composerClosing && attachmentInteraction == null"))
     assertTrue(show.contains("if (canFocus()) c.focusInput(canFocus)"))
-    val focus = section(composer(), "fun focusInput(", "  // ── 内部渲染")
+    val focus = section(composer(), "fun focusInput(", "private fun applyActionButton()")
     assertTrue(focus.contains("if (!view.isAttachedToWindow || !canFocus()) return"))
     val deferred = focus.substringAfter("input.post {")
     assertTrue(deferred.indexOf("!canFocus()") < deferred.indexOf("showSoftInput"))

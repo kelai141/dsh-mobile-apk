@@ -7,11 +7,29 @@
  * scrolling overflow. Promote only that semantic list to a viewport-fixed
  * overlay while it is open, keeping React's DOM ownership and dismissal logic.
  */
+import { visibleViewport } from '../composer-popup-guard.ts'
+
 const FOLD_SELECTOR = '[data-dsh-topbar-fold="open"]'
 const JOBS_LIST_SELECTOR = 'ul[aria-label="后台任务"], ul[aria-label="Background jobs"]'
+const SUBAGENT_PANEL = '[data-subagent-panel]'
+const SUBAGENT_TRIGGER = '[data-subagent-action] button[aria-expanded="true"]'
+const VIEW_OPTIONS_MENU = '[role="menu"][class*="_viewOptionsMenu"]'
+const VIEW_OPTIONS_TRIGGER = '[data-sidebar-workspace-header] svg[data-icon="dsw-icon-sliders-two-outline-regular"]'
 const MARKER = 'data-dsh-header-popup'
 const OWNED_STYLES = ['position', 'top', 'left', 'right', 'width', 'max-width', 'max-height', 'overflow-y', 'z-index'] as const
 const VIEWPORT_MARGIN = 12
+const POPUP_GAP = 5
+const ANCHORED_STYLES = [
+  'top', 'bottom', 'left', 'right', 'width', 'max-width', 'max-height', 'position-try-fallbacks',
+] as const
+
+export const SUBAGENT_POPUP_CSS = `
+[data-subagent-panel] > [class*="menuBody"] {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+`
 
 interface StyleSnapshot {
   readonly value: string
@@ -22,6 +40,8 @@ interface StyleSnapshot {
 export class HeaderPopups {
   private observer: MutationObserver | null = null
   private active: HTMLUListElement | null = null
+  private catalog: HTMLElement | null = null
+  private viewOptions: HTMLElement | null = null
   private original = new Map<string, StyleSnapshot>()
   private attached = false
   private scheduled = false
@@ -38,7 +58,13 @@ export class HeaderPopups {
    * scroll frame measured in tests/scroll-frame-budget.spec.ts. Resize stays ungated (rare, and
    * the fold marker can appear while the viewport changes).
    */
-  private readonly onScroll = (): void => { if (this.active !== null) this.schedule() }
+  private readonly onScroll = (event: Event): void => {
+    const affects = (panel: HTMLElement | null): boolean =>
+      panel !== null && !(event.target instanceof Node && panel.contains(event.target))
+    if (this.active !== null || affects(this.catalog) || affects(this.viewOptions)) {
+      this.schedule()
+    }
+  }
 
   attach(): void {
     if (this.attached) return
@@ -71,6 +97,10 @@ export class HeaderPopups {
     this.frame = null
     this.scheduled = false
     this.restore()
+    this.clearAnchoredStyles(this.catalog)
+    this.clearAnchoredStyles(this.viewOptions)
+    this.catalog = null
+    this.viewOptions = null
   }
 
   private schedule(): void {
@@ -82,6 +112,8 @@ export class HeaderPopups {
       this.frame = null
       this.scheduled = false
       this.sync()
+      this.syncCatalog()
+      this.syncViewOptions()
     })
   }
 
@@ -150,5 +182,67 @@ export class HeaderPopups {
     }
     this.active = null
     this.original.clear()
+  }
+
+  private syncCatalog(): void {
+    this.catalog = this.syncAnchoredPopup(this.catalog, SUBAGENT_PANEL, SUBAGENT_TRIGGER, 360, false)
+  }
+
+  private syncViewOptions(): void {
+    // Modern WebViews already have the anchor-positioned Workspace menu.
+    if (globalThis.CSS?.supports?.('top', 'anchor(bottom)')) return
+    this.viewOptions = this.syncAnchoredPopup(this.viewOptions, VIEW_OPTIONS_MENU, VIEW_OPTIONS_TRIGGER, 200, true)
+  }
+
+  private syncAnchoredPopup(
+    previous: HTMLElement | null, panelSelector: string, triggerSelector: string, preferredWidth: number, alignEnd: boolean,
+  ): HTMLElement | null {
+    const panel = document.querySelector<HTMLElement>(panelSelector)
+    if (panel !== previous) this.clearAnchoredStyles(previous)
+    if (panel === null) return null
+    const trigger = document.querySelector(triggerSelector)?.closest('button') ?? null
+    const viewport = visibleViewport()
+    if (trigger === null || viewport === null) {
+      this.clearAnchoredStyles(panel)
+      return null
+    }
+
+    const root = document.documentElement
+    const safe = getComputedStyle(root)
+    const inset = (edge: string): number => parseFloat(safe.getPropertyValue(edge)) || 0
+    const navBottom = root.hasAttribute('data-dsh-ime') ? 0 : inset('--dsh-android-navbar-bottom')
+    const safeTop = Math.max(viewport.top, inset('--dsh-android-system-top')) + VIEWPORT_MARGIN
+    const safeBottom = Math.min(viewport.top + viewport.height, window.innerHeight - navBottom) - VIEWPORT_MARGIN
+    const anchor = trigger.getBoundingClientRect()
+    const top = Math.min(safeBottom, Math.max(safeTop, anchor.bottom + POPUP_GAP))
+    const bottom = Math.max(safeTop, Math.min(safeBottom, anchor.top - POPUP_GAP))
+    const below = safeBottom - top
+    const above = bottom - safeTop
+    const opensDown = below >= above
+    const visual = window.visualViewport
+    const leftEdge = Math.max(visual?.offsetLeft ?? 0, inset('--dsh-android-system-left')) + VIEWPORT_MARGIN
+    const rightEdge = Math.min(
+      (visual?.offsetLeft ?? 0) + (visual?.width || window.innerWidth),
+      window.innerWidth - inset('--dsh-android-system-right'),
+    ) - VIEWPORT_MARGIN
+    const width = Math.max(1, Math.min(preferredWidth, rightEdge - leftEdge))
+    const anchorLeft = alignEnd ? anchor.right - width : anchor.left
+    const left = Math.max(leftEdge, Math.min(anchorLeft, rightEdge - width))
+
+    // Explicit coordinates also work on WebViews without CSS anchor positioning.
+    panel.style.setProperty('position-try-fallbacks', 'none', 'important')
+    panel.style.setProperty('top', opensDown ? `${top}px` : 'auto', 'important')
+    panel.style.setProperty('bottom', opensDown ? 'auto' : `${window.innerHeight - bottom}px`, 'important')
+    panel.style.setProperty('left', `${left}px`, 'important')
+    panel.style.setProperty('right', 'auto', 'important')
+    panel.style.setProperty('width', `${width}px`, 'important')
+    panel.style.setProperty('max-width', `${width}px`, 'important')
+    panel.style.setProperty('max-height', `${Math.max(1, Math.min(560, Math.max(below, above)))}px`, 'important')
+    return panel
+  }
+
+  private clearAnchoredStyles(panel: HTMLElement | null): void {
+    if (panel === null) return
+    for (const prop of ANCHORED_STYLES) panel.style.removeProperty(prop)
   }
 }

@@ -44,7 +44,7 @@ class OverlayFloatingComposerTest {
     assertFalse(row.contains("setColor(withAlpha(colorSurface,"))
     assertTrue(row.contains("setStroke(dp(1), colorBorder)"))
     assertFalse(row.contains("cornerRadii"))
-    val editor = section(c, "private val input = EditText", "private var lastInputLineCount")
+    val editor = section(c, "private val input = EditText", "private val actionButton")
     assertTrue(editor.contains("background = null"))
     assertTrue(editor.contains("maxLines = 4"))
   }
@@ -136,10 +136,7 @@ class OverlayFloatingComposerTest {
     for (forbidden in listOf("composerParams", "Slot.COMPOSER", "refreshComposerWindowHeight(",
       "c.view.translationY", "c.view.layoutParams", "MATCH_PARENT", "prepareAttachmentUi("))
       assertFalse("opening a sheet cannot move/resize/reparent input: " + forbidden, sync.contains(forbidden))
-    val resize = section(v2, "private fun refreshComposerWindowHeight()", "private var sending")
-    assertFalse("sheet height cannot become composer y avoidance", resize.contains("measureDrawerHeightPx"))
-    assertFalse(resize.contains("lp.y ="))
-    assertFalse(resize.contains("drawerParams"))
+    assertFalse(v2.contains("private fun refreshComposerWindowHeight()"))
     val composer = section(v2, "internal fun showComposer(", "private fun hideComposerImmediate()")
     assertTrue(composer.contains("y = OverlayWindowFrames.composerBottomPx(s)"))
     assertFalse(composer.contains("measureDrawerHeightPx"))

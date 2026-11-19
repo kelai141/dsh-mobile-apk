@@ -172,8 +172,9 @@ class OverlayV2ViewContractTest {
     assertTrue("initial focus is attached and still owned", focusInput.indexOf("if (!view.isAttachedToWindow || !canFocus()) return") in 0 until requestAt)
     val deferred = focusInput.substringAfter("input.post {")
     assertTrue("deferred IME work rechecks attachment/focus/ownership before showing keyboard",
-      deferred.indexOf("if (!view.isAttachedToWindow || !input.hasFocus() || !canFocus()) return@post") in
+      deferred.indexOf("if (!view.isAttachedToWindow || !input.hasFocus() || !view.hasWindowFocus() || !canFocus()) return@post") in
         0 until deferred.indexOf("imm?.showSoftInput("))
+    assertTrue(focusInput.contains("addOnWindowFocusChangeListener(listener)"))
     val fade = source("OverlayPillView.kt").substringAfter("fun fadeIn()").substringBefore("fun fadeOutAndShrink(")
     val animationGate = fade.indexOf("if (!attached || !motionEnabled)")
     assertTrue(fade.indexOf("view.scaleX = 1f") in 0 until animationGate)
@@ -184,7 +185,7 @@ class OverlayV2ViewContractTest {
   fun cancellingIndependentDrawerAnimationInvalidatesItsGenerationAndStaleEndAction() {
     assertDrawerCancellationContract(source("OverlayComposer.kt"))
     val v2 = source("OverlayV2.kt")
-    val hide = v2.substringAfter("private fun hideDrawer(animated: Boolean)").substringBefore("private fun refreshComposerWindowHeight()")
+    val hide = v2.substringAfter("private fun hideDrawer(animated: Boolean)").substringBefore("private var lastComposerMeasuredHeight")
     val generation = hide.indexOf("val generation = ++drawerWindowGeneration")
     val guard = hide.indexOf("if (generation == drawerWindowGeneration)")
     val remove = hide.indexOf("windows.remove(OverlayWindows.Slot.DRAWER)")

@@ -19,10 +19,8 @@
  * 手势模式下没有可遮挡的栏，交互面不该凭空留出一条纯背景带。
  * 壳侧变量缺失时（桌面/旧壳）回落到保守值，再回落到 0px。
  *
- * 键盘高度不进这条 padding（issue #783 已合并的另一半）：壳侧已经把同一个 IME inset
- * 施加到 WebView 自身的布局尺寸上（`MainActivity` 的 `webView.setPadding(0, 0, 0, ime)`），
- * 布局视口因此真的变短，seat 的自然底边早已落在键盘顶。键盘弹起期间这条预留由
- * keyboard-boundary.ts 归零，避免同一个高度被两侧各算一次。
+ * The Android host resizes the WebView to the keyboard edge. The IME marker
+ * switches the hero alignment and removes the redundant navigation padding.
  *
  * #1782（用户真机 V2425A 1260x2800）：**键盘展开 + 输入框里有附件**时，输入框被抬到
  * 特别高。真因不在 IME 通道（那条按设计不进这里，实测 ime=0px 时同样复现），而在
@@ -44,6 +42,27 @@ export const COMPOSER_INSETS_CSS: string = `
     env(safe-area-inset-bottom, 0px),
     var(--dsh-android-navbar-bottom, var(--dsh-android-system-bottom, 0px))
   );
+}
+
+html[data-dsh-ime] [data-composer-seat] [class*='composerStack'] {
+  padding-bottom: 0;
+}
+
+/* The two spacers keep the hero centered in the original viewport until
+   the moving keyboard reaches it. The bottom spacer then stays at zero. */
+html[data-dsh-ime] [data-content-phase='hero'] [data-conversation-scroll] {
+  justify-content: flex-start;
+}
+
+html[data-dsh-ime] [data-content-phase='hero'] [data-conversation-scroll]::before {
+  content: '';
+  flex: 1 1 var(--dsh-android-ime-bottom, 0px);
+  min-height: 0;
+}
+
+html[data-dsh-ime] [data-content-phase='hero'] [data-conversation-scroll]::after {
+  content: '';
+  flex: 1 0 0px;
 }
 
 /* #1782：seat 不得高过它的滚动容器，否则 sticky 贴底会把 seat 顶边顶出容器。 */

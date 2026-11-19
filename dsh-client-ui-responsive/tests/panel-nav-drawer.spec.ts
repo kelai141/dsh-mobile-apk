@@ -200,6 +200,25 @@ describe('PanelNavDrawer：点会话行菜单入口不得收起抽屉', () => {
     h.drawer.detachNavDismiss()
   })
 
+  it('preserves the drawer while opening the plain workspace view-options trigger', async () => {
+    const h = drawerHarness({})
+    const header = document.createElement('div')
+    header.setAttribute('data-sidebar-workspace-header', '')
+    h.column.prepend(header)
+    const trigger = document.createElement('button')
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    trigger.append(icon)
+    header.append(trigger)
+    const menu = document.createElement('div')
+    menu.setAttribute('role', 'menu')
+    trigger.addEventListener('click', () => { document.body.append(menu) })
+
+    await clickAndSettle(icon)
+    expect(menu.isConnected).toBe(true)
+    expect(h.maskClicks).not.toHaveBeenCalled()
+    h.drawer.detachNavDismiss()
+  })
+
   it('正控：真正的导航按钮（无菜单属性）仍必须收起抽屉（修复不得把功能关掉）', async () => {
     const h = drawerHarness({})
     await clickAndSettle(h.menuButton)
