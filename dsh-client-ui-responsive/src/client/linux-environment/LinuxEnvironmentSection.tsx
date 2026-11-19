@@ -346,8 +346,8 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
     setError('')
     setPhase(nextPhase)
     try {
-      if (inFlightAutoCheck !== null) {
-        try { await inFlightAutoCheck } catch { /* non-fatal */ }
+      if (nextPhase !== 'checking' && releaseCheck !== null) {
+        try { await releaseCheck } catch { /* A query failure does not block local operations. */ }
       }
       // 动作返回的宿主状态先落地：手动 check 刚刷新出的 updateAvailable 不会被紧随其后的
       // 状态轮询（可能还是上一拍缓存）抹掉。
