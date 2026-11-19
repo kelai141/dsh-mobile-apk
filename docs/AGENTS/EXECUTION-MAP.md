@@ -2565,6 +2565,8 @@ During a C rootfs candidate handoff, the Linux host adapter verifies the retaine
 
 For file-backed Linux assets, LinuxAssetExtractor opens LinuxXzInputStream before applying the existing tar entry checks. The reader duplicates the verified archive descriptor and decodes through the packaged dsh_linux_xz library. When a block requires more native memory than allowed, the Java decoder resumes at the same decoded offset. Invalid archive bytes propagate to the existing installation failure path.
 
+For CRC64 streams whose first block declares both sizes, liblzma uses up to four decoder threads with a 48 MiB threading budget and a 64 MiB hard limit. Other XZ layouts retain the single-threaded decoder.
+
 Before downloading a rootfs candidate, LinuxAssetPrepare tries the last compressed rootfs in the app cache. Both the local copy and a fresh download go through LinuxAssetIO size, SHA-256 and source validation before extraction. The installer independently revalidates the candidate before activation.
 
 Android extraction checks each parent with lstat. Regular files are created exclusively, written through the open descriptor and assigned their final owner permissions before the descriptor closes.

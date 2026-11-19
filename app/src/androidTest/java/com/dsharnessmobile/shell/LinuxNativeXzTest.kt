@@ -77,6 +77,38 @@ class LinuxNativeXzTest {
     }
   }
 
+  @Test fun sizedBlocksDecodeAndRejectCorruptPayloads() {
+    val expected = "DSH Android block decoder test\n".repeat(2400).toByteArray()
+    // Three independently compressed XZ blocks with lengths in their headers.
+    val encoded = android.util.Base64.decode(
+      "/Td6WFoAAATm1rRGA8BrgIACIQESAAAA4zOULeB//wBjXQAiFMUQGBWnam8PCYJZ+NAcOcJNPw8BcIFYUPqvanv1" +
+      "8JitZlhSND7qeTl0t0GQef0QGzMNfQfrBhxcIqRajxSCr+OYplbYvaKUww14tM7zUDsqXU1238WvWUvfmXV1s+5P" +
+      "AAAAAIxf3wV0p82aA8BrgIACIQESAAAA4zOULeB//wBjXQApkgADEsUnnjvIOQKPMu3Sw4Zl6o91BcmDIg8gEBqu" +
+      "6vDRwZGaUGbVlHmDtXxNGahfAO9bbx5HL10CtphNlwNlFZBIt4LTDSkVzhYR3UZifhwasElyw+egPEnIidGR7iHe" +
+      "AAAAAPH8QxcyKhj/A8BSoEUhARIAAAAAkAVsLeAinwBKXQAkCAQnI4Ii0b2LiA3YUgHUas1IHn4CAsfw/VsRSSVC" +
+      "rWI9t0fAQf6HO/3J5v2g0dHuebAsrruTHPu9yC+4e0oQaXRCqrQ55jOXAAAAAHLAoOoRpXMeAAODAYCAAoMBgIAC" +
+      "aqBFAMvYaLOsJz4tBAAAAAAEWVo=", android.util.Base64.DEFAULT,
+    )
+    withArchive(encoded) { file ->
+      val last = SeekableXZInputStream(SeekableFileInputStream(file)).use { index ->
+        assertEquals(3, index.blockCount)
+        index.getBlockCompPos(2).toInt()
+      }
+      file.inputStream().use { raw ->
+        LinuxXzInputStream.open(raw).use { stream ->
+          assertTrue(stream is LinuxXzInputStream)
+          assertArrayEquals(expected, stream.readBytes())
+        }
+      }
+      val headerBytes = ((encoded[last].toInt() and 255) + 1) * 4
+      encoded[last + headerBytes] = 0
+      file.writeBytes(encoded)
+      assertThrows(IOException::class.java) {
+        file.inputStream().use { raw -> LinuxXzInputStream.open(raw).use { it.readBytes() } }
+      }
+    }
+  }
+
   @Test fun secondBlockCanResumeInJavaAfterNativeMemoryLimit() {
     val encoded = archive()
     withArchive(encoded) { file ->

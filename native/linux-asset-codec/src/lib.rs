@@ -1,14 +1,81 @@
 use liblzma::{
     bufread::XzDecoder,
-    stream::{Stream, TELL_UNSUPPORTED_CHECK},
+    stream::{Check, MtStreamBuilder, Stream, TELL_UNSUPPORTED_CHECK},
 };
 use std::io::{self, BufRead};
 
 const DECODER_MEMORY_LIMIT: u64 = 64 * 1024 * 1024;
+const THREADING_MEMORY_LIMIT: u64 = 48 * 1024 * 1024;
 
-fn decoder<R: BufRead>(reader: R) -> io::Result<XzDecoder<R>> {
-    let stream = Stream::new_stream_decoder(DECODER_MEMORY_LIMIT, TELL_UNSUPPORTED_CHECK)?;
+fn sized_crc64_blocks(header: &[u8]) -> bool {
+    // An XZ block can be decoded in parallel only if its header advertises both sizes.
+    // Select only a supported stream check. liblzma validates the header CRC and all blocks.
+    header.starts_with(b"\xfd7zXZ\0\0\x04")
+        && header.len() >= 14
+        && header[12] != 0
+        && header[13] & 0xc0 == 0xc0
+        && Check::Crc64.is_supported()
+}
+
+fn decoder<R: BufRead>(mut reader: R) -> io::Result<XzDecoder<R>> {
+    let stream = if sized_crc64_blocks(reader.fill_buf()?) {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(4) as u32);
+        MtStreamBuilder::new()
+            .threads(threads)
+            .memlimit_threading(THREADING_MEMORY_LIMIT)
+            .memlimit_stop(DECODER_MEMORY_LIMIT)
+            .decoder()?
+    } else {
+        Stream::new_stream_decoder(DECODER_MEMORY_LIMIT, TELL_UNSUPPORTED_CHECK)?
+    };
     Ok(XzDecoder::new_stream(reader, stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use liblzma::write::XzEncoder;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn single_and_sized_blocks_decode_identically() {
+        let source: Vec<u8> = (0..400_000).map(|n| ((n * 17) ^ (n / 64)) as u8).collect();
+        let streams = [
+            Stream::new_easy_encoder(1, Check::Crc64).unwrap(),
+            MtStreamBuilder::new()
+                .threads(2)
+                .block_size(64 * 1024)
+                .check(Check::Crc64)
+                .encoder()
+                .unwrap(),
+        ];
+        for (i, stream) in streams.into_iter().enumerate() {
+            let mut out = XzEncoder::new_stream(Vec::new(), stream);
+            out.write_all(&source).unwrap();
+            let bytes = out.finish().unwrap();
+            assert_eq!(sized_crc64_blocks(&bytes), i == 1);
+            let mut decoded = Vec::new();
+            decoder(bytes.as_slice())
+                .unwrap()
+                .read_to_end(&mut decoded)
+                .unwrap();
+            assert_eq!(decoded, source);
+        }
+    }
+
+    #[test]
+    fn unsupported_check_or_unsized_header_uses_the_existing_decoder() {
+        let mut header = *b"\xfd7zXZ\0\0\x04\xe6\xd6\xb4\x46\x04\xc0";
+        assert!(sized_crc64_blocks(&header));
+        for id in [0, 1, 2, 10, 15] {
+            header[7] = id;
+            assert!(!sized_crc64_blocks(&header));
+        }
+        header[7] = 4;
+        header[13] = 0x40;
+        assert!(!sized_crc64_blocks(&header));
+        assert!(!sized_crc64_blocks(&header[..9]));
+    }
 }
 
 #[cfg(target_os = "android")]
