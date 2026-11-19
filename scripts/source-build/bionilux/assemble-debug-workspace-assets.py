@@ -106,6 +106,19 @@ def descriptor(path: Path, template: dict, unpacked: int) -> dict:
             'size': path.stat().st_size, 'unpackedSize': unpacked, 'sha256': sha256(path)}
 
 
+def split_node_debug(node: bytes, work: Path, symbols: Path) -> bytes:
+    original = work / 'node-original'
+    stripped = work / 'node-stripped'
+    runtime = work / 'node-runtime'
+    original.write_bytes(node)
+    symbols.mkdir()
+    debug = symbols / 'node.debug'
+    subprocess.run(['objcopy', '--only-keep-debug', original, debug], check=True)
+    subprocess.run(['objcopy', '--strip-unneeded', original, stripped], check=True)
+    subprocess.run(['objcopy', '--add-gnu-debuglink=node.debug', stripped, runtime], cwd=symbols, check=True)
+    return runtime.read_bytes()
+
+
 def pack_rootfs_blocks(archive: Path, work: Path, planner: Path) -> None:
     raw = work / 'rootfs-source.tar'
     with lzma.open(archive, 'rb') as source, raw.open('xb') as output:
@@ -128,7 +141,8 @@ def pack_rootfs_blocks(archive: Path, work: Path, planner: Path) -> None:
     packed.replace(archive)
 
 
-def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path, block_planner: Path | None = None) -> None:
+def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path, block_planner: Path | None = None,
+             split_symbols: bool = False) -> None:
     if output.exists() or output.is_symlink():
         raise ValueError(f'Asset destination already exists: {output}')
     destination = output.parent.resolve(strict=True) / output.name
@@ -159,6 +173,8 @@ def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path, blo
         unpacked = repack(plugin, plugin_target, {name: sources[name] for name in (MANAGER, PLUGIN_ENTRY, SESSION)})
         manifest['plugins']['runtime'] = descriptor(plugin_target, manifest['plugins']['runtime'], unpacked)
         node_target = result / stock_node.name
+        if split_symbols:
+            compatible_node = split_node_debug(compatible_node, work, result / 'symbols')
         unpacked = repack(stock_node, node_target, {'bin/node': compatible_node})
         baseline['nodeAsset'] = descriptor(node_target, baseline['nodeAsset'], unpacked)
         rootfs_target = result / 'debian-workspace-lite-x86_64-diagnostic.tar.xz'
@@ -188,9 +204,11 @@ def main() -> None:
     parser.add_argument('output', type=Path, help='new directory for fixture assets')
     parser.add_argument('--rootfs-block-planner', type=Path, metavar='BINARY',
                         help='build content-defined XZ blocks with the compiled dsh-rootfs-blocks planner')
+    parser.add_argument('--split-node-debug', action='store_true',
+                        help='package a stripped guest Node and save its detached GNU symbols under symbols/')
     args = parser.parse_args()
     try:
-        assemble(args.base, args.rootfs, args.libc, args.node, args.output, args.rootfs_block_planner)
+        assemble(args.base, args.rootfs, args.libc, args.node, args.output, args.rootfs_block_planner, args.split_node_debug)
     except (OSError, ValueError, tarfile.TarError, subprocess.CalledProcessError) as error:
         parser.exit(1, f'{parser.prog}: {error}\n')
 
