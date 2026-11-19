@@ -20,8 +20,9 @@
  * `<filesDir>/linux-environment/staging/<sha256>/`。
  */
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
+import { createReadStream, lstatSync } from 'node:fs'
 import { cp, lstat, mkdir, readdir, readFile, readlink, rename, rm, symlink, unlink } from 'node:fs/promises'
+import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /** 与 Kotlin `LinuxAssetIO.ENV_DIR` 同口径（`check-linux-host-staging-invariant` 守）。 */
@@ -123,7 +124,7 @@ async function prepareStagedTree(source: string, destination?: string, kind = 'p
   for (const entry of await readdir(source, { withFileTypes: true })) {
     const from = join(source, entry.name)
     const to = destination === undefined ? undefined : join(destination, entry.name)
-    const info = await lstat(from)
+    const info = destination === undefined ? lstatSync(from) : await lstat(from)
     if (info.isSymbolicLink()) {
       if (kind !== 'rootfs' && kind !== 'node') {
         throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, `宿主解包树含符号链接：${entry.name}`)
@@ -155,6 +156,42 @@ async function prepareStagedTree(source: string, destination?: string, kind = 'p
       throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, `宿主解包树含不支持的条目类型：${entry.name}`)
     }
   }
+}
+
+// An exclusively claimed tree can contain thousands of entries. Keep its real-time
+// type checks on a dedicated worker so storage latency cannot stall engine requests.
+const ROOTFS_WORKER_TASK = 'dsh-android.verify-claimed-rootfs'
+
+if (!isMainThread && parentPort && workerData?.task === ROOTFS_WORKER_TASK) {
+  const port = parentPort
+  try {
+    await prepareStagedTree(workerData.tree, undefined, 'rootfs')
+    port.postMessage({ ok: true })
+  } catch (error) {
+    if (!(error instanceof LinuxHostAssetError)) throw error
+    port.postMessage({ ok: false, code: error.code, message: error.message })
+  }
+}
+
+function verifyClaimedRootfs(tree: string): Promise<void> {
+  const worker = new Worker(new URL(import.meta.url), {
+    workerData: { task: ROOTFS_WORKER_TASK, tree },
+    execArgv: [],
+  })
+  return new Promise((resolve, reject) => {
+    let verified = false
+    let failure: LinuxHostAssetError | undefined
+    worker.once('message', result => {
+      if (result?.ok === true) verified = true
+      else failure = new LinuxHostAssetError(result.code, result.message)
+    })
+    worker.once('error', reject)
+    worker.once('exit', code => {
+      if (failure) reject(failure)
+      else if (code === 0 && verified) resolve()
+      else reject(new Error('Rootfs verification worker exited without verifying the tree'))
+    })
+  })
 }
 
 /** bootstrap 需要的适配器面：只有这两个，且都是透传。 */
@@ -283,7 +320,7 @@ export function createHostAssetIO(options: { filesDir: string }): HostAssetIO {
         const tree = join(owned, UNPACKED_DIR)
         const treeStarted = performance.now()
         await assertPlainDirectory(tree, CODE_HOST_TREE_UNSAFE, 'Candidate rootfs tree')
-        await prepareStagedTree(tree, undefined, 'rootfs')
+        await verifyClaimedRootfs(tree)
         recordTiming?.('candidate_tree_verify', performance.now() - treeStarted)
         const moveStarted = performance.now()
         await rename(tree, target)

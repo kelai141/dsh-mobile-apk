@@ -8,7 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -450,6 +450,22 @@ test('rootfs handoff rejects mismatched receipts and rehashes the retained archi
     assert.ok(existsSync(prepared.candidate))
     await writeFile(join(prepared.candidate, RETAINED_ARCHIVE), 'x'.repeat(prepared.asset.size))
     await assert.rejects(io.claimRootfsCandidate(prepared.id, prepared.asset, prepared.destination), /digest/)
+    assert.ok(!existsSync(prepared.destination))
+    assert.ok(!existsSync(prepared.candidate))
+  } finally {
+    await rm(filesDir, { recursive: true, force: true })
+  }
+})
+
+test('candidate verification rejects an out-of-tree link before publishing the tree', async () => {
+  const filesDir = await tempFilesDir()
+  try {
+    const prepared = await stageRootfsCandidate(filesDir)
+    await symlink('../../external', join(prepared.tree, 'external-link'), 'file')
+    await assert.rejects(
+      createHostAssetIO({ filesDir }).claimRootfsCandidate(prepared.id, prepared.asset, prepared.destination),
+      { code: 'linux-host-tree-unsafe' },
+    )
     assert.ok(!existsSync(prepared.destination))
     assert.ok(!existsSync(prepared.candidate))
   } finally {
