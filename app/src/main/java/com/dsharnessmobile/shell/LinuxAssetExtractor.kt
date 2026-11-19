@@ -3,6 +3,7 @@ package com.dsharnessmobile.shell
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.NoSuchFileException
@@ -26,6 +27,7 @@ internal object LinuxAssetExtractor {
 
   private const val BUFFER_SIZE = 64 * 1024
   private val drivePrefix = Regex("^[A-Za-z]:")
+  private val androidFileIO = System.getProperty("java.vm.name") == "Dalvik"
 
   fun extract(
     input: InputStream,
@@ -189,6 +191,7 @@ internal object LinuxAssetExtractor {
   }
 
   private fun ensureDirectory(target: File) {
+    if (androidFileIO) return LinuxArchiveFileIO.ensureDirectory(target)
     val path = target.toPath()
     val attrs = try {
       Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
@@ -200,30 +203,37 @@ internal object LinuxAssetExtractor {
   }
 
   private fun writeFile(target: File, tar: TarArchiveInputStream, buf: ByteArray) {
+    if (androidFileIO) {
+      LinuxArchiveFileIO.write(target) { out -> writeContents(out, tar, buf) }
+      return
+    }
     val path = target.toPath()
     if (Files.exists(path, NOFOLLOW_LINKS)) {
       val attrs = Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
       if (attrs.isDirectory || attrs.isSymbolicLink) throw IOException("文件条目与现有条目冲突：${target.absolutePath}")
       Files.delete(path)
     }
-    val prefix = ByteArray(4)
-    var prefixLength = 0
-    target.outputStream().use { out ->
-      var n = tar.read(buf)
-      while (n >= 0) {
-        if (prefixLength < prefix.size) {
-          val copied = minOf(prefix.size - prefixLength, n)
-          System.arraycopy(buf, 0, prefix, prefixLength, copied)
-          prefixLength += copied
-        }
-        out.write(buf, 0, n)
-        n = tar.read(buf)
-      }
-    }
+    val executable = target.outputStream().use { out -> writeContents(out, tar, buf) }
     target.setReadable(false, false)
     target.setReadable(true, true)
     target.setWritable(true, true)
-    target.setExecutable(SnapshotFileMode.isDirectlyExecutable(prefix, prefixLength), true)
+    target.setExecutable(executable, true)
+  }
+
+  private fun writeContents(out: OutputStream, tar: TarArchiveInputStream, buf: ByteArray): Boolean {
+    val prefix = ByteArray(4)
+    var prefixLength = 0
+    var count = tar.read(buf)
+    while (count >= 0) {
+      if (prefixLength < prefix.size) {
+        val copied = minOf(prefix.size - prefixLength, count)
+        System.arraycopy(buf, 0, prefix, prefixLength, copied)
+        prefixLength += copied
+      }
+      out.write(buf, 0, count)
+      count = tar.read(buf)
+    }
+    return SnapshotFileMode.isDirectlyExecutable(prefix, prefixLength)
   }
 
   private fun closeKeepingPrimary(closeable: java.io.Closeable, primary: Throwable?) {

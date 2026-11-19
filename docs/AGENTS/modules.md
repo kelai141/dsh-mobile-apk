@@ -348,3 +348,5 @@ Android API 面登记见 `docs/AGENTS/ANDROID-API-USAGE.md` §1/§3/§4/§8；�
 LinuxXzInputStream.java owns the Android Linux archive reader and its native decoder lifetime. The Rust library in native/linux-asset-codec supplies bounded XZ decoding through JNI. LinuxAssetExtractor retains responsibility for entry limits, paths, links, executable modes and file publication.
 
 LinuxRootfsArchiveCache keeps one compressed rootfs in Android cache storage. Each candidate receives a separately verified private copy.
+
+LinuxArchiveFileIO implements Android directory checks, exclusive file creation and descriptor-based permissions for LinuxAssetExtractor.
