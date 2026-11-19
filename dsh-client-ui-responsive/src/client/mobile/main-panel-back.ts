@@ -56,6 +56,8 @@
  * the button painted, the premise flips. Levels where this module injects nothing (the
  * detail levels, whose crumb is authoritative) still keep ☰.
  */
+import { strokeArrow } from './settings-nav.ts'
+
 const PANEL_SELECTOR = '[data-plugin-panel]'
 /** The page head row. `data-window-drag` separates it from the intro/status siblings. */
 const HEAD_SELECTOR = 'header[data-window-drag]'
@@ -73,7 +75,7 @@ export const MAIN_PANEL_HEAD_ATTR = 'data-dsh-main-panel-head'
 export const MAIN_PANEL_OPEN_ATTR = 'data-dsh-main-panel-open'
 /**
  * Marker on the panel while it presents the "更多" sub-view (a head that carries its own
- * back control). 只有这一屏收页头上边距：主列表页的 sticky 测量依赖原值。
+ * back control).
  */
 export const MAIN_PANEL_MORE_ATTR = 'data-dsh-main-panel-more'
 /** Our control. Read by back-stack.ts as the list level's own closure. */
@@ -93,27 +95,6 @@ export const PANEL_DETAIL_SELECTORS = [
 const MOBILE_FORM_ATTR = 'data-dsh-mobile-form'
 /** The frame root, tagged by the form marker; the right column identifies it before the tag lands. */
 const FRAME_SELECTOR = '[data-dsh-frame]'
-/** Back to the Conversation. */
-const BACK_LABEL = '返回会话'
-
-/** A chevron pointing left; drawn here so no icon package is pulled into this plugin. */
-function chevronLeft(): SVGSVGElement {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-  svg.setAttribute('viewBox', '0 0 18 18')
-  svg.setAttribute('width', '18')
-  svg.setAttribute('height', '18')
-  svg.setAttribute('fill', 'none')
-  svg.setAttribute('aria-hidden', 'true')
-  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-  path.setAttribute('d', 'M11 4 6 9l5 5')
-  path.setAttribute('stroke', 'currentColor')
-  path.setAttribute('stroke-width', '1.6')
-  path.setAttribute('stroke-linecap', 'round')
-  path.setAttribute('stroke-linejoin', 'round')
-  svg.appendChild(path)
-  return svg
-}
-
 /**
  * The head row that carries the section title, at any depth inside the panel.
  *
@@ -282,13 +263,11 @@ export class MainPanelBackMount {
   private createButton(): HTMLButtonElement {
     const button = document.createElement('button')
     button.type = 'button'
-    button.className = 'dsh-main-panel-back'
     button.setAttribute(MAIN_PANEL_BACK_ATTR, '')
-    button.setAttribute('aria-label', BACK_LABEL)
-    button.appendChild(chevronLeft())
-    const text = document.createElement('span')
-    text.textContent = '返回'
-    button.appendChild(text)
+    button.setAttribute('aria-label', document.documentElement.lang.toLowerCase().startsWith('zh')
+      ? '返回会话'
+      : 'Back to conversation')
+    button.appendChild(strokeArrow('M11 4 6 9l5 5'))
     button.addEventListener('click', (event) => {
       event.preventDefault()
       this.leave()

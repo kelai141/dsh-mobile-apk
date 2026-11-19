@@ -9,12 +9,8 @@
  *   用户「一直卡在这个页面」，所以这条不再隐藏；
  * - 注入的「返回会话」键只留 DOM 不画脸：`display: none` 但节点还在，
  *   back-stack.ts 的 closeMainPanel 仍能程序化点它（按钮缺席时它还有 leave() 回落）；
- * - 页头 28px 上边距收掉，标题落在安全区下沿 —— 走 `--plugin-page-top-inset` 这个上游
- *   自己的调节点，**不碰 header 的 padding 属性**（页头的 sticky 测量依赖它，见
- *   tests/main-panel-back.spec.ts 的 D 组判据）。
- *
- * 作用面：收上边距只落在 `[data-dsh-main-panel-more]`（「更多」子视图）。主列表页没有
- * 返回键，它的页头与 sticky 测量保持原样 —— 用户第二轮反馈正是「删了返回就卡住」。
+ * - 手机中栏已经预留 Android 安全区。全局面板无需再给已让位的抽屉开关预留一行。
+ * - 插件页通过上游自己的 `--plugin-page-top-inset` 消除额外顶距，测量副本也读取同一个值。
  *
  * 行内布局：`justify-content: flex-start` 挡住 `space-between` 把标题推回中间，
  * `gap: 8px` 是 moreBack 与标题之间的距离。主列表页的 toolbar 仍然靠右，标题块
@@ -32,13 +28,22 @@ export const MAIN_PANEL_BACK_CSS: string = `
   }
 
   html[data-dsh-mobile-form] [data-dsh-main-panel-head] > div:first-of-type {
-    flex: 1 1 auto;
+    flex: 1 1 0;
     min-width: 0;
   }
 
-  /* 页头 28px 上边距收掉：只改上游自己的变量，不改 padding 属性。 */
-  html[data-dsh-mobile-form] [data-plugin-panel][data-dsh-main-panel-more] {
+  html[data-dsh-mobile-form] [data-dsh-frame][data-dsh-main-panel-open] > [class*='centerCol'] > [data-global-panel] {
+    padding-top: 0;
+  }
+
+  html[data-dsh-mobile-form] [data-dsh-frame][data-dsh-main-panel-open] [data-plugin-panel],
+  html[data-dsh-mobile-form] [data-dsh-frame][data-dsh-main-panel-open] [data-plugin-bar][data-measuring][data-compact] {
     --plugin-page-top-inset: 0px;
+  }
+
+  /* 标题和设置页同款的 40px 返回键沿同一行对齐。 */
+  html[data-dsh-mobile-form] [data-dsh-main-panel-head] [data-plugin-header-part='title'] {
+    line-height: 40px;
   }
 
   /* 注入的返回键：只在「更多 / 实验性插件」那一屏兜底隐藏。
@@ -52,8 +57,7 @@ export const MAIN_PANEL_BACK_CSS: string = `
     display: none !important;
   }
 
-  /* 主面板占屏时，左上角不是抽屉开关。判据由 main-panel-back.ts 写在 frame 上，
-     且只在「更多」这一屏写（那一屏有自己的返回控件）。 */
+  /* 列表页和「更多」页占屏时，左上角显示各自的返回控件。 */
   html[data-dsh-mobile-form] [data-dsh-frame][data-dsh-main-panel-open] [data-sidebar-opener] {
     display: none !important;
   }

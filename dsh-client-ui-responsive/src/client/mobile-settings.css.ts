@@ -144,7 +144,8 @@ export const MOBILE_SETTINGS_CSS: string = `
     height: 40px;
   }
 
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog] [data-dsh-settings-back] {
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog] [data-dsh-settings-back],
+  html[data-dsh-mobile-form] [data-dsh-main-panel-head] [data-dsh-main-panel-back] {
     flex: none;
     display: inline-flex;
     align-items: center;
@@ -159,11 +160,13 @@ export const MOBILE_SETTINGS_CSS: string = `
     cursor: pointer;
   }
 
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog] [data-dsh-settings-back]:hover {
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog] [data-dsh-settings-back]:hover,
+  html[data-dsh-mobile-form] [data-dsh-main-panel-head] [data-dsh-main-panel-back]:hover {
     background: var(--dsw-alias-interactive-bg-hover);
   }
 
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog] [data-dsh-settings-back]:focus-visible {
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog] [data-dsh-settings-back]:focus-visible,
+  html[data-dsh-mobile-form] [data-dsh-main-panel-head] [data-dsh-main-panel-back]:focus-visible {
     outline: 2px solid var(--dsw-alias-link);
     outline-offset: 2px;
   }
