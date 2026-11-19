@@ -200,6 +200,19 @@ diff --git a/sysdeps/unix/sysv/linux/mkdir.c b/sysdeps/unix/sysv/linux/mkdir.c
  }
 
  libc_hidden_def (__mkdir)
+diff --git a/sysdeps/unix/sysv/linux/poll.c b/sysdeps/unix/sysv/linux/poll.c
+--- a/sysdeps/unix/sysv/linux/poll.c
++++ b/sysdeps/unix/sysv/linux/poll.c
+@@ -25,7 +25,8 @@
+ int
+ __poll (struct pollfd *fds, nfds_t nfds, int timeout)
+ {
+-#ifdef __NR_poll
++  /* Android x86-64 provides ppoll for the standard poll operation.  */
++#if defined __NR_poll && !defined __x86_64__
+   return SYSCALL_CANCEL (poll, fds, nfds, timeout);
+ #else
+   struct timespec timeout_ts;
 diff --git a/sysdeps/unix/sysv/linux/rename.c b/sysdeps/unix/sysv/linux/rename.c
 --- a/sysdeps/unix/sysv/linux/rename.c
 +++ b/sysdeps/unix/sysv/linux/rename.c
