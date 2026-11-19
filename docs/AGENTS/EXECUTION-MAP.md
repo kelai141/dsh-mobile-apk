@@ -2541,4 +2541,4 @@ plugins/dsh-android-phone-control/test/registration.test.mjs
 app/src/androidTest/java/com/dsharnessmobile/shell/nativecontrol/NativeShizukuTextDeviceTest.kt
 -->
 
-软件源刷新（#1584）：runAptUpdate 经 ProcIo.readBoundedMillis 收集退出码与 I/O 状态，再调用 aptUpdateFailure；仅完整未截断、已知零退出码且无失败标记时成功，否则进入双文件回滚，回执在回滚完成后反映真实结果。实现与双语、真实子进程反例见 docs/contrib/Ni-ShuWu/2026-11-13-apt-update-verdict-1584.md。
+软件源刷新（#1584）：管理中心列出快照内的镜像配置供用户选择。`chosen_mirrors` 相对链接指向 `mirrors/chinese_mainland/` 下的真实片段。`runAptUpdate` 只刷新本次选择的主源，保留其他索引，经 `ProcIo.readBoundedMillis` 收集退出码与 I/O 状态，再调用 `aptUpdateFailure`。仅完整未截断、已知零退出码且无失败标记时成功，否则回滚来源配置与链接。失败详情写入 `dsh-source` 日志。真实子进程反例见 `docs/contrib/Ni-ShuWu/2026-11-13-apt-update-verdict-1584.md`。

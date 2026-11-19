@@ -48,25 +48,9 @@ internal object SourceSettings {
   fun currentMirror(prefix: File): SourceMirror.Mirror? =
     SourceMirror.currentMirror(sourcesListFile(prefix))
 
-  /**
-   * 循环切换的下一个目标：当前源的下一个，认不出当前源时从清单第一个开始。
-   *
-   * 循环而不是弹选择器：管理中心的既有交互都是"点一行做一件事"（语言行同样是循环），
-   * 换源只有 6 个候选，循环比新造一个列表页更省且没有新页面要维护。
-   *
-   * @param prefix 快照 usr 目录。
-   * @return 下一次点击应当切换到的镜像。
-   */
-  fun nextMirror(prefix: File, links: SourceMirror.LinkPrimitives = SourceMirror.PRODUCTION_LINKS): SourceMirror.Mirror {
-    // 意图优先读 chosen_mirrors：它是用户的选择，sources.list 只是 apt 的产物。
-    // 用户手工改过 sources.list 而链接没动时，以链接为准才不会来回横跳。
-    val chosen = captureSelection(prefix, links)
-    val current = chosen?.let { name -> SourceMirror.Mirror.entries.firstOrNull { it.file == name } }
-      ?: currentMirror(prefix)
-    val all = SourceMirror.Mirror.entries
-    if (current == null) return all.first()
-    return all[(all.indexOf(current) + 1) % all.size]
-  }
+  /** 管理中心只列出当前快照中有配置片段的镜像。 */
+  fun availableMirrors(prefix: File): List<SourceMirror.Mirror> =
+    SourceMirror.Mirror.entries.filter { SourceMirror.fragmentFile(prefix, it) != null }
 
   /**
    * 切换到指定镜像。
@@ -109,8 +93,7 @@ internal object SourceSettings {
     return try {
       SourceMirror.replaceAtomically(target, SourceMirror.sourcesListContent(mainUrl))
       // 双写：只写 sources.list 会被用户下一次 pkg update 随机覆盖（设备实测）。
-      runCatching { SourceMirror.writeChosenMirror(prefix, mirror) }
-        .onFailure { Log.w(TAG, "chosen_mirrors 写入失败（不致命，源已切换）: " + it.message) }
+      SourceMirror.writeChosenMirror(prefix, mirror)
 
       val verify = runAptUpdate(context, engine)
       if (verify == null) {
@@ -208,26 +191,35 @@ internal object SourceSettings {
   private fun runAptUpdate(context: Context, engine: EngineManager): String? {
     val aptGet = File(engine.usrDir, "bin/apt-get")
     if (!aptGet.isFile) return "运行时里缺少软件包管理器，无法刷新索引"
-    // 与 UndoGate / EngineManager 同一套拉起口径：Android 15+ 直接 exec app-data ELF 会
-    // Permission denied，捕获后经 /system/bin/linker64 加载（系统库加载机制对 app 数据放行）。
+    // 快照中的 apt-get 是设置 APT_CONFIG 的脚本，Android 限制执行 app-data 时由系统 sh 读取。
+    // 用户升级 apt 后入口可能已经变成 ELF，此时仍可走 linker64 回退。
     fun build(argv: List<String>): ProcessBuilder = ProcessBuilder(argv).apply {
       environment().putAll(engine.shellEnv())
       environment().putAll(ConsoleTerminalEnv.terminalEnv(engine.usrDir))
+      environment()["LC_ALL"] = "C"
+      val config = File(engine.usrDir, "etc/apt/apt.conf")
+      if (config.isFile) environment()["APT_CONFIG"] = config.absolutePath
       redirectErrorStream(true)
     }
-    val argv = listOf(aptGet.absolutePath, "update")
+    val args = listOf(aptGet.absolutePath, "update",
+      "-o", "Dir::Etc::sourceparts=-",
+      "-o", "APT::Get::List-Cleanup=0",
+      "-o", "APT::Update::Error-Mode=any")
+    val script = aptGet.inputStream().use { it.read() == '#'.code && it.read() == '!'.code }
     val proc = try {
-      build(argv).start()
+      build(if (script) listOf("/system/bin/sh") + args else args).start()
     } catch (e: java.io.IOException) {
-      if (e.message?.contains("Permission denied") != true) {
+      if (script || e.message?.contains("Permission denied") != true) {
         return "无法执行软件源刷新：" + (e.message ?: e.javaClass.simpleName)
       }
       Log.w(TAG, "apt-get direct exec denied, falling back to linker64: " + e.message)
-      build(listOf("/system/bin/linker64") + argv).start()
+      build(listOf("/system/bin/linker64") + args).start()
     }
     // 有界读（门禁 check-bounded-io 强制）：黑洞源不设上限会一直挂住（设备实测 60s+）。
     val r = ProcIo.readBoundedMillis(proc, UPDATE_TIMEOUT_MS)
-    return aptUpdateFailure(r, UiText.isEnglish(context))
+    return aptUpdateFailure(r, UiText.isEnglish(context)).also { failure ->
+      if (failure != null) Log.w(TAG, "$failure\n${r.text.takeLast(2048)}")
+    }
   }
 
   /** #1584: pure verdict; rollback success is appended only after rollback actually completes. */
@@ -277,11 +269,11 @@ internal object SourceSettings {
   private fun rollback(target: File, backup: File, hadPrevious: Boolean, prefix: File? = null, previousChosen: String? = null): Boolean {
     var restored = true
     runCatching {
-      if (hadPrevious && backup.isFile) {
+      if (hadPrevious) {
         SourceMirror.replaceAtomically(target, backup.readText())
       } else {
         // 从没有源变成有源的情形：回滚就是删掉我们写的那个文件。
-        target.delete()
+        java.nio.file.Files.deleteIfExists(target.toPath())
       }
       // chosen_mirrors 一并还原：留成新镜像时，pkg 的下一次 update 会以链接为准
       // 把刚还原的 sources.list 再改写回去（双写语义的反向也必须成立）。

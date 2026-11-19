@@ -217,43 +217,19 @@ class SourceSettingsTest {
     )
     for (name in realNames) File(dir, name).writeText("WEIGHT=1\nMAIN=\"https://$name/termux/termux-main\"\n")
     val links = FakeLinks()
-    // 逐档走一遍循环，每一档都必须能定位到片段并解析出地址。
-    for (round in SourceMirror.Mirror.entries.indices) {
-      val target = SourceSettings.nextMirror(usr, links)
-      val fragment = SourceMirror.fragmentFile(usr, target)
-      assertNotNull(
-        "第 " + round + " 轮选到 " + target.name + "（" + target.file + "），快照里没有这个片段名——" +
-          "换源走到这一档就会报「运行时里找不到该镜像的配置片段」",
-        fragment,
-      )
-      assertNotNull(
-        "第 " + round + " 轮选到 " + target.name + " 的片段里没有可解析的 MAIN=",
-        SourceMirror.parseMainUrl(fragment!!.readText()),
-      )
-      // 模拟 switchTo 写回：只有成功写到 chosen_mirrors，下一轮才会从这一档往后走。
+    assertEquals(SourceMirror.Mirror.entries, SourceSettings.availableMirrors(usr))
+    for (target in SourceSettings.availableMirrors(usr)) {
+      val fragment = SourceMirror.fragmentFile(usr, target)!!
+      assertNotNull(SourceMirror.parseMainUrl(fragment.readText()))
       SourceMirror.writeChosenMirror(usr, target, links)
-      SourceMirror.replaceAtomically(
-        SourceSettings.sourcesListFile(usr),
-        SourceMirror.sourcesListContent("https://${target.file}/termux/termux-main"),
-      )
+      val chosenTarget = SourceMirror.readChosenTarget(usr, links)!!
+      assertEquals(fragment, File(File(usr, "etc/termux"), chosenTarget))
     }
   }
 
   @Test
-  fun nextMirrorCyclesThroughTheListAndStartsOverAtTheEnd() {
-    val usr = prefix(*SourceMirror.Mirror.entries.toTypedArray())
-    val links = FakeLinks()
-    val all = SourceMirror.Mirror.entries
-    // 未设源时从第一个开始。
-    assertEquals(all.first(), SourceSettings.nextMirror(usr, links))
-    for (i in all.indices) {
-      SourceMirror.writeChosenMirror(usr, all[i], links)
-      SourceMirror.replaceAtomically(
-        SourceSettings.sourcesListFile(usr),
-        SourceMirror.sourcesListContent("https://${all[i].file}/termux/termux-main"),
-      )
-      val expected = all[(i + 1) % all.size]
-      assertEquals("从 " + all[i].name + " 的下一项", expected, SourceSettings.nextMirror(usr, links))
-    }
+  fun pickerOnlyOffersMirrorsPresentInTheSnapshot() {
+    val usr = prefix(SourceMirror.Mirror.TUNA, SourceMirror.Mirror.ALIYUN)
+    assertEquals(listOf(SourceMirror.Mirror.TUNA, SourceMirror.Mirror.ALIYUN), SourceSettings.availableMirrors(usr))
   }
 }
