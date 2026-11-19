@@ -5,7 +5,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
-import java.nio.file.Path
+import java.nio.file.NoSuchFileException
 import java.nio.file.Paths
 import java.nio.file.attribute.BasicFileAttributes
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
@@ -25,6 +25,9 @@ import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
  */
 internal object LinuxAssetExtractor {
 
+  private const val BUFFER_SIZE = 64 * 1024
+  private val drivePrefix = Regex("^[A-Za-z]:")
+
   fun extract(
     input: InputStream,
     totalBytes: Long,
@@ -35,7 +38,8 @@ internal object LinuxAssetExtractor {
   ) {
     val dest = destination.canonicalFile
     val xz = XZCompressorInputStream(input)
-    val tar = TarArchiveInputStream(xz)
+    val tar = TarArchiveInputStream(xz.buffered(BUFFER_SIZE))
+    val fileBuffer = ByteArray(BUFFER_SIZE)
     var primary: Throwable? = null
     try {
       var entries = 0
@@ -82,7 +86,7 @@ internal object LinuxAssetExtractor {
             throw IOException("资产归档含特殊文件，已拒绝：${entry.name}")
           entry.isFile -> {
             ensureParents(dest, segments.dropLast(1))
-            writeFile(target, tar)
+            writeFile(target, tar, fileBuffer)
           }
           else -> throw IOException("资产归档含不支持的条目类型：${entry.name}")
         }
@@ -103,7 +107,7 @@ internal object LinuxAssetExtractor {
     if (raw == null || raw.isEmpty() || raw.contains('\u0000')) return null
     val normalized = raw.replace('\\', '/')
     if (normalized.startsWith('/')) return null
-    if (Regex("^[A-Za-z]:").containsMatchIn(normalized)) return null
+    if (drivePrefix.containsMatchIn(normalized)) return null
     val segments = mutableListOf<String>()
     for (part in normalized.split('/')) {
       if (part.isEmpty() || part == ".") continue
@@ -181,29 +185,22 @@ internal object LinuxAssetExtractor {
     var current = root
     for (segment in segments) {
       current = File(current, segment)
-      val path = current.toPath()
-      if (Files.exists(path, NOFOLLOW_LINKS)) {
-        val attrs = Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
-        if (attrs.isSymbolicLink || !attrs.isDirectory) {
-          throw IOException("资产父路径不是真实目录：${current.absolutePath}")
-        }
-      } else {
-        Files.createDirectory(path)
-      }
+      ensureDirectory(current)
     }
   }
 
   private fun ensureDirectory(target: File) {
     val path = target.toPath()
-    if (Files.exists(path, NOFOLLOW_LINKS)) {
-      val attrs = Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
-      if (attrs.isSymbolicLink || !attrs.isDirectory) throw IOException("目录条目与现有条目冲突：${target.absolutePath}")
-    } else {
+    val attrs = try {
+      Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+    } catch (_: NoSuchFileException) {
       Files.createDirectory(path)
+      return
     }
+    if (!attrs.isDirectory) throw IOException("Expected a directory at ${target.absolutePath}")
   }
 
-  private fun writeFile(target: File, tar: TarArchiveInputStream) {
+  private fun writeFile(target: File, tar: TarArchiveInputStream, buf: ByteArray) {
     val path = target.toPath()
     if (Files.exists(path, NOFOLLOW_LINKS)) {
       val attrs = Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
@@ -213,7 +210,6 @@ internal object LinuxAssetExtractor {
     val prefix = ByteArray(4)
     var prefixLength = 0
     target.outputStream().use { out ->
-      val buf = ByteArray(64 * 1024)
       var n = tar.read(buf)
       while (n >= 0) {
         if (prefixLength < prefix.size) {

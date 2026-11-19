@@ -6,6 +6,7 @@ import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.Proxy
 import java.net.URL
+import java.nio.file.Files
 
 /**
  * Linux 环境资产 IO：宿主侧「下载 + 校验 + 安全解包」原语（0.15.0）。
@@ -329,10 +330,14 @@ internal object LinuxAssetIO {
     if (destCanon != rootCanon && !destCanon.startsWith(rootCanon + File.separator)) {
       return Failure(CODE_DESTINATION_ESCAPE, "下载目标越出允许根：${destination.absolutePath}")
     }
-    val tmp = File(destination.parentFile, destination.name + ".tmp")
+    val tmp = try {
+      val parent = destination.absoluteFile.parentFile ?: throw IOException("Asset has no parent directory")
+      Files.createDirectories(parent.toPath())
+      Files.createTempFile(parent.toPath(), ".${destination.name}-", ".tmp").toFile()
+    } catch (e: IOException) {
+      return Failure(CODE_DOWNLOAD_FAILED, e.message ?: e.javaClass.simpleName)
+    }
     try {
-      destination.parentFile?.mkdirs()
-      tmp.delete()
       val read = opener.fetch(fetchUrl, tmp, MAX_DOWNLOAD_BYTES)
       if (read < 0) return Failure(CODE_DOWNLOAD_FAILED, "下载失败或逐跳校验未通过")
       // 兜底上限在**本函数**里再判一次：注入的下载器可能不自己设限，判据不能只存在于生产实现里。
@@ -346,12 +351,8 @@ internal object LinuxAssetIO {
         val code = if (digest.bytes != spec.size) CODE_SIZE_MISMATCH else CODE_DIGEST_MISMATCH
         return Failure(code, detail)
       }
-      // #1057：校验通过后仍**读回已验证的字节**，再交给唯一原子写入口发布。
-      // 旧实现是「先 delete(destination) 再 rename，失败退 copyTo」——那两步都不是原子的：
-      // delete 后被杀就没有资产，copyTo 覆盖则会留下半份 tar.xz。
-      // 代价是这份资产（压缩包，量级几十 MB）要多读一次；换来的是「要发布的字节 == 已验证的字节」，
-      // 而不是「发布另一次写出的字节」。
-      AtomicFileReplace.writeBytes(destination, tmp.readBytes())
+      // Publish the same verified file. The atomic writer syncs it before the rename.
+      AtomicFileReplace.publishWritten(tmp, destination)
       return null
     } catch (e: Exception) {
       return Failure(CODE_DOWNLOAD_FAILED, e.message ?: e.javaClass.simpleName)
