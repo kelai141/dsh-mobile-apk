@@ -2574,4 +2574,4 @@ Before downloading a rootfs candidate, LinuxAssetPrepare tries the last compress
 
 Android extraction checks each parent with lstat. Regular files are created exclusively, written through the open descriptor and assigned their final owner permissions before the descriptor closes.
 
-When a cached XZ archive differs, LinuxRootfsBlocks uses bounded header and index reads to identify reusable compressed blocks. LinuxAssetIO validates each HTTP range and checks the entire reconstructed archive before publication. An unsupported layout, missing range or digest mismatch takes the full download path.
+When a cached XZ archive differs, LinuxRootfsBlocks reads a bounded trailer and rebuilds the stream header from the footer flags. It reuses cached blocks and fetches missing bytes outside that trailer. Two disjoint ranges totaling at most 4 MiB can share the network wait. LinuxAssetIO validates each HTTP response and the entire reconstructed archive before publication. An unsupported layout, missing range or digest mismatch takes the full download path.

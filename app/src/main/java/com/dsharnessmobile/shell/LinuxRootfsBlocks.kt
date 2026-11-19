@@ -10,6 +10,10 @@ import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.StandardOpenOption.READ
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.zip.CRC32
 import org.tukaani.xz.SeekableInputStream
 import org.tukaani.xz.SeekableXZInputStream
 
@@ -19,10 +23,47 @@ internal object LinuxRootfsBlocks {
   private const val TAIL = 4096
   private const val MAX_BLOCKS = 512
   private const val MAX_MISSING_RANGES = 10
+  private const val PARALLEL_BYTES = 4L * 1024 * 1024
 
   private data class Shape(val compressed: Long, val plain: Long, val check: Int)
   private data class Block(val offset: Long, val shape: Shape) {
     val end get() = offset + shape.compressed
+  }
+
+  private data class Span(val start: Long, val end: Long) {
+    val length get() = end - start
+  }
+
+  // The footer repeats both stream flags. The XZ parser checks its CRC and index,
+  // and the manifest digest also covers this reconstructed stream header.
+  private fun headerFromFooter(tail: ByteArray): ByteArray {
+    var end = tail.size
+    while (end > HEADER && tail[end - 1] == 0.toByte()) end--
+    if ((tail.size - end) % 4 != 0 || tail[end - 2] != 0x59.toByte() || tail[end - 1] != 0x5a.toByte()) {
+      throw IOException("Unsupported XZ stream footer")
+    }
+    val head = byteArrayOf(0xfd.toByte(), 0x37, 0x7a, 0x58, 0x5a, 0, 0, 0, 0, 0, 0, 0)
+    tail.copyInto(head, 6, end - 4, end - 2)
+    val crc = CRC32().apply { update(head, 6, 2) }.value
+    for (i in 0..3) head[8 + i] = (crc ushr (i * 8)).toByte()
+    return head
+  }
+
+  private fun prefetchPair(spans: List<Span>, read: (Long, Int) -> ByteArray): Map<Long, ByteArray> {
+    if (spans.size != 2 || spans.sumOf { it.length } > PARALLEL_BYTES) return emptyMap()
+    val pool = Executors.newFixedThreadPool(2)
+    try {
+      return pool.invokeAll(spans.map { span ->
+        Callable { span.start to read(span.start, span.length.toInt()) }
+      }).associate { it.get() }
+    } catch (error: ExecutionException) {
+      throw IOException("Cannot read missing XZ blocks", error.cause)
+    } catch (error: InterruptedException) {
+      Thread.currentThread().interrupt()
+      throw IOException("Interrupted while reading XZ blocks", error)
+    } finally {
+      pool.shutdownNow()
+    }
   }
 
   /** Permit the index parser to read only the header and a bounded trailer. */
@@ -81,11 +122,20 @@ internal object LinuxRootfsBlocks {
         fun edge(start: Long, count: Int) = ByteArrayOutputStream(count).apply {
           fetch(start, count.toLong(), this)
         }.toByteArray().also { if (it.size != count) throw EOFException() }
-        val edges = Edges(spec.size, edge(0, HEADER), edge(spec.size - TAIL, TAIL))
+        val tailStart = spec.size - TAIL
+        val tail = edge(tailStart, TAIL)
+        val edges = Edges(spec.size, headerFromFooter(tail), tail)
         val blocks = edges.blocks()
-        val missing = blocks.filter { byShape[it.shape] == null }
-        val runs = missing.filterIndexed { i, b -> i == 0 || missing[i - 1].end != b.offset }
-        if (runs.size > MAX_MISSING_RANGES || missing.sumOf { it.shape.compressed } > spec.size / 2) return@Opener -1L
+        val runs = mutableListOf<Span>()
+        for (block in blocks) {
+          if (byShape[block.shape] != null) continue
+          val previous = runs.lastOrNull()
+          if (previous?.end == block.offset) runs[runs.lastIndex] = Span(previous.start, block.end)
+          else runs.add(Span(block.offset, block.end))
+        }
+        if (runs.size > MAX_MISSING_RANGES || runs.sumOf { it.length } > spec.size / 2) return@Opener -1L
+        val network = runs.filter { it.start < tailStart }.map { Span(it.start, minOf(it.end, tailStart)) }
+        val prefetched = prefetchPair(network, ::edge)
         temp.outputStream().buffered(128 * 1024).use { output ->
           output.write(edges.head)
           val buffer = ByteBuffer.allocate(128 * 1024)
@@ -106,7 +156,13 @@ internal object LinuxRootfsBlocks {
             } else {
               var end = block.end
               while (i < blocks.size && byShape[blocks[i].shape] == null) end = blocks[i++].end
-              fetch(block.offset, end - block.offset, output)
+              val networkEnd = minOf(end, tailStart)
+              if (block.offset < networkEnd) {
+                val data = prefetched[block.offset]
+                if (data != null) output.write(data) else fetch(block.offset, networkEnd - block.offset, output)
+              }
+              val tailFrom = maxOf(block.offset, tailStart)
+              if (tailFrom < end) output.write(tail, (tailFrom - tailStart).toInt(), (end - tailFrom).toInt())
             }
           }
           val suffix = (spec.size - blocks.last().end).toInt()

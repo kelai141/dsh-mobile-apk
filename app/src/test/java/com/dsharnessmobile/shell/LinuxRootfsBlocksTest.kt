@@ -9,6 +9,8 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.nio.file.Files
 import java.util.Random
+import java.util.Collections
+import java.util.concurrent.CyclicBarrier
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -38,12 +40,13 @@ class LinuxRootfsBlocksTest {
     return bytes.toByteArray()
   }
 
-  private class Network(val payload: ByteArray) : LinuxAssetIO.RangeOpener {
-    val ranges = mutableListOf<Long>()
+  private class Network(val payload: ByteArray, val onRange: (Long, Long) -> Unit = { _, _ -> }) : LinuxAssetIO.RangeOpener {
+    val ranges = Collections.synchronizedList(mutableListOf<Long>())
     override fun fetch(url: String, dest: File, maxBytes: Long): Long = error("Unexpected full download")
     override fun fetchRange(url: String, total: Long, start: Long, bytes: Long, output: OutputStream): Boolean {
       assertEquals(payload.size.toLong(), total)
       ranges.add(bytes)
+      onRange(start, bytes)
       output.write(payload, start.toInt(), bytes.toInt())
       return true
     }
@@ -59,9 +62,33 @@ class LinuxRootfsBlocksTest {
   @Test fun reconstructsNewBlocksWithoutFetchingTheWholeAsset() {
     val remote = Network(encode(data))
     assertTrue(attempt(encode(data.filterIndexed { i, _ -> i != 3 && i != 4 }), remote))
-    assertEquals(3, remote.ranges.size)
+    assertEquals(2, remote.ranges.size)
     assertTrue(remote.ranges.sum() < remote.payload.size / 2)
     assertArrayEquals(remote.payload, target.readBytes())
+  }
+
+  @Test fun twoDisjointRangesOverlapInTimeAndNeverRefetchTheTrailer() {
+    val payload = encode(data) + ByteArray(8)
+    val tailStart = payload.size - 4096L
+    val pair = CyclicBarrier(2)
+    val remote = Network(payload) { start, bytes ->
+      if (start != tailStart) {
+        assertTrue(start > 0 && start + bytes <= tailStart)
+        pair.await(5, TimeUnit.SECONDS)
+      }
+    }
+    assertTrue(attempt(encode(data.filterIndexed { i, _ -> i != 0 && i != data.lastIndex }), remote))
+    assertEquals(3, remote.ranges.size)
+    assertArrayEquals(payload, target.readBytes())
+  }
+
+  @Test fun damagedRemoteHeaderCannotPublishBytesWithAnotherDigest() {
+    val prior = encode(data)
+    val corrupt = prior.clone().apply { this[8] = this[8].inc() }
+    val remote = Network(corrupt)
+    assertFalse(attempt(prior, remote))
+    assertEquals(listOf(4096L), remote.ranges)
+    assertFalse(target.exists())
   }
 
   @Test fun sameSizeChangedContentCannotPublishAnIncorrectReconstruction() {
