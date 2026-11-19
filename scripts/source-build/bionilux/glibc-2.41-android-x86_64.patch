@@ -1,0 +1,281 @@
+diff --git a/sysdeps/nptl/_Fork.c b/sysdeps/nptl/_Fork.c
+--- a/sysdeps/nptl/_Fork.c
++++ b/sysdeps/nptl/_Fork.c
+@@ -49,8 +49,11 @@
+       self->robust_prev = &self->robust_head;
+ #endif
+       self->robust_head.list = &self->robust_head;
+-      INTERNAL_SYSCALL_CALL (set_robust_list, &self->robust_head,
+-			     sizeof (struct robust_list_head));
++#ifndef __ASSUME_SET_ROBUST_LIST
++      if (__nptl_set_robust_list_avail)
++#endif
++        INTERNAL_SYSCALL_CALL (set_robust_list, &self->robust_head,
++                               sizeof (struct robust_list_head));
+       call_function_static_weak (__getrandom_fork_subprocess);
+     }
+
+diff --git a/sysdeps/nptl/dl-tls_init_tp.c b/sysdeps/nptl/dl-tls_init_tp.c
+--- a/sysdeps/nptl/dl-tls_init_tp.c
++++ b/sysdeps/nptl/dl-tls_init_tp.c
+@@ -91,6 +91,7 @@
+     pd->robust_head.futex_offset = (offsetof (pthread_mutex_t, __data.__lock)
+                                     - offsetof (pthread_mutex_t,
+                                                 __data.__list.__next));
++#ifndef DSH_APP_NO_ROBUST_LIST
+     int res = INTERNAL_SYSCALL_CALL (set_robust_list, &pd->robust_head,
+                                      sizeof (struct robust_list_head));
+     if (!INTERNAL_SYSCALL_ERROR_P (res))
+@@ -99,6 +100,7 @@
+         __nptl_set_robust_list_avail = true;
+ #endif
+       }
++#endif
+   }
+
+   {
+diff --git a/sysdeps/unix/sysv/linux/access.c b/sysdeps/unix/sysv/linux/access.c
+--- a/sysdeps/unix/sysv/linux/access.c
++++ b/sysdeps/unix/sysv/linux/access.c
+@@ -23,11 +23,7 @@
+ int
+ __access (const char *file, int type)
+ {
+-#ifdef __NR_access
+-  return INLINE_SYSCALL_CALL (access, file, type);
+-#else
+   return INLINE_SYSCALL_CALL (faccessat, AT_FDCWD, file, type);
+-#endif
+ }
+ libc_hidden_def (__access)
+ weak_alias (__access, access)
+diff --git a/sysdeps/unix/sysv/linux/chmod.c b/sysdeps/unix/sysv/linux/chmod.c
+--- a/sysdeps/unix/sysv/linux/chmod.c
++++ b/sysdeps/unix/sysv/linux/chmod.c
+@@ -23,11 +23,7 @@
+ int
+ __chmod (const char *file, mode_t mode)
+ {
+-#ifdef __NR_chmod
+-  return INLINE_SYSCALL_CALL (chmod, file, mode);
+-#else
+   return INLINE_SYSCALL_CALL (fchmodat, AT_FDCWD, file, mode);
+-#endif
+ }
+
+ libc_hidden_def (__chmod)
+diff --git a/sysdeps/unix/sysv/linux/clone-internal.c b/sysdeps/unix/sysv/linux/clone-internal.c
+--- a/sysdeps/unix/sysv/linux/clone-internal.c
++++ b/sysdeps/unix/sysv/linux/clone-internal.c
+@@ -23,6 +23,9 @@
+ #include <clone_internal.h>
+ #include <libc-pointer-arith.h>	/* For cast_to_pointer.  */
+ #include <stackinfo.h>		/* For _STACK_GROWS_{UP,DOWN}.  */
++
++/* This Android app ABI uses the existing legacy clone implementation.  */
++#undef HAVE_CLONE3_WRAPPER
+
+ #define CLONE_ARGS_SIZE_VER0 64 /* sizeof first published struct */
+ #define CLONE_ARGS_SIZE_VER1 80 /* sizeof second published struct */
+diff --git a/sysdeps/unix/sysv/linux/dup2.c b/sysdeps/unix/sysv/linux/dup2.c
+--- a/sysdeps/unix/sysv/linux/dup2.c
++++ b/sysdeps/unix/sysv/linux/dup2.c
+@@ -25,16 +25,12 @@
+ int
+ __dup2 (int fd, int fd2)
+ {
+-#ifdef __NR_dup2
+-  return INLINE_SYSCALL_CALL (dup2, fd, fd2);
+-#else
+   /* For the degenerate case, check if the fd is valid (by trying to
+      get the file status flags) and return it, or else return EBADF.  */
+   if (fd == fd2)
+     return __libc_fcntl (fd, F_GETFL, 0) < 0 ? -1 : fd;
+
+   return INLINE_SYSCALL_CALL (dup3, fd, fd2, 0);
+-#endif
+ }
+ libc_hidden_def (__dup2)
+ weak_alias (__dup2, dup2)
+diff --git a/sysdeps/unix/sysv/linux/faccessat.c b/sysdeps/unix/sysv/linux/faccessat.c
+--- a/sysdeps/unix/sysv/linux/faccessat.c
++++ b/sysdeps/unix/sysv/linux/faccessat.c
+@@ -26,51 +26,29 @@
+ int
+ __faccessat (int fd, const char *file, int mode, int flag)
+ {
+-  int ret = INLINE_SYSCALL_CALL (faccessat2, fd, file, mode, flag);
+-#if __ASSUME_FACCESSAT2
+-  return ret;
+-#else
+-  if (ret == 0 || errno != ENOSYS)
+-    return ret;
+-
+-  if (flag & ~(AT_SYMLINK_NOFOLLOW | AT_EACCESS))
++  if ((flag & ~(AT_SYMLINK_NOFOLLOW | AT_EACCESS))
++      || (mode & ~(R_OK | W_OK | X_OK)))
+     return INLINE_SYSCALL_ERROR_RETURN_VALUE (EINVAL);
+
+-  if ((flag == 0 || ((flag & ~AT_EACCESS) == 0 && ! __libc_enable_secure)))
+-    return INLINE_SYSCALL (faccessat, 3, fd, file, mode);
++  if (flag == 0)
++    return INLINE_SYSCALL_CALL (faccessat, fd, file, mode);
+
+-  struct __stat64_t64 stats;
+-  if (__fstatat64_time64 (fd, file, &stats, flag & AT_SYMLINK_NOFOLLOW))
+-    return -1;
++  /* The Android app has identical real and effective credentials.  Keep
++     permission decisions in the kernel and reject unsupported flag/mode
++     combinations instead of estimating access from mode bits.  */
++  if (__libc_enable_secure || __getuid () == 0
++      || __getuid () != __geteuid () || __getgid () != __getegid ())
++    return INLINE_SYSCALL_ERROR_RETURN_VALUE (EOPNOTSUPP);
+
+-  mode &= (X_OK | W_OK | R_OK);	/* Clear any bogus bits. */
+-# if R_OK != S_IROTH || W_OK != S_IWOTH || X_OK != S_IXOTH
+-#  error Oops, portability assumptions incorrect.
+-# endif
++  if (flag & AT_SYMLINK_NOFOLLOW)
++    {
++      if (mode != F_OK)
++        return INLINE_SYSCALL_ERROR_RETURN_VALUE (EOPNOTSUPP);
+
+-  if (mode == F_OK)
+-    return 0;			/* The file exists. */
++      struct __stat64_t64 stats;
++      return __fstatat64_time64 (fd, file, &stats, AT_SYMLINK_NOFOLLOW);
++    }
+
+-  uid_t uid = (flag & AT_EACCESS) ? __geteuid () : __getuid ();
+-
+-  /* The super-user can read and write any file, and execute any file
+-     that anyone can execute. */
+-  if (uid == 0 && ((mode & X_OK) == 0
+-		   || (stats.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))))
+-    return 0;
+-
+-  int granted = (uid == stats.st_uid
+-		 ? (unsigned int) (stats.st_mode & (mode << 6)) >> 6
+-		 : (stats.st_gid == ((flag & AT_EACCESS)
+-				     ? __getegid () : __getgid ())
+-		    || __group_member (stats.st_gid))
+-		 ? (unsigned int) (stats.st_mode & (mode << 3)) >> 3
+-		 : (stats.st_mode & mode));
+-
+-  if (granted == mode)
+-    return 0;
+-
+-  return INLINE_SYSCALL_ERROR_RETURN_VALUE (EACCES);
+-#endif /* !__ASSUME_FACCESSAT2 */
++  return INLINE_SYSCALL_CALL (faccessat, fd, file, mode);
+ }
+ weak_alias (__faccessat, faccessat)
+diff --git a/sysdeps/unix/sysv/linux/link.c b/sysdeps/unix/sysv/linux/link.c
+--- a/sysdeps/unix/sysv/linux/link.c
++++ b/sysdeps/unix/sysv/linux/link.c
+@@ -24,11 +24,7 @@
+ int
+ __link (const char *from, const char *to)
+ {
+-#ifdef __NR_link
+-  return INLINE_SYSCALL_CALL (link, from, to);
+-#else
+   return INLINE_SYSCALL_CALL (linkat, AT_FDCWD, from, AT_FDCWD, to, 0);
+-#endif
+ }
+
+ weak_alias (__link, link)
+diff --git a/sysdeps/unix/sysv/linux/mkdir.c b/sysdeps/unix/sysv/linux/mkdir.c
+--- a/sysdeps/unix/sysv/linux/mkdir.c
++++ b/sysdeps/unix/sysv/linux/mkdir.c
+@@ -24,11 +24,7 @@
+ int
+ __mkdir (const char *path, mode_t mode)
+ {
+-#ifdef __NR_mkdir
+-  return INLINE_SYSCALL_CALL (mkdir,  path, mode);
+-#else
+   return INLINE_SYSCALL_CALL (mkdirat, AT_FDCWD, path, mode);
+-#endif
+ }
+
+ libc_hidden_def (__mkdir)
+diff --git a/sysdeps/unix/sysv/linux/rename.c b/sysdeps/unix/sysv/linux/rename.c
+--- a/sysdeps/unix/sysv/linux/rename.c
++++ b/sysdeps/unix/sysv/linux/rename.c
+@@ -25,11 +25,5 @@
+ int
+ rename (const char *old, const char *new)
+ {
+-#if defined (__NR_rename)
+-  return INLINE_SYSCALL_CALL (rename, old, new);
+-#elif defined (__NR_renameat)
+   return INLINE_SYSCALL_CALL (renameat, AT_FDCWD, old, AT_FDCWD, new);
+-#else
+-  return INLINE_SYSCALL_CALL (renameat2, AT_FDCWD, old, AT_FDCWD, new, 0);
+-#endif
+ }
+diff --git a/sysdeps/unix/sysv/linux/rmdir.c b/sysdeps/unix/sysv/linux/rmdir.c
+--- a/sysdeps/unix/sysv/linux/rmdir.c
++++ b/sysdeps/unix/sysv/linux/rmdir.c
+@@ -24,10 +24,6 @@
+ int
+ __rmdir (const char *path)
+ {
+-#ifdef __NR_rmdir
+-  return INLINE_SYSCALL_CALL (rmdir, path);
+-#else
+   return INLINE_SYSCALL_CALL (unlinkat, AT_FDCWD, path, AT_REMOVEDIR);
+-#endif
+ }
+ weak_alias (__rmdir, rmdir)
+diff --git a/sysdeps/unix/sysv/linux/symlink.c b/sysdeps/unix/sysv/linux/symlink.c
+--- a/sysdeps/unix/sysv/linux/symlink.c
++++ b/sysdeps/unix/sysv/linux/symlink.c
+@@ -24,10 +24,6 @@
+ int
+ __symlink (const char *from, const char *to)
+ {
+-#ifdef __NR_symlink
+-  return INLINE_SYSCALL_CALL (symlink, from, to);
+-#else
+   return INLINE_SYSCALL_CALL (symlinkat, from, AT_FDCWD, to);
+-#endif
+ }
+ weak_alias (__symlink, symlink)
+diff --git a/sysdeps/unix/sysv/linux/syscalls.list b/sysdeps/unix/sysv/linux/syscalls.list
+--- a/sysdeps/unix/sysv/linux/syscalls.list
++++ b/sysdeps/unix/sysv/linux/syscalls.list
+@@ -20,7 +20,6 @@
+ getegid		-	getegid		Ei:	__getegid	getegid
+ geteuid		-	geteuid		Ei:	__geteuid	geteuid
+ getpgid		-	getpgid		i:i	__getpgid	getpgid
+-getpgrp		-	getpgrp		Ei:	getpgrp
+ getppid		-	getppid		Ei:	__getppid	getppid
+ getresuid	-	getresuid	i:ppp	getresuid
+ getresgid	-	getresgid	i:ppp	getresgid
+diff --git a/sysdeps/unix/sysv/linux/unlink.c b/sysdeps/unix/sysv/linux/unlink.c
+--- a/sysdeps/unix/sysv/linux/unlink.c
++++ b/sysdeps/unix/sysv/linux/unlink.c
+@@ -24,10 +24,6 @@
+ int
+ __unlink (const char *name)
+ {
+-#ifdef __NR_unlink
+-  return INLINE_SYSCALL_CALL (unlink, name);
+-#else
+   return INLINE_SYSCALL_CALL (unlinkat, AT_FDCWD, name, 0);
+-#endif
+ }
+ weak_alias (__unlink, unlink)
+diff --git a/sysdeps/unix/sysv/linux/x86_64/kernel-features.h b/sysdeps/unix/sysv/linux/x86_64/kernel-features.h
+--- a/sysdeps/unix/sysv/linux/x86_64/kernel-features.h
++++ b/sysdeps/unix/sysv/linux/x86_64/kernel-features.h
+@@ -24,3 +24,7 @@
+ #endif
+
+ #include_next <kernel-features.h>
++
++/* The Android app ABI does not offer kernel robust-list registration.  */
++#undef __ASSUME_SET_ROBUST_LIST
++#define DSH_APP_NO_ROBUST_LIST 1

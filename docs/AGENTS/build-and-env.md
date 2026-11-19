@@ -139,6 +139,16 @@ Harness按固定0.2.0-rc.2源码完成全仓构建；prepare-harness-vendor-over
 - 远程 RPC（测试面）：POST `/api/<method>`，body 必须全信封 `{"type":"client-request","rpcId":"r1","method":"session.list","payload":{}}`；`session.prompt` 拒绝 live 会话（被 UI 打开的）——直接 API 测代理需先用 session.create 建全新会话。
 - **构建前核对 ABI（见坑 18）**：无真机环境用模拟器（MuMu x86_64 竖屏 `127.0.0.1:16416` / 横屏 `127.0.0.1:16384`），有真机则安装 ABI 匹配的 APK——debug 包默认带 x86_64 快照，覆盖装到 arm64 真机会引擎崩溃。
 
+### Android x86-64 guest glibc source
+
+Use Linux with `gpgv`, `dpkg-source`, and `patch` to prepare Debian glibc `2.41-12+deb13u4` for the Android x86-64 Bionilux guest. Supply the `.dsc`, the original source archive, and the Debian patch archive together. The source preparer checks the pinned digests and Debian developer signature before extracting them and applying the compatibility profile.
+
+```sh
+python3 scripts/source-build/bionilux/prepare-glibc-source.py inputs keyrings/debian-keyring.gpg out/guest-glibc
+```
+
+Build glibc from the resulting source tree. The profile selects available Linux calls for descriptor duplication and filesystem operations, retains kernel permission decisions, and uses glibc's existing thread fallbacks. The guest launcher sets `GLIBC_TUNABLES=glibc.pthread.rseq=0` before starting glibc. Keep the loader, guest libc, and static `ldconfig` source provenance together.
+
 ### Harness 上游候选巡检
 
 `巡检 Harness 上游候选` 每周、巡检或基线文件变更的 PR，以及手动触发时，将官方默认分支与
