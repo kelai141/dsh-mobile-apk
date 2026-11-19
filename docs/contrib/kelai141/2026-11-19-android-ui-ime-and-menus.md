@@ -10,7 +10,11 @@
 
 ## 复验证据
 
-- `npm run build` 和前端测试通过，共 1434 例。`testDebugUnitTest`、Kotlin 用例数门禁和执行地图门禁通过。
+- `npm run build` 和前端测试通过，共 1434 例。`testDebugUnitTest`、Kotlin 用例数门禁和执行地图门禁通过。Android 调试 APK 通过 `assembleDebug` 构建并覆盖安装。
 - 在 MuMu 的 Android 15 和 WebView 110 上热推前端。ADB 点开工作区视图选项，再选中当前分组，侧栏始终展开。菜单上沿与触发器下沿相差 5 CSS px。
 - 同一 WebView 用上游目录样式建立 50 行数据夹具。ADB 滑到滚动上限 1452 CSS px，末项完整可见并收到点击，页面滚动值为 0。
-- 覆盖安装原生调试 APK，验证壳与热推产物同时加载。MuMu 报告输入法已显示时，实际键盘 Insets 高度仍为 0，无法用这组结果判定真机 IME 动画或厂商小窗行为。
+- MuMu 自带输入法报告显示时，键盘 Insets 高度为 0。切换到 Gboard 后，竖屏键盘打开时 WindowManager 的键盘上沿和 WebView 底边都在物理坐标 1094 px。CDP 读到布局与视觉视口均为 730 CSS px，`offsetTop` 为 0。已有对话的输入区持续可点，键盘收起后视口恢复到 1067 CSS px。
+- 新会话竖屏的输入卡在键盘开合前后位置一致。横屏键盘打开后，视口缩到 309 CSS px，输入卡下沿也在 309 CSS px。收起后视口与卡片回到初始尺寸和位置。
+- 横屏打开键盘时，50 行目录夹具的弹层下沿为 297 CSS px，距可视区下沿 12 px。内部滑到末项后能点击，页面滚动值仍为 0。
+- 在启动器上长按 DSH 悬浮入口并打开输入区。点击 Gboard 屏幕按键后，`dsh-overlay-v2-composer` 仍是窗口焦点和 IME 输入目标。返回键只收键盘，切回 DSH 全屏后悬浮输入窗口退出，输入目标切到主 WebView。
+- 厂商真机 IME 动画和系统自由小窗未做设备验证。
