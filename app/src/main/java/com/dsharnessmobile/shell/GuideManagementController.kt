@@ -1,6 +1,7 @@
 package com.dsharnessmobile.shell
 
 import android.animation.ValueAnimator
+import android.app.AlertDialog
 import android.content.Intent
 import android.os.Build
 import android.os.StatFs
@@ -213,14 +214,7 @@ internal class GuideManagementController(
   }
 
   /**
-   * 软件源行：显示当前源，点一下循环切换。
-   *
-   * 为什么用"循环"而不是弹出选择列表：这个面板的既有交互全是"点一行做一件事"
-   * （语言行也是循环三态）。换源需要跑一次 apt-get update（实测 2 秒级），
-   * 三态循环 + 状态回显足够，且不需要新造一个选择器页面。
-   *
-   * 为什么状态要回显：换源是**会失败**的操作（源不可达即回滚）。
-   * 只给一个动作不给结果，用户无法知道到底换没换成——语言行可以这么写，这里不行。
+   * 显示当前软件源并打开镜像选择列表。某个源不可达时，用户可选其他镜像。
    */
   private fun sourceRow() {
     val engine = EngineManager(activity, EngineManager.ensurePickToken())
@@ -246,18 +240,32 @@ internal class GuideManagementController(
       val action = label(t("切换", "Change"), 14f).apply { setTextColor(activity.getColor(R.color.ds_accent)) }
       addView(action)
       setOnClickListener {
-        // 换源要跑 apt-get update（秒级），期间禁用回执避免用户重复点出并发写。
-        isEnabled = false
-        action.text = t("切换中…", "Switching...")
-        Thread {
-          val next = SourceSettings.nextMirror(engine.usrDir)
-          val result = SourceSettings.switchTo(activity, next)
-          activity.runOnUiThread {
-            value.text = if (result.ok) sourceSummary(engine.usrDir) else result.message
-            action.text = t("切换", "Change")
-            isEnabled = true
+        val mirrors = SourceSettings.availableMirrors(engine.usrDir)
+        if (mirrors.isEmpty()) {
+          value.text = t("运行时中没有可用的镜像配置", "The runtime contains no mirror configurations")
+          return@setOnClickListener
+        }
+        val choices = mirrors.map { t(it.labelZh, it.labelEn) }.toTypedArray()
+        val current = SourceSettings.currentMirror(engine.usrDir)
+        val selected = mirrors.indexOfFirst { it == current }
+        AlertDialog.Builder(activity)
+          .setTitle(t("选择软件源", "Choose a package source"))
+          .setSingleChoiceItems(choices, selected) { dialog, index ->
+            dialog.dismiss()
+            isEnabled = false
+            action.text = t("切换中…", "Switching...")
+            Thread {
+              val result = SourceSettings.switchTo(activity, mirrors[index])
+              activity.runOnUiThread {
+                value.text = if (result.ok) sourceSummary(engine.usrDir) else "${choices[index]} · ${result.message}"
+                contentDescription = title.text.toString() + "，" + value.text
+                action.text = t("切换", "Change")
+                isEnabled = true
+              }
+            }.apply { isDaemon = true }.start()
           }
-        }.apply { isDaemon = true }.start()
+          .setNegativeButton(android.R.string.cancel, null)
+          .show()
       }
     }
     management.addView(card)

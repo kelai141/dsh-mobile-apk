@@ -170,7 +170,7 @@ internal object SourceMirror {
    */
   fun writeChosenMirror(prefix: File, mirror: Mirror, links: LinkPrimitives = PRODUCTION_LINKS) {
     // 相对链接：快照目录可能被整体搬迁，绝对链接会断。
-    writeChosenTarget(prefix, File(GROUP_CHINESE_MAINLAND, mirror.file).toString(), links)
+    writeChosenTarget(prefix, "mirrors/$GROUP_CHINESE_MAINLAND/${mirror.file}", links)
   }
 
   /**
@@ -180,7 +180,7 @@ internal object SourceMirror {
    * 下一次 update 会走「不存在 → default + 全部镜像」随机重选并覆盖 sources.list
    * （本文件头部实测过的漂移形态），恰是换源功能要防的事。现改为临时链接 + 原子 move。
    *
-   * @param targetRelative 相对 etc/termux/ 的目标（如 chinese_mainland/mirrors.tuna.tsinghua.edu.cn）。
+   * @param targetRelative 相对 etc/termux/ 的目标（如 mirrors/chinese_mainland/mirrors.tuna.tsinghua.edu.cn）。
    */
   fun writeChosenTarget(prefix: File, targetRelative: String, links: LinkPrimitives = PRODUCTION_LINKS) {
     val dir = File(prefix, "etc/termux")

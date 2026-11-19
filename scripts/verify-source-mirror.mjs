@@ -64,6 +64,10 @@ const target = linkText.split('->').pop().trim()
 // 必须是相对链接：快照目录整体搬迁时绝对链接会断。
 if (target.startsWith('/')) fail('chosen_mirrors 用了绝对路径，快照搬迁后会变成断链：' + target)
 ok('chosen_mirrors 是相对链接（搬迁安全）')
+if (runas(['test', '-f', 'files/usr/etc/termux/chosen_mirrors']).status !== 0) {
+  fail('chosen_mirrors 的目标文件不存在：' + target)
+}
+ok('chosen_mirrors 能读取镜像片段')
 
 const host = (/^https?:\/\/([^/]+)/.exec(url) || [])[1] || ''
 if (!target.includes(host)) {
@@ -74,7 +78,7 @@ ok('双写一致：两处指向同一镜像', host)
 // 索引刷新判据：lists 目录里必须有该 host 的 Packages 索引。
 const lists = runas(['ls', 'files/usr/var/lib/apt/lists'])
 const listsText = lists.stdout || ''
-if (!listsText.includes(host)) {
+if (!listsText.split(/\r?\n/).some(name => name.startsWith(host + '_') && /_Packages(?:\.|$)/.test(name))) {
   fail('apt 索引里没有 ' + host + ' 的记录；换源后必须跑一次 apt-get update（否则 install 报 Unable to locate package）')
 }
 ok('apt 索引已按新源刷新', host)
