@@ -97,9 +97,11 @@ export function unpackedTreeFor(filesDir: string, sha256: unknown): string | nul
   return staged === null ? null : join(staged, UNPACKED_DIR)
 }
 
-async function sha256OfFile(file: string): Promise<string> {
+const RUNTIME_HASH_CHUNK_BYTES = 1024 * 1024
+
+async function sha256OfFile(file: string, highWaterMark?: number): Promise<string> {
   const hash = createHash('sha256')
-  for await (const chunk of createReadStream(file)) hash.update(chunk as Buffer)
+  for await (const chunk of createReadStream(file, { highWaterMark })) hash.update(chunk as Buffer)
   return hash.digest('hex')
 }
 
@@ -301,7 +303,8 @@ export function createHostAssetIO(options: { filesDir: string, nativeLibDir?: st
       // 按**归档自身的摘要**定位宿主已解包的树：这样解包结果与 bootstrap 刚验过的字节绑定，
       // 而不是靠调用顺序或调用方给的任何路径。
       const hashStarted = performance.now()
-      const digest = await sha256OfFile(archivePath)
+      const largeArchive = options?.kind === 'rootfs' || options?.kind === 'node'
+      const digest = await sha256OfFile(archivePath, largeArchive ? RUNTIME_HASH_CHUNK_BYTES : undefined)
       options?.recordTiming?.('staged_archive_hash', performance.now() - hashStarted)
       const tree = unpackedTreeFor(filesDir, digest)
       if (tree === null) {
@@ -343,7 +346,7 @@ export function createHostAssetIO(options: { filesDir: string, nativeLibDir?: st
         const archive = join(owned, RETAINED_ARCHIVE)
         const started = performance.now()
         const info = await lstat(archive)
-        if (!info.isFile() || info.size !== asset.size || await sha256OfFile(archive) !== asset.sha256) {
+        if (!info.isFile() || info.size !== asset.size || await sha256OfFile(archive, RUNTIME_HASH_CHUNK_BYTES) !== asset.sha256) {
           rejectCandidate('The retained rootfs archive failed size or digest verification')
         }
         recordTiming?.('candidate_archive_verify', performance.now() - started)
