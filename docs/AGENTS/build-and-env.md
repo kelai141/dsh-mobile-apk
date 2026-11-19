@@ -155,6 +155,12 @@ For local verification with an x86-64 snapshot, pass the native build output to 
 node dsh-mobile-apk/scripts/build-apk-dev-fast.mjs --abi x86_64 --bionilux-native-dir out/guest-native
 ```
 
+Prepare the Android x86-64 Linux guest's Node.js 24.22.0 source using the upstream archive, checksum list, detached signature, and trusted release keyring. The profile uses libuv's existing Android I/O implementation. In an x86-64 Debian trixie build environment with the C++ toolchain, Python 3 and Ninja, run `./configure --ninja --dest-os=linux --dest-cpu=x64 --without-npm` followed by `ninja -C out/Release node`. The Node executable and npm distribution are independent inputs to the runtime asset.
+
+```sh
+python3 scripts/source-build/bionilux/prepare-node-source.py inputs keyrings/node-release.gpg out/guest-node
+```
+
 ### Harness 上游候选巡检
 
 `巡检 Harness 上游候选` 每周、巡检或基线文件变更的 PR，以及手动触发时，将官方默认分支与
