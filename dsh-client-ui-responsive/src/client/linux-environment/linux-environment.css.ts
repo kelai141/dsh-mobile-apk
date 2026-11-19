@@ -18,10 +18,10 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   padding: var(--dsh-mobile-top-inset, 0px) 16px max(12px, env(safe-area-inset-bottom));
 }
 
-.dsh-linux-panel > [data-linux-environment],
-.dsh-linux-panel-header {
+.dsh-linux-panel > [data-linux-environment] {
   max-width: 680px;
   margin-inline: auto;
+  padding-top: 0;
 }
 
 .dsh-linux-panel-header {
@@ -76,6 +76,7 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 .dsh-linux-env-actions { padding-block: 16px; }
 
 .dsh-linux-env button.dsh-dev-btn,
+.dsh-linux-panel-header > button,
 .dsh-linux-terminal-tools > button:not(.dsh-linux-back),
 .dsh-linux-tools button:not(.dsh-linux-env-link),
 .dsh-linux-env-progress button,
@@ -159,7 +160,10 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 .dsh-linux-back:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-linux-back:focus-visible { outline: 2px solid var(--dsw-alias-link); }
 
-[data-dsh-settings-depth='1'] .dsh-linux-back { display: none; }
+[data-dsh-settings-depth='1'] .dsh-linux-back,
+html[data-dsh-mobile-form] [data-dsh-settings-dialog] [data-linux-action='back'] {
+  display: none;
+}
 
 .dsh-linux-terminal-screen {
   box-sizing: border-box;

@@ -88,11 +88,11 @@ function makeBridge() {
 let root: Root | undefined
 let host: HTMLElement | undefined
 
-async function render(close = vi.fn()): Promise<HTMLElement> {
+async function render(close = vi.fn(), sidebar = false): Promise<HTMLElement> {
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
-  await act(async () => { root!.render(<LinuxEnvironmentSection close={close} />) })
+  await act(async () => { root!.render(<LinuxEnvironmentSection close={close} sidebar={sidebar} />) })
   // The mount fetch resolves in a microtask; flush it so assertions see real state.
   await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 0) }) })
   return host
@@ -262,6 +262,29 @@ describe('LinuxEnvironmentSection', () => {
     expect(back.textContent).toContain('返回对话')
     await act(async () => { back.click() })
     expect(close).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses the sidebar header to return from toolchains and close Linux', async () => {
+    const { impl } = makeFetch({
+      '/api/android/linux-environment/status': { body: STATUS_INSTALLED },
+      '/api/android/linux-environment/tools': { body: { packages: [], source: 'official' } },
+    })
+    vi.stubGlobal('fetch', impl)
+    const close = vi.fn()
+    const element = await render(close, true)
+    const header = element.querySelector('.dsh-linux-panel-header')!
+    const back = header.querySelector('button')!
+    const tools = element.querySelector<HTMLButtonElement>('[data-linux-action="toolchains"]')!
+    expect(header.querySelector('h1')?.textContent).toBe('Linux 环境')
+    expect(element.querySelector('[data-linux-action="back"]')).toBeNull()
+    await act(async () => { tools.click() })
+    expect(header.querySelector('h1')?.textContent).toBe('工具链')
+    expect(element.querySelector('[data-dsh-settings-sublayer-back]')).toBeNull()
+    await act(async () => { back.click() })
+    expect(header.querySelector('h1')?.textContent).toBe('Linux 环境')
+    expect(close).not.toHaveBeenCalled()
+    await act(async () => { back.click() })
+    expect(close).toHaveBeenCalledOnce()
   })
 
   it('stays usable after a failed attempt on an installed environment (retry and back both enabled)', async () => {

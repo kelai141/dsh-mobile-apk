@@ -22,7 +22,7 @@ function terminalError(error: unknown): string {
   return tr('终端连接中断，请重试。', 'The terminal connection was interrupted. Try again.')
 }
 
-export function LinuxTerminal({ onBack }: { onBack(): void }) {
+export function LinuxTerminal({ onBack }: { onBack?(): void }) {
   const host = useRef<HTMLDivElement>(null)
   const stop = useRef<() => void>(() => {})
   const sendKey = useRef<((value: string) => void)>(() => {})
@@ -131,9 +131,9 @@ export function LinuxTerminal({ onBack }: { onBack(): void }) {
     <section className="dsh-linux-terminal" data-dsh-settings-sublayer=""
       data-dsh-settings-sublayer-title={tr('终端', 'Terminal')} data-linux-terminal={state}>
       <header className="dsh-linux-terminal-tools">
-        <button type="button" className="dsh-linux-back" data-dsh-settings-sublayer-back="" onClick={onBack}>
+        {onBack && <button type="button" className="dsh-linux-back" data-dsh-settings-sublayer-back="" onClick={onBack}>
           {tr('返回', 'Back')}
-        </button>
+        </button>}
         <span role="status">{message || {
           connecting: tr('连接中', 'Connecting'), running: tr('运行中', 'Running'),
           exited: tr('会话已结束', 'Session ended'), failed: tr('连接失败', 'Connection failed'),

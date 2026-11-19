@@ -1,28 +1,6 @@
 /**
- * 设置页「Linux环境」分区（实验性内部插件，默认不启用）。
- *
- * 挂载点：本包 `src/client/index.ts` 的 `settings.section` 注册（id `linux-environment`）。
- * 为什么不靠 vendored bootstrap 客户端：那个条目的 `inject` 里写着 `linuxBootstrap`，而浏览器侧
- * 客户端**永远拿不到**引擎 Cordis 上下文里的服务，且该包并未作为 client provider 装载——于是设置页
- * 根本没有入口。这里改由本包注册（唯一注册方），状态与动作走同源受鉴权路由：
- *
- *   GET  /api/android/linux-environment/status
- *   GET  /api/android/linux-environment/manifest   {"manifest":{...}}
- *   POST /api/android/linux-environment/check | install | reinstall | uninstall | auto-update-on|off
- *
- * 资产：引擎侧解不了 `.tar.xz`，也不能走设备控制队列。故安装前由**页面**逐个调用
- * `window.androidBridge.linuxAssetPrepare` 并轮询 `linuxAssetPrepareStatus`，把
- * `plugins.runtime` + 选中 runtime 的 `backendAsset/rootfsAsset/nodeAsset` 全部落进宿主暂存区，
- * 全部 `ok` 后才 POST install（`confirmed:true, activate:true`）。bootstrap 仍会自行复验。
- *
- * 交互口径：一次点击只发起一次安装（模块级 inFlight 守卫 + 按钮 disabled）；失败保留页面并给「重试」；
- * 已就绪显示「返回对话」（走上游 `close`）。`data-linux-*` 属性供 ADB 截图定位。
- *
- * 状态口径：主按钮只在确有新版本时可用——已装且 `updateAvailable !== true` 时禁用为主按钮
- * 「已是最新版本」，检查更新（check）与重新安装（reinstall，走 pinnedManifest）仍可用；
- * 手动 check 返回可更新后主按钮才解禁。「重新安装」之所以是独立入口：引擎对同版本 install
- * 会以 `already installed; use reinstall()` 拒绝降级/重复安装。失败时不渲染「已就绪」提示，
- * 只保留「返回对话」，避免把失败读成成功。
+ * 从设置或侧栏管理 Linux。安卓下载队列独立于页面，运行和更新通过同源路由操作。
+ * 终端与工具链是子页，返回只退出子页。终端会话由引擎持有。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -195,12 +173,7 @@ function primaryLabel(state: PrimaryState, status: LinuxStatus | null): string {
   }
 }
 
-/**
- * 设置页「Linux环境」分区内容列。
- * @param props - 上游 settings.section 提供的 `close`（关闭设置、回到对话）。
- * @returns 分区元素树。
- */
-export function LinuxEnvironmentSection({ close }: { close(): void }) {
+export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): void; sidebar?: boolean }) {
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
   const [advanced, setAdvanced] = useState(false)
@@ -331,7 +304,7 @@ export function LinuxEnvironmentSection({ close }: { close(): void }) {
   // 「already installed」拒绝，点了只会得到一个误导性的失败。重新安装走 pinnedManifest，
   // 才是同版本下真正可用的入口。
   const primaryDisabled = busy || primary === 'current' || primary === 'blocked'
-  // 失败尝试不是成功：已装环境下只保留「返回对话」，不再说「已就绪」。
+  // 安装失败时，状态文案和控件反映当前操作。
   const ready = installed && status?.injectionActivated !== false && status?.runtime?.healthy !== false
   const selectSource = (value: string) => {
     setSource(value)
@@ -455,8 +428,17 @@ export function LinuxEnvironmentSection({ close }: { close(): void }) {
       data-installed={installed ? 'true' : 'false'}
       aria-label={tr('Linux环境', 'Linux environment')}
     >
-      {terminalOpen ? <LinuxTerminal onBack={() => setTerminalOpen(false)} /> :
-        toolsOpen ? <LinuxToolchains onBack={() => setToolsOpen(false)} /> : <>
+      {sidebar && <header className="dsh-linux-panel-header">
+        <Button size="sm" variant="outline" onClick={() => {
+          if (terminalOpen) setTerminalOpen(false)
+          else if (toolsOpen) setToolsOpen(false)
+          else close()
+        }}>{tr('返回', 'Back')}</Button>
+        <h1>{terminalOpen ? tr('终端', 'Terminal') : toolsOpen
+          ? tr('工具链', 'Toolchains') : tr('Linux 环境', 'Linux environment')}</h1>
+      </header>}
+      {terminalOpen ? <LinuxTerminal onBack={sidebar ? undefined : () => setTerminalOpen(false)} /> :
+        toolsOpen ? <LinuxToolchains onBack={sidebar ? undefined : () => setToolsOpen(false)} /> : <>
       {(!installed || status?.updateAvailable === true || advanced) && <>
         <label className="dsh-linux-env-row">
           <span>{tr('下载来源', 'Download source')}</span>
@@ -634,7 +616,7 @@ export function LinuxEnvironmentSection({ close }: { close(): void }) {
         >
           {tr('卸载 Linux 环境', 'Remove Linux environment')}
         </button>}
-        {installed && !busy && (
+        {installed && !busy && !sidebar && (
           <button
             type="button"
             className="dsh-dev-btn"

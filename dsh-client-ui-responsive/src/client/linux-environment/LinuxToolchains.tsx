@@ -3,7 +3,7 @@ import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { tr } from '../i18n.ts'
 import { linuxTools, type ToolchainStatus } from './transport.ts'
 
-export function LinuxToolchains({ onBack }: { onBack(): void }) {
+export function LinuxToolchains({ onBack }: { onBack?(): void }) {
   const [status, setStatus] = useState<ToolchainStatus>()
   const [selection, setSelection] = useState('git')
   const [busy, setBusy] = useState(true)
@@ -40,9 +40,9 @@ export function LinuxToolchains({ onBack }: { onBack(): void }) {
   return (
     <section className="dsh-linux-tools" data-dsh-settings-sublayer=""
       data-dsh-settings-sublayer-title={tr('工具链', 'Toolchains')}>
-      <button type="button" className="dsh-linux-back" data-dsh-settings-sublayer-back="" onClick={onBack}>
+      {onBack && <button type="button" className="dsh-linux-back" data-dsh-settings-sublayer-back="" onClick={onBack}>
         {tr('返回', 'Back')}
-      </button>
+      </button>}
       <label className="dsh-linux-env-row">
         <span>{tr('Debian APT 软件源', 'Debian APT source')}</span>
         <select value={status?.source ?? 'official'} disabled={busy || !status}
