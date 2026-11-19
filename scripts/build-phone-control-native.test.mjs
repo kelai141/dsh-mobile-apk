@@ -84,7 +84,7 @@ function fakeRunner(f, { output = () => elf(), calls = [] } = {}) {
     }
     if (command === 'rustup' && args[0] === 'run' && args.includes('cargo')) {
       const target = args[args.indexOf('--target') + 1]
-      const path = join(f.crateDir, 'target-android', target, 'release', 'libdsh_phone_control_core.so')
+      const path = join(f.crateDir, 'target-android', target, 'release', `lib${f.config.library}.so`)
       mkdirSync(dirname(path), { recursive: true })
       writeFileSync(path, output(target))
       return { stdout: '', stderr: '' }
@@ -136,6 +136,35 @@ test('builds selected ABIs through rustup, verifies ELF, and records a safe mani
 
   const verified = verifyExistingOutputs({ outDir, abis: ['arm64-v8a', 'x86_64'], config: f.config })
   assert.equal(verified.length, 2)
+})
+
+test('Linux XZ builds and verifies its own crate against the shared Android toolchain config', async (t) => {
+  const f = fixture(t)
+  const sharedConfig = join(f.crateDir, 'build-config.json')
+  const config = loadBuildConfig(f.apkDir, 'linux-xz')
+  const crateDir = join(f.apkDir, config.crate)
+  mkdirSync(join(crateDir, 'src'), { recursive: true })
+  writeFileSync(join(crateDir, 'src', 'lib.rs'), 'pub fn read() {}\n')
+  writeFileSync(join(crateDir, 'Cargo.toml'), '[package]\nname = "dsh-linux-xz"\nversion = "0.1.0"\n')
+  writeFileSync(join(crateDir, 'Cargo.lock'), 'version = 4\n')
+
+  const options = { apkDir: f.apkDir, component: 'linux-xz', abis: ['x86_64'], out: join(f.root, 'linux-xz') }
+  await buildPhoneControlNative(options, {
+    ndk: f.ndk, env: {}, installedTargets: ['x86_64-linux-android'],
+    run: fakeRunner({ ...f, config, crateDir }, { output: () => elf({ machine: 62 }) }),
+  })
+  const jniOut = join(f.root, 'jni')
+  const verify = () => buildPhoneControlNative({ ...options, verify: true, jniOut })
+  await verify()
+  assert.deepEqual(readdirSync(join(jniOut, 'x86_64')), ['libdsh_linux_xz.so'])
+  const manifest = JSON.parse(readFileSync(abiManifestPath(options.out, 'x86_64', config), 'utf8'))
+  const inputs = manifest.inputs.files.map(entry => entry.path)
+  assert.ok(inputs.includes('native/linux-asset-codec/src/lib.rs'))
+  assert.ok(inputs.includes('native/phone-control-core/build-config.json'))
+  assert.ok(!inputs.includes('native/phone-control-core/src/lib.rs'))
+  writeFileSync(sharedConfig, readFileSync(sharedConfig, 'utf8') + '\n')
+  await assert.rejects(verify(), /source inputs changed/)
+  assert.throws(() => parseArgs(['--component', 'typo']), /Unsupported native component/)
 })
 
 test('rejects a wrong-architecture cargo output before copying it', async (t) => {

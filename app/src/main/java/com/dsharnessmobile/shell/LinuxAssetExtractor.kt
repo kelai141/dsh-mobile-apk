@@ -10,7 +10,6 @@ import java.nio.file.Paths
 import java.nio.file.attribute.BasicFileAttributes
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
-import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
 
 /**
  * Linux 环境资产的安全解包器（0.15.0）。
@@ -37,7 +36,7 @@ internal object LinuxAssetExtractor {
     onProgress: (Long, Long) -> Unit = { _, _ -> },
   ) {
     val dest = destination.canonicalFile
-    val xz = XZCompressorInputStream(input)
+    val xz = LinuxXzInputStream.open(input)
     val tar = TarArchiveInputStream(xz.buffered(BUFFER_SIZE))
     val fileBuffer = ByteArray(BUFFER_SIZE)
     var primary: Throwable? = null

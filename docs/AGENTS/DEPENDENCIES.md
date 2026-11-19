@@ -79,3 +79,7 @@ raw npm overlay不会自动保留官方pnpm patch。六provider pi-upstream-stre
 版本变更需同步来源pin、lock根声明、同源补丁/资产、双仓副本及许可来源。运行时资产从目标版本原始产物完整重建，不叠旧资产；逐字节一致与全部补丁marker/精确verifier都要成立。三条资产的当前实测状态（两条与 0.2.1-rc.2 夹具逐字节一致、一条待新快照重出）见 [运行时补丁台账](RUNTIME-PATCHES.md) §7.7。webKit升级重点验证profile首次赋值、worker/cookie/storage隔离、不支持provider失败、UA-CH与Activity重建holder；Shizuku重点验证旧AIDL服务、工作资料UID、chunk撤consent与耐久UNKNOWN。快照/SAF/Files/通知/控制台/引擎流式任务按 [外部测试需求](<docs/0.14.3-TEST-REQUIREMENTS.md>) 执行。
 
 当前候选的自检、构建与三层验收状态见对应版本的阶段交接记录；本文件只登记依赖与升级联动，不独立宣称发布批准。0.14.3 外部测试需求属于历史版本证据，不能代替当前候选验收。
+
+### Linux asset XZ decoder
+
+The Android installer statically links liblzma 5.8.4 through the locked liblzma and liblzma-sys 0.4.9 crates. The runtime library is built for arm64-v8a and x86_64 with the same pinned NDK, Rust toolchain and 16 KiB ELF checks as the Android control library. The decoder runs in one thread and uses a 64 MiB native memory limit. Its license texts ship in the APK under licenses/Linux-asset-codec.txt.

@@ -12,7 +12,6 @@ plugins {
 val nativeControlConfigFile = rootProject.file("native/phone-control-core/build-config.json")
 val nativeControlConfig = groovy.json.JsonSlurper().parse(nativeControlConfigFile) as Map<*, *>
 val nativeControlSupportedAbis = (nativeControlConfig["abis"] as Map<*, *>).keys.map { it.toString() }
-val nativeControlLibrary = "lib${nativeControlConfig["library"]}.so"
 val nativeControlRequestedAbis = providers.gradleProperty("nativeControlAbis")
   .getOrElse(nativeControlSupportedAbis.joinToString(","))
   .split(',').map { it.trim() }
@@ -24,59 +23,63 @@ require(nativeControlRequestedAbis.distinct().size == nativeControlRequestedAbis
 }
 val nativeControlAbis = nativeControlSupportedAbis.filter { it in nativeControlRequestedAbis }
 val nativeControlScript = rootProject.file("scripts/build-phone-control-native.mjs")
-val nativeControlCrate = rootProject.file("native/phone-control-core")
-val nativeControlInputs = fileTree(nativeControlCrate) {
-  include("Cargo.toml", "Cargo.lock", "build-config.json", "build.rs", "src/**", "tests/**")
-}
-val nativeControlOutput = layout.buildDirectory.dir("generated/phone-control-jni")
-// 与有 manifest 的原始输出隔离，按 ABI 集合分目录，切单 ABI 时不会捎带旧架构。
-val nativeControlJni = layout.buildDirectory.dir("generated/phone-control-jni-libs/${nativeControlAbis.joinToString("_")}")
-val nativeControlBuild = tasks.register<Exec>("buildPhoneControlNative") {
-  group = "build"
-  description = "使用固定 Rust/NDK 编译手机控制原生库"
-  workingDir(rootProject.projectDir)
-  inputs.files(nativeControlInputs, nativeControlScript)
-    .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
-  inputs.property("abis", nativeControlAbis)
-  outputs.files(nativeControlAbis.flatMap { abi ->
-    listOf(nativeControlLibrary, "${nativeControlConfig["library"]}.json").map { name ->
-      nativeControlOutput.map { it.file("$abi/$name") }
-    }
-  })
-  commandLine("node", nativeControlScript.absolutePath,
-    "--abis", nativeControlAbis.joinToString(","),
-    "--out", nativeControlOutput.get().asFile.absolutePath)
-}
-val nativeControlVerify = tasks.register<Exec>("verifyPhoneControlNative") {
-  group = "verification"
-  description = "每次合并前核对 ELF、输入与 manifest，并生成只含 so 的 JNI 目录"
-  dependsOn(nativeControlBuild)
-  workingDir(rootProject.projectDir)
-  inputs.files(nativeControlBuild)
-    .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
-  inputs.files(nativeControlInputs, nativeControlScript)
-    .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
-  inputs.property("abis", nativeControlAbis)
-  outputs.dir(nativeControlJni)
-  // 不能藏在构建任务 doLast 中：UP-TO-DATE / FROM-CACHE 也必须复验。
-  outputs.upToDateWhen { false }
-  outputs.cacheIf { false }
-  commandLine("node", nativeControlScript.absolutePath, "--verify",
-    "--abis", nativeControlAbis.joinToString(","),
-    "--out", nativeControlOutput.get().asFile.absolutePath,
-    "--jni-out", nativeControlJni.get().asFile.absolutePath)
-}
-tasks.configureEach {
-  if (name.startsWith("merge") && (name.endsWith("JniLibFolders") || name.endsWith("NativeLibs"))) {
-    dependsOn(nativeControlVerify)
+fun registerRustJniLibrary(
+  taskSuffix: String,
+  cratePath: String,
+  library: String,
+  outputName: String,
+  componentArgs: List<String> = emptyList(),
+): Provider<Directory> {
+  val crateInputs = fileTree(rootProject.file(cratePath)) {
+    include("Cargo.toml", "Cargo.lock", "build-config.json", "build.rs", "src/**", "tests/**")
   }
+  val output = layout.buildDirectory.dir("generated/$outputName")
+  val jni = layout.buildDirectory.dir("generated/$outputName-libs/${nativeControlAbis.joinToString("_")}")
+  val arguments = componentArgs + listOf("--abis", nativeControlAbis.joinToString(","), "--out", output.get().asFile.absolutePath)
+  val buildLibrary = tasks.register<Exec>("build$taskSuffix") {
+    group = "build"
+    workingDir(rootProject.projectDir)
+    inputs.files(crateInputs, nativeControlConfigFile, nativeControlScript)
+      .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.property("abis", nativeControlAbis)
+    outputs.files(nativeControlAbis.flatMap { abi ->
+      listOf("lib$library.so", "$library.json").map { name -> output.map { it.file("$abi/$name") } }
+    })
+    commandLine(listOf("node", nativeControlScript.absolutePath) + arguments)
+  }
+  val verifyLibrary = tasks.register<Exec>("verify$taskSuffix") {
+    group = "verification"
+    dependsOn(buildLibrary)
+    workingDir(rootProject.projectDir)
+    inputs.files(buildLibrary, crateInputs, nativeControlConfigFile, nativeControlScript)
+      .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.property("abis", nativeControlAbis)
+    outputs.dir(jni)
+    outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
+    commandLine(listOf("node", nativeControlScript.absolutePath, "--verify") +
+      arguments + listOf("--jni-out", jni.get().asFile.absolutePath))
+  }
+  tasks.configureEach {
+    if (name.startsWith("merge") && (name.endsWith("JniLibFolders") || name.endsWith("NativeLibs"))) {
+      dependsOn(verifyLibrary)
+    }
+  }
+  return jni
 }
+
+val nativeControlJni = registerRustJniLibrary(
+  "PhoneControlNative", "native/phone-control-core", nativeControlConfig["library"].toString(), "phone-control-jni",
+)
+val linuxXzJni = registerRustJniLibrary(
+  "LinuxXzNative", "native/linux-asset-codec", "dsh_linux_xz", "linux-xz-jni", listOf("--component", "linux-xz"),
+)
 
 android {
   namespace = "com.dsharnessmobile.shell"
   compileSdk = 36
 
-  sourceSets.getByName("main").jniLibs.srcDir(nativeControlJni)
+  sourceSets.getByName("main").jniLibs.srcDirs(nativeControlJni, linuxXzJni)
 
   defaultConfig {
     applicationId = "com.dsharnessmobile.shell"

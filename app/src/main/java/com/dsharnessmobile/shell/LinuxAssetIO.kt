@@ -28,7 +28,7 @@ import java.nio.file.Files
  * 的来源面要求是「只认本仓 Releases 的 https 直连」，两者是相反的策略。这里只沿用它的
  * 连接超时/逐跳重定向/tmp + 原子 rename 形态，并把主机白名单改成逐跳强制。
  *
- * 绝不 shell out：解包全程走 commons-compress + tukaani xz 的进程内解码器。
+ * Tar extraction and XZ decoding run inside the host process.
  */
 internal object LinuxAssetIO {
 
