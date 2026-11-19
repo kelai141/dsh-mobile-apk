@@ -494,7 +494,10 @@ export class SidebarBubbles {
     const left = Math.max(panel.left, visual?.offsetLeft ?? 0)
     const right = Math.min(panel.right, (visual?.offsetLeft ?? 0) + (visual?.width ?? window.innerWidth))
     const root = getComputedStyle(document.documentElement)
-    const nativeBottom = Math.max(0, parseFloat(root.getPropertyValue('--dsh-android-ime-bottom')) || 0, parseFloat(root.getPropertyValue('--dsh-android-system-bottom')) || 0)
+    const nativeBottom = document.documentElement.hasAttribute('data-dsh-ime') ? 0 : Math.max(
+      0, parseFloat(root.getPropertyValue('--dsh-android-ime-bottom')) || 0,
+      parseFloat(root.getPropertyValue('--dsh-android-system-bottom')) || 0,
+    )
     const bottom = Math.min(panel.bottom - (parseFloat(padding.paddingBottom) || 0), (visual?.offsetTop ?? 0) + (visual?.height ?? window.innerHeight), window.innerHeight - nativeBottom)
     const width = Math.max(1, Math.min(304, right - left - 24))
     const chromeBottom = Math.max(top + 48, ...[...this.panel.querySelectorAll<HTMLElement>('[data-dockkit-strip], [data-dsh-bubble-native]')].map(node => { const rect = node.getBoundingClientRect(); return rect.height > 0 && rect.top < panel.top + 160 ? rect.bottom - panel.top : 0 }))

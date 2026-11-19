@@ -79,6 +79,48 @@ describe('手机顶栏内的后台任务浮窗', () => {
     expect(list.style.getPropertyValue('position')).toBe('')
   })
 
+  it('bounds the portaled subagent catalog to the visible viewport and tracks IME changes', async () => {
+    const anchor = document.createElement('div')
+    anchor.setAttribute('data-subagent-action', '')
+    const trigger = document.createElement('button')
+    trigger.setAttribute('aria-expanded', 'true')
+    anchor.append(trigger)
+    const panel = document.createElement('div')
+    panel.setAttribute('data-subagent-panel', '')
+    document.body.append(anchor, panel)
+    vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+      left: 390, top: 80, bottom: 108,
+    } as DOMRect)
+    const viewport = Object.assign(new EventTarget(), { width: 420, height: 600, offsetTop: 0, offsetLeft: 0 })
+    vi.stubGlobal('visualViewport', viewport)
+    popup = new HeaderPopups()
+    popup.attach()
+    try {
+      await flush()
+      expect(panel.style.top).toBe('113px')
+      expect(panel.style.left).toBe('48px')
+      expect(panel.style.maxHeight).toBe('475px')
+      expect(panel.style.height).toBe('')
+
+      viewport.height = 300
+      viewport.dispatchEvent(new Event('resize'))
+      await flush()
+      expect(panel.style.maxHeight).toBe('175px')
+
+      vi.mocked(trigger.getBoundingClientRect).mockReturnValue({ left: 390, top: 248, bottom: 276 } as DOMRect)
+      viewport.dispatchEvent(new Event('scroll'))
+      await flush()
+      expect(panel.style.top).toBe('auto')
+      expect(panel.style.bottom).toBe(`${window.innerHeight - 243}px`)
+      expect(panel.style.maxHeight).toBe('231px')
+
+      popup.detach()
+      expect(panel.style.maxHeight).toBe('')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('触发器贴近视口底部时向上翻转且菜单不越出可视高度', async () => {
     const { trigger, list } = mountMenu()
     vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({

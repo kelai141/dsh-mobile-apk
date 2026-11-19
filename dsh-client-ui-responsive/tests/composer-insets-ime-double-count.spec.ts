@@ -17,7 +17,7 @@ import { expect, it } from 'vitest'
 import { COMPOSER_INSETS_CSS } from '../src/client/composer-insets.css'
 
 it('composer 底部 padding 不再叠加键盘高度（避免与壳侧布局收缩重复计算）', () => {
-  expect(COMPOSER_INSETS_CSS).not.toContain('--dsh-android-ime-bottom')
+  expect(COMPOSER_INSETS_CSS).not.toMatch(/padding-bottom:[^;]*--dsh-android-ime-bottom/)
 })
 
 it('系统手势条 / 安全区仍然保留（防过度修正）', () => {

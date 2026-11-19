@@ -825,6 +825,10 @@ internal class OverlayV2(private val svc: OverlayService) {
   private fun onInputOutside(event: MotionEvent) {
     if (attachmentInteraction != null) return
     if (event.actionMasked != MotionEvent.ACTION_OUTSIDE) return
+    // Android redacts cross-UID outside coordinates. A redacted event cannot
+    // tell a keyboard tap from a tap on the other app, so let window focus
+    // and Back control the editing session in that case.
+    if (event.rawX == 0f && event.rawY == 0f && composer?.isEditing() == true) return
     // 一次点击会向每个浮窗各发一次 OUTSIDE；按 downTime 去重，否则同一击会先收 sheet 再收输入区。
     if (event.downTime == outsideHandledDownTime) return
     outsideHandledDownTime = event.downTime
@@ -854,8 +858,11 @@ internal class OverlayV2(private val svc: OverlayService) {
 
   /** 某个槽位的窗口是否覆盖这个屏幕坐标（用于区分「点到空白」与「点到别的浮窗」）。 */
   private fun containsTouch(slot: OverlayWindows.Slot, x: Int, y: Int): Boolean {
-    val lp = windows.params(slot) ?: return false
-    return x >= lp.x && x < lp.x + lp.width && y >= lp.y && y < lp.y + lp.height
+    val view = windows.view(slot) ?: return false
+    val location = IntArray(2)
+    view.getLocationOnScreen(location)
+    return x >= location[0] && x < location[0] + view.width &&
+      y >= location[1] && y < location[1] + view.height
   }
 
   /**
@@ -874,7 +881,6 @@ internal class OverlayV2(private val svc: OverlayService) {
       override fun onComposerWorkspaceChip() = openWorkspacePicker()
       override fun onComposerSessionChip() = openSessionPicker()
       override fun onComposerCommand(line: String) = onDrawerPick(line)
-      override fun onComposerLayoutChanged() = refreshComposerWindowHeight()
       override fun onComposerBack() = onComposerBackPressed()
       override fun onComposerToggleDrawer() = toggleDrawer()
     })
@@ -936,7 +942,8 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (destroyed) return
     val c = ensureComposerView()
     val s = screen()
-    if (!composerVisible()) {
+    val attaching = !composerVisible()
+    if (attaching) {
       val lp = WindowManager.LayoutParams(
         OverlayWindowFrames.composerWidthPx(s), ViewGroup.LayoutParams.WRAP_CONTENT,
         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -979,7 +986,7 @@ internal class OverlayV2(private val svc: OverlayService) {
         !destroyed && !uiSuspended && !hostForeground && !composerClosing && attachmentInteraction == null
     }
     if (focusInput) main.post { if (canFocus()) c.focusInput(canFocus) }
-    else if (canFocus()) c.focusRoot()
+    else if (attaching && canFocus()) c.focusRoot()
     syncChipWindows()
   }
 
@@ -1030,21 +1037,6 @@ internal class OverlayV2(private val svc: OverlayService) {
       return
     }
     c.fadeComposerOut(finish)
-  }
-
-  private fun refreshComposerWindowHeight() {
-    // wrap_content 窗口由系统按内容重排；这里只在抽屉状态变化后重算一次窗口高度，
-    // 避免「抽屉展开后窗口高度还是旧值」把内容裁掉（ADJUST_PAN 只管键盘，不管内容变化）。
-    val lp = composerParams ?: return
-    val c = composer ?: return
-    val s = screen()
-    val h = c.view.measuredHeight
-    if (h <= 0) return
-    if (lp.height != h) {
-      lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
-      lp.width = OverlayWindowFrames.composerWidthPx(s)
-      windows.update(OverlayWindows.Slot.COMPOSER, lp)
-    }
   }
 
   /** 发送在飞标记：迟到的发送回执不得清掉用户新输入的内容（见 sendText 的守卫）。 */
@@ -1259,7 +1251,6 @@ internal class OverlayV2(private val svc: OverlayService) {
         drawerMode = DrawerMode.COMMANDS
         refreshCommands()
         renderComposer()
-        refreshComposerWindowHeight()
         // 只改 drawerMode 不会让 sheet 出现：sheet 是独立窗口，必须显式同步一次。
         syncDrawerWindow()
       }
@@ -1268,7 +1259,6 @@ internal class OverlayV2(private val svc: OverlayService) {
       DrawerMode.WORKSPACES -> {
         drawerMode = DrawerMode.NONE
         renderComposer()
-        refreshComposerWindowHeight()
         hideDrawer(true)
       }
     }
@@ -1285,7 +1275,6 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (drawerMode != DrawerMode.NONE) {
       drawerMode = DrawerMode.NONE
       renderComposer()
-      refreshComposerWindowHeight()
       return
     }
     hideComposer()
@@ -1732,7 +1721,6 @@ internal class OverlayV2(private val svc: OverlayService) {
       toast(message)
       drawerMode = DrawerMode.NONE
       renderComposer()
-      refreshComposerWindowHeight()
       hideDrawer(true)
     }, 1200L)
   }
@@ -2075,7 +2063,6 @@ internal class OverlayV2(private val svc: OverlayService) {
       ),
     )
     c.setDrawerOpen(drawerMode != DrawerMode.NONE)
-    main.post { refreshComposerWindowHeight() }
     if (composerVisible() && composerParams?.width != OverlayWindowFrames.composerWidthPx(s)) {
       composerParams?.let { lp ->
         lp.width = OverlayWindowFrames.composerWidthPx(s)

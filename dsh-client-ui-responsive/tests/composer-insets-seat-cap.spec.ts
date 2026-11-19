@@ -89,6 +89,6 @@ describe('#1782 没有波及 #783 的两条既有约束', () => {
   })
 
   it('键盘高度依旧不进底部预留（壳侧已把 IME 施加到布局尺寸，双重计数会抬两次）', () => {
-    expect(COMPOSER_INSETS_CSS).not.toContain('--dsh-android-ime-bottom')
+    expect(COMPOSER_INSETS_CSS).not.toMatch(/padding-bottom:[^;]*--dsh-android-ime-bottom/)
   })
 })

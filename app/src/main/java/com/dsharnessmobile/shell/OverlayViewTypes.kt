@@ -259,12 +259,6 @@ internal interface OverlayPillListener {
   fun onPillDrag(phase: OverlayDragPhase, dxPx: Float, dyPx: Float, velocityPxPerS: Float)
 }
 
-/**
- * 输入区回调（服务侧实现）。
- *
- * onComposerLayoutChanged 用于「视图自身高度变了」的场合（抽屉展开/收起、附件条增删、
- * 输入框行数变化），服务据此重算窗口高度；它**不**表示内容数据变化。
- */
 internal interface OverlayComposerListener {
   fun onComposerSend(text: String)
 
@@ -294,8 +288,6 @@ internal interface OverlayComposerListener {
    * 服务侧按当前数据源自行分流，视图层不做任何猜测。
    */
   fun onComposerCommand(line: String)
-
-  fun onComposerLayoutChanged()
 }
 
 // ── 视图层共享纯函数（无 Android 依赖，JVM 可测）──────────────────────────────

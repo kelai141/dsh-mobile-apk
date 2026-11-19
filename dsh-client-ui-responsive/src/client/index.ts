@@ -43,6 +43,7 @@ import { PreviewExternalAction } from './mobile/PreviewExternalAction.tsx'
 import { zh as previewExternalZh, en as previewExternalEn } from './mobile/preview-external.locales.ts'
 import { COMPOSER_ROW_CSS } from './composer-row.css.ts'
 import { COMPOSER_INSETS_CSS } from './composer-insets.css.ts'
+import { SUBAGENT_POPUP_CSS } from './mobile/header-popups.ts'
 import { TO_BOTTOM_GUTTER_CSS } from './to-bottom-gutter.css.ts'
 import { TRAJECTORY_DETAILS_CSS } from './trajectory-details.css.ts'
 import { TERMINAL_BLOCK_CSS } from './terminal-block.css.ts'
@@ -70,7 +71,6 @@ import { GENERAL_SETTINGS_CSS } from './general-settings/general-settings.css.ts
 import { observeDocumentLanguage, tr } from './i18n.ts'
 import { ThemeBridge } from './theme-bridge.ts'
 import { EnterGuard } from './enter-guard.ts'
-import { KeyboardBoundary } from './keyboard-boundary.ts'
 import { ExportResultChannel, reportUserFacingResult, type ExportResultPayload } from './export-result.ts'
 import { MobileFormMarker } from './mobile/form-marker.ts'
 import { MOBILE_FORM_CSS } from './mobile/mobile-form.css.ts'
@@ -245,6 +245,7 @@ export function apply(ctx: ClientContext): void {
 
   // Composer insets adaptation: pad composer seat with system bottom / IME bottom.
   ctx.effect(() => injectStyle('composer-insets', COMPOSER_INSETS_CSS), 'ui-responsive: composer insets adaptation')
+  ctx.effect(() => injectStyle('subagent-popup', SUBAGENT_POPUP_CSS), 'ui-responsive: subagent catalog scrolling')
   ctx.effect(() => injectStyle('to-bottom-gutter', TO_BOTTOM_GUTTER_CSS), 'ui-responsive: sticky return-to-bottom action')
 
   // Composer command-menu scroll fix: the upstream menu viewport lacks
@@ -358,17 +359,6 @@ export function apply(ctx: ClientContext): void {
     guard.attach()
     return () => { guard.detach() }
   }, 'ui-responsive: mobile enter guard')
-
-  // Mobile keyboard boundary (issue #57): while the IME is open the frame keeps
-  // its 100% height (the layout viewport does not shrink on Android 16
-  // edge-to-edge), leaving a scrollable blank band under the composer. Pin the
-  // frame to the visualViewport height while an IME inset is present so the
-  // blank band is clipped instead of scrolled into view.
-  ctx.effect(() => {
-    const boundary = new KeyboardBoundary()
-    boundary.attach()
-    return () => { boundary.detach() }
-  }, 'ui-responsive: mobile keyboard boundary')
 
   // Theme bridge: prefers-color-scheme → OS dark state on WebViews whose
   // media query does not track uiMode (vivo/Android 16 observed). The shell

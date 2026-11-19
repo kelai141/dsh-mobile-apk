@@ -39,7 +39,8 @@ const DRAWER_ON_SCREEN_MIN_RIGHT = 8
  * 旧判据只排除 `[aria-expanded]`（展开器），于是这条按钮被当成导航：
  * 点它会收起抽屉，而用户只是想看该会话的菜单。
  */
-const POPUP_TRIGGER_SELECTOR = '[aria-haspopup], [data-context-menu-trigger], [data-trigger-menu]'
+const POPUP_TRIGGER_SELECTOR = '[aria-haspopup], [data-context-menu-trigger], [data-trigger-menu], [role="menu"]'
+const WORKSPACE_HEADER_SELECTOR = '[data-sidebar-workspace-header]'
 
 /** The frame facts this behaviour reads. */
 export interface PanelNavDrawerDeps {
@@ -121,6 +122,9 @@ export class PanelNavDrawer {
     if (column === null || !column.contains(target)) return
     if (target.closest('button, a, [role="button"], [role="menuitem"]') === null) return
     // 展开器（aria-expanded）只改树形结构，不是导航。
+    // ViewOptionsMenu uses a plain button and portals its list to body.
+    // Search, add-workspace and view options are local header actions.
+    if (target.closest(WORKSPACE_HEADER_SELECTOR) !== null) return
     if (target.closest('[aria-expanded]') !== null) return
     // 弹层锚点（三个点 / 右键菜单触发器）只开菜单，不是导航 —— 点它必须保持抽屉张开。
     if (target.closest(POPUP_TRIGGER_SELECTOR) !== null) return
