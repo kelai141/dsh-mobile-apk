@@ -124,6 +124,26 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   outline-offset: -2px;
 }
 
+.dsh-linux-diagnostics summary { cursor: pointer; }
+.dsh-linux-diagnostics summary > :last-child { color: var(--dsw-alias-label-secondary); }
+.dsh-linux-diagnostics summary > :last-child::after {
+  content: '›';
+  display: inline-block;
+  margin-inline-start: 8px;
+}
+.dsh-linux-diagnostics[open] summary > :last-child::after { transform: rotate(90deg); }
+.dsh-linux-diagnostics dl { margin: 0; padding: 8px 0; }
+.dsh-linux-diagnostics dl > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+.dsh-linux-diagnostics dd { margin: 0; overflow-wrap: anywhere; text-align: end; }
+
 .dsh-linux-terminal {
   display: flex;
   flex-direction: column;

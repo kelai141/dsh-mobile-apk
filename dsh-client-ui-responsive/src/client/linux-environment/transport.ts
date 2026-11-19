@@ -52,7 +52,7 @@ export interface LinuxStatus {
   busy?: boolean
   operation?: string
   runtimeId?: string
-  runtime?: { id?: string; runtimeId?: string; healthy?: boolean } | null
+  runtime?: { id?: string; runtimeId?: string; healthy?: boolean; reason?: string } | null
   runtimes?: Array<{ id: string; label?: string; architecture?: string }>
   defaultRuntimeId?: string
   architecture?: string

@@ -43,15 +43,15 @@ bootstrap 状态文件为 `linux-bootstrap-state.json`，通过临时文件写�
 - 插件在场由 `linuxPluginHost.isInjected()` 查询。手工移除目录后，状态同步清除激活与 enabled，不从新 Release 或 APK 升级自动恢复安装。
 - APK 升级保留 Linux rootfs、runtime 状态和用户选择。应用版本变化检查、startup 检查与用户手动检查走 bootstrap 的不同 source。
 
-运行中禁用 Linux 会结束该 runtime 作用域中的终端和任务。系统设置明确提示该影响。
+运行中禁用 Linux 会结束该 runtime 作用域中的终端和任务。设置页在停用前提示这一影响。「Linux 设置」的运行诊断展示最近健康检查结果、架构、运行时标识和已记录的错误原因。
 
 ## 5. 持久化终端
 
-设置页 `/terminal` 路由由 `createLinuxTerminal()` 创建单个插件实例级 PTY 会话。首次打开确认 Linux runtime 健康且无安装/更新管理锁，再使用 runtime manager 的 `_sessionLaunch()`、执行环境和 `node-pty` 子进程启动交互 shell。PTY 使用 `xterm-256color`，初始 guest 工作目录为 `/root`，宿主工作目录为 runtime dataDir，终端尺寸由前端同步。用户可在终端中输入并执行 Linux 命令，包含交互式 TUI 与长时间运行进程。
+设置页 `/terminal` 路由由 `createLinuxTerminal()` 创建单个插件实例级 PTY 会话。首次打开确认 Linux runtime 健康且无安装/更新管理锁，再使用 runtime manager 的 `_sessionLaunch()`、执行环境和 `Subprocess.spawnTerminal()` 启动交互 shell。PTY 使用 `xterm-256color`，初始 guest 工作目录为 `/root`，宿主工作目录为 runtime dataDir，终端尺寸由前端同步。用户可在终端中输入并执行 Linux 命令，包含交互式 TUI 与长时间运行进程。
 
 请求动作包括 `open`、`restart`、`read`、`write`、`resize`、`stop`。读写带会话 ID，读取以字符游标分页，并返回运行状态和退出结果。服务端保留有界输出历史，旧游标过期时返回 `reset` 供 xterm 清屏后接续。并发首次打开共享同一启动 promise。
 
-离开设置子页面只销毁 xterm 前端实例和轮询，不调用 `stop`。重新打开后通过 `open` 连接仍在运行的 PTY，恢复 shell 进程、工作目录与会话运行状态，并从输出游标读取保留内容。用户确认结束会话、Linux runtime 停止或插件进程退出时，PTY 才结束。该会话由插件进程持有，设备进程重启后的 PTY 恢复不在当前实现中。
+离开设置子页面只销毁 xterm 前端实例和轮询，不调用 `stop`。重新打开后通过 `open` 连接仍在运行的 PTY，恢复 shell 进程、工作目录与会话运行状态，并从输出游标读取保留内容。用户确认结束会话、Linux runtime 停止或插件进程退出时，PTY 才结束。会话生命周期与 Linux 插件进程一致。
 
 ## 6. Debian APT 与工具链
 

@@ -277,6 +277,10 @@ describe('LinuxEnvironmentSection', () => {
     const tools = element.querySelector<HTMLButtonElement>('[data-linux-action="toolchains"]')!
     expect(header.querySelector('h1')?.textContent).toBe('Linux 环境')
     expect(element.querySelector('[data-linux-action="back"]')).toBeNull()
+    await act(async () => { element.querySelector<HTMLButtonElement>('[data-linux-action="settings"]')!.click() })
+    const diagnostics = element.querySelector('.dsh-linux-diagnostics')!
+    expect(diagnostics.textContent).toContain('运行诊断')
+    expect(diagnostics.textContent).toContain('arm64')
     await act(async () => { tools.click() })
     expect(header.querySelector('h1')?.textContent).toBe('工具链')
     expect(element.querySelector('[data-dsh-settings-sublayer-back]')).toBeNull()

@@ -543,6 +543,23 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
           onChange={autoStart => { void run(() => setRuntimePreference({ autoStart }), 'idle') }} />
       </div>}
 
+      {installed && advanced && <details className="dsh-linux-diagnostics">
+        <summary className="dsh-linux-env-row dsh-linux-env-link">
+          <span>{tr('运行诊断', 'Runtime diagnostics')}</span>
+          <span>{status?.runtime?.healthy === true ? tr('健康检查通过', 'Health check passed')
+            : status?.runtime?.healthy === false ? tr('运行异常', 'Runtime error')
+            : tr('等待运行检查', 'No health result yet')}</span>
+        </summary>
+        <dl>
+          {status?.architecture && <div><dt>{tr('处理器架构', 'CPU architecture')}</dt>
+            <dd>{status.architecture}</dd></div>}
+          {(status?.runtimeId ?? status?.runtime?.runtimeId ?? status?.runtime?.id) && <div>
+            <dt>{tr('运行时', 'Runtime')}</dt><dd>{status?.runtimeId ?? status?.runtime?.runtimeId ?? status?.runtime?.id}</dd>
+          </div>}
+          {status?.runtime?.reason && <div><dt>{tr('异常原因', 'Failure reason')}</dt><dd>{status.runtime.reason}</dd></div>}
+        </dl>
+      </details>}
+
       {progress !== null && (
         <div className="dsh-linux-env-progress" data-linux-progress={progress.stage}>
           <p role="status">{progress.stage === 'manifest'
