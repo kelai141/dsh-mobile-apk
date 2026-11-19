@@ -130,3 +130,5 @@ issue #1705 追加的阻断项：发布 APK 必须自带两个 ABI 各自的 gli
 
 - runtime 镜像链是否默认关闭（当前按关闭设计，等委托人确认）。
 - `minAppVersion` 的取值策略（是否允许旧 APK 安装新 runtime）。
+
+The Android diagnostic runtime sends named-session commands to the existing Bash process as single-quoted assignments. It preserves literal input, trailing line-feed handling, working directory, exit status, and the existing command frame markers. Ordinary calls keep their independent shell.

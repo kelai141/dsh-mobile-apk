@@ -19,6 +19,8 @@ NODE_SHA256 = '7d54320366c6df7b7149802fb11bab3e669de84f2da9ce0721e678b007ff79ea'
 PROFILE = Path(__file__).resolve().with_name('android-x86_64-runtime-assets.patch')
 ROOTFS_HANDOFF = PROFILE.with_name('android-rootfs-handoff.patch')
 SHARED_NODE_REUSE = PROFILE.with_name('android-shared-node-reuse.patch')
+SESSION_COMMAND = PROFILE.with_name('android-session-command.patch')
+SESSION = 'modules/session.js'
 PREPARE = 'scripts/prepare-android-rootfs.sh'
 LDCONFIG = 'scripts/ldconfig-android.sh'
 MANAGER = 'modules/manager.js'
@@ -51,7 +53,7 @@ def stage_asset(base: Path, directory: Path, asset: dict) -> Path:
 
 
 def patched_sources(work: Path, backend: Path, plugin: Path) -> dict[str, bytes]:
-    for source, names in ((backend, (PREPARE, LDCONFIG)), (plugin, (MANAGER, PLUGIN_ENTRY))):
+    for source, names in ((backend, (PREPARE, LDCONFIG)), (plugin, (MANAGER, PLUGIN_ENTRY, SESSION))):
         with tarfile.open(source, 'r:xz') as archive:
             for member in archive:
                 name = member.name.removeprefix('./')
@@ -59,11 +61,11 @@ def patched_sources(work: Path, backend: Path, plugin: Path) -> dict[str, bytes]
                     target = work / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(archive.extractfile(member).read())
-    for profile in (PROFILE, ROOTFS_HANDOFF, SHARED_NODE_REUSE):
+    for profile in (PROFILE, ROOTFS_HANDOFF, SHARED_NODE_REUSE, SESSION_COMMAND):
         with profile.open('rb') as patch:
             subprocess.run(['patch', '--batch', '--forward', '--fuzz=0', '-d', str(work), '-p1'],
                            stdin=patch, check=True)
-    sources = {name: (work / name).read_bytes() for name in (PREPARE, LDCONFIG, MANAGER, PLUGIN_ENTRY)}
+    sources = {name: (work / name).read_bytes() for name in (PREPARE, LDCONFIG, MANAGER, PLUGIN_ENTRY, SESSION)}
     token = b'@COMPAT_LIBC_SHA256@'
     if sources[MANAGER].count(token) != 1:
         raise ValueError('Missing or ambiguous compatibility libc digest in runtime manager')
@@ -130,7 +132,7 @@ def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path) -> 
                           {'android-x86_64/libc.so.6': compatible_libc})
         baseline['backendAsset'] = descriptor(backend_target, baseline['backendAsset'], unpacked)
         plugin_target = result / plugin.name
-        unpacked = repack(plugin, plugin_target, {name: sources[name] for name in (MANAGER, PLUGIN_ENTRY)})
+        unpacked = repack(plugin, plugin_target, {name: sources[name] for name in (MANAGER, PLUGIN_ENTRY, SESSION)})
         manifest['plugins']['runtime'] = descriptor(plugin_target, manifest['plugins']['runtime'], unpacked)
         node_target = result / stock_node.name
         unpacked = repack(stock_node, node_target, {'bin/node': compatible_node})
