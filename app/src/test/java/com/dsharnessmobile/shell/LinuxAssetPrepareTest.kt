@@ -245,6 +245,40 @@ class LinuxAssetPrepareTest {
     assertFalse(File(envRoot, "${LinuxAssetPrepare.DIR_STAGING}-${sha256(bytes)}.part").exists())
   }
 
+  @Test
+  fun rootfsCandidateOwnsItsDirectoryAndLeavesTheSharedTreeIntact() {
+    val bytes = archive { tar -> writeEntry(tar, "etc/os-release", "ID=debian\n".toByteArray()) }
+    val shared = File(stagedDir(bytes), "unpacked").apply { mkdirs() }
+    File(shared, "shared-sentinel").writeText("keep")
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    val spec = JSONObject(specJson(bytes, url = goodUrl.replace("linux-runtime-plugin", "debian-lite")))
+      .put("kind", "rootfs").put("rootfsCandidate", true)
+    val result = JSONObject(LinuxAssetPrepare.start(root, spec.toString()))
+
+    val id = result.getString("rootfsCandidate")
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+    assertEquals(id, status().getString("rootfsCandidate"))
+    val candidate = File(envRoot, "rootfs-candidates/$id")
+    val receipt = JSONObject(File(candidate, "receipt.json").readText())
+    assertEquals(id, receipt.getString("id"))
+    assertEquals(sha256(bytes), receipt.getString("sha256"))
+    assertEquals(sha256(bytes), sha256(File(candidate, "asset.tar.xz").readBytes()))
+    assertEquals("ID=debian\n", File(candidate, "unpacked/etc/os-release").readText())
+    assertEquals("keep", File(shared, "shared-sentinel").readText())
+  }
+
+  @Test
+  fun rootfsCandidateDoesNotPublishAfterDigestMismatch() {
+    val bytes = goodArchive()
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    val spec = JSONObject(specJson(bytes, sha = "a".repeat(64)))
+      .put("kind", "rootfs").put("rootfsCandidate", true)
+    val result = JSONObject(LinuxAssetPrepare.start(root, spec.toString()))
+
+    assertEquals(LinuxAssetPrepare.PHASE_FAILED, status().getString("phase"))
+    assertFalse(File(envRoot, "rootfs-candidates/${result.getString("rootfsCandidate")}").exists())
+  }
+
   // ── 五个负控：摘要、字节数、穿越、符号链接逃逸、炸弹 ────────────────────────
 
   @Test
@@ -435,7 +469,8 @@ class LinuxAssetPrepareTest {
     val activeStaged = File(File(envRoot, LinuxAssetPrepare.DIR_STAGING), "b".repeat(64)).apply { mkdirs() }
 
     assertTrue(JSONObject(LinuxAssetPrepare.start(root, specJson(bytes))).getBoolean("ok"))
-    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+    val state = status()
+    assertEquals(state.toString(), LinuxAssetPrepare.PHASE_OK, state.getString("phase"))
 
     assertFalse("此前中断遗留的 staging-<sha>.part 必须被清理", stalePart.exists())
     assertTrue("非 sha 命名的目录不得误删", nonPart.isDirectory)

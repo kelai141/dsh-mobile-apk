@@ -266,14 +266,14 @@ bootstrap 调用 `linuxPluginHost.install({directory,entry='lib/index.js',config
 
 | JS 桥方法（`androidBridge`） | 语义 |
 |---|---|
-| `linuxAssetPrepare(specJson)` | 入参只有资产清单 `{url, sha256, size}`；**落点由壳侧按摘要推导**（`staging/<sha256>/`），页面无法指定目标路径。立即返回 `{ok, phase}`；不解析清单或来源不合规时当场拒绝。 |
-| `linuxAssetPrepareStatus()` | 读取阶段与失败原因（`phase`/`code`/`detail`/`stagedPath`/`bytes`）。 |
+| `linuxAssetPrepare(specJson)` | Accepts `{url, sha256, size, kind}` and an optional `rootfsCandidate: true` for rootfs. The shell derives the staging location and returns `{ok, phase}`. Candidate preparation also returns a shell-generated `rootfsCandidate` ID. |
+| `linuxAssetPrepareStatus()` | Returns `phase`, `code`, `detail`, `stagedPath`, and `bytes`. A candidate reports its `rootfsCandidate` ID and exposes no staging path. |
 
 壳侧判据（实现见 `app/src/main/java/com/dsharnessmobile/shell/LinuxAssetIO.kt` 与 `LinuxAssetPrepare.kt`）：只接受 https + 主机白名单（`github.com` / GitHub 资产 CDN）且路径必须是**本仓** Releases 的 `<tag>/<asset>`；重定向**逐跳**复核（不用 `instanceFollowRedirects` 的自动跟随）；`SHA-256` 与**字节数**都要与清单一致；解包复用既有 `SnapshotExtractor`（绝对路径/`..`/符号链接逃逸/解压炸弹上限都在那里）；解包目标与下载目标都由壳侧强制落在 `DSH_FILES_DIR/linux-environment` 内。**除非 Linux 环境在场**（根目录 + bootstrap 状态文件 `linux-bootstrap-state.json`）一律拒绝，故它不是通用下载器。只有全部通过才原子发布成 `staging/<sha256>/`，并把**归档字节留在原地**供引擎侧复验。
 
 **职责边界（0.15.0 的所有权变化，必须如实读）**：bootstrap **不再取字节** —— `linuxAssetIO.downloadAsset` / `extractArchive` 从「bootstrap 自己下载并解包」变成宿主侧准备之后的**透传/占位**，因为引擎侧既解不了 xz 也调不动宿主。bootstrap 仍然拥有版本、状态、**最终落位**与激活的权威；`reused: true` 必须来自它自己的复验结果（保留归档的摘要，或解包树上的 `unpackedSize` + 入口 + 包名），**不得**只信宿主写下的标记。引擎侧在「什么都没准备」时必须**失败关闭**，不得半装。
 
-**端到端仍未打通（不记通过）**：客户端调用 `linuxAssetPrepare` 的那一步、以及引擎侧 bootstrap 的透传接线都**尚未落地**；且 bootstrap 包本身还没进注入集，因此**不会随应用分发**。本轮交付的是宿主侧「可准备」的能力与其反证，不是可安装的系统。
+The client supplies the candidate ID to the authenticated `install` route when the selected runtime advertises candidate handoff. The engine re-verifies the candidate inside that transaction. See [the rootfs candidate handoff contract](LINUX-RUNTIME-CONTRACT.md#rootfs-candidate-handoff).
 
 页面状态由 `normalizeLinuxStatus` 映射，同时接受 Bionilux 定稿字段与此前提案字段；其中两条插件 `releaseUrl` 来自 bootstrap 状态（`pluginReleaseUrls` 或 `plugins.*.releaseUrl`），不拼接默认最新版本。Linux rootfs 是 glibc 运行支持，不是安全沙箱；guest root 不等于 Android root；Termux/Bionic Bash 与 Debian/glibc Linux Bash 分开展示，共享 glibc Node 不替换原有 Termux Node。已安装但 runtime 被手工移除时，页面显式显示「自动更新已停用」并要求重新放回并启用，而不是静默停更。内部 bootstrap 成品接线及真实安装验收状态见 `known-gaps.md`。
 

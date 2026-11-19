@@ -72,6 +72,7 @@ export interface ManifestRuntime {
   backendAsset?: ManifestAsset
   rootfsAsset?: ManifestAsset
   nodeAsset?: ManifestAsset
+  rootfsCandidateHandoff?: boolean
 }
 
 /** Verified release manifest (only the fields this section consumes). */
@@ -166,11 +167,12 @@ export function checkForUpdates(): Promise<LinuxStatus> {
 }
 
 /** Download, verify, stage and activate. Explicit user action only. */
-export function installEnvironment(runtimeId?: string): Promise<LinuxStatus> {
+export function installEnvironment(runtimeId?: string, rootfsCandidate?: string): Promise<LinuxStatus> {
   return request<LinuxStatus>('POST', LINUX_ROUTES.install, {
     confirmed: true,
     activate: true,
     ...(runtimeId ? { runtimeId } : {}),
+    ...(rootfsCandidate ? { rootfsCandidate } : {}),
   })
 }
 
@@ -232,6 +234,7 @@ export interface AssetSpec extends ManifestAsset {
   field: string
   /** Unpack rule for the shell: plugin / backend / rootfs / node. */
   kind: AssetKind
+  rootfsCandidate?: boolean
 }
 
 /** Pick the runtime for this device: explicit id, else first matching architecture. */
@@ -265,7 +268,9 @@ export function assetsFor(
     for (const field of ASSET_FIELDS) {
       const asset = runtime[field]
       if (isAsset(asset)) {
-        specs.push({ ...asset, id: runtime.id + ':' + field, field, kind: ASSET_KIND[field] })
+        specs.push({ ...asset, id: runtime.id + ':' + field, field, kind: ASSET_KIND[field],
+          ...(field === 'rootfsAsset' && runtime.rootfsCandidateHandoff === true ? { rootfsCandidate: true } : {}),
+        })
       }
     }
   }
@@ -297,11 +302,13 @@ export interface AssetPrepareAnswer {
   phase?: string
   code?: string
   detail?: string
+  rootfsCandidate?: string
 }
 export interface AssetPrepareSnapshot {
   phase?: string
   sha256?: string | null
   stagedPath?: string | null
+  rootfsCandidate?: string
   code?: string | null
   detail?: string | null
 }
@@ -345,7 +352,7 @@ export async function prepareAssets(
   onProgress: (progress: AssetProgress) => void,
   pollMs = 600,
   timeoutMs = 20 * 60 * 1000,
-): Promise<void> {
+): Promise<string | undefined> {
   if (bridge === undefined || typeof bridge.linuxAssetPrepare !== 'function' || typeof bridge.linuxAssetPrepareStatus !== 'function') {
     throw new AssetError('The Android asset bridge is unavailable', { code: 'linux-asset-bridge-missing' })
   }
@@ -353,6 +360,7 @@ export async function prepareAssets(
     throw new AssetError('The release manifest lists no installable assets', { code: 'linux-asset-spec-invalid' })
   }
 
+  let rootfsCandidate: string | undefined
   for (let index = 0; index < specs.length; index += 1) {
     const spec = specs[index]
     const total = specs.length
@@ -360,6 +368,7 @@ export async function prepareAssets(
     report('starting')
 
     let started = false
+    let candidateId: string | undefined
     for (let attempt = 0; attempt < 20 && !started; attempt += 1) {
       // `kind` is part of the contract: the shell picks the unpack rule from it
       // (a rootfs legitimately contains symlinks, a plugin tarball must not).
@@ -368,12 +377,14 @@ export async function prepareAssets(
         sha256: spec.sha256,
         size: spec.size,
         kind: spec.kind,
+        ...(spec.rootfsCandidate ? { rootfsCandidate: true } : {}),
       }))) as AssetPrepareAnswer | null
       if (answer === null) {
         throw new AssetError('The Android asset bridge returned no answer', { code: 'linux-asset-bridge-invalid', assetId: spec.id })
       }
       if (answer.ok === true) {
         started = true
+        candidateId = answer.rootfsCandidate
         break
       }
       if (answer.code === 'linux-asset-busy') {
@@ -402,6 +413,10 @@ export async function prepareAssets(
             assetId: spec.id,
           })
         }
+        if (candidateId != null && snapshot.rootfsCandidate !== candidateId) {
+          throw new AssetError('The rootfs candidate changed during preparation', { code: 'linux-asset-lost', assetId: spec.id })
+        }
+        if (candidateId != null) rootfsCandidate = candidateId
         break
       }
       if (phase === 'failed') {
@@ -422,4 +437,5 @@ export async function prepareAssets(
     }
     report('staged')
   }
+  return rootfsCandidate
 }

@@ -161,7 +161,7 @@ Prepare the Android x86-64 Linux guest's Node.js 24.22.0 source using the upstre
 python3 scripts/source-build/bionilux/prepare-node-source.py inputs keyrings/node-release.gpg out/guest-node
 ```
 
-`assemble-debug-workspace-assets.py` uses Python 3.11 or later, GNU `patch` and `mv` on Linux. It verifies the pinned Bionilux v0.10.7 manifest and x86-64 assets, then packages the lightweight rootfs, compatible libc, and guest Node with the Android adapters. The output directory is new and contains a local debug-fixture manifest for both Debian runtime IDs. It belongs behind the official AVD's debug-only loopback fixture transport. Keep the binaries and fixture archives outside Git.
+`assemble-debug-workspace-assets.py` uses Python 3.11 or later, GNU `patch` and `mv` on Linux. It verifies the pinned Bionilux v0.10.7 manifest and x86-64 assets, then packages the lightweight rootfs, compatible libc, and guest Node with the Android adapters. The output directory is new and contains a local debug-fixture manifest for both Debian runtime IDs. The lightweight entry advertises the one-use rootfs handoff. On a debug host its manager records phase timings in `linux-environment/runtime/debug-install-profile.json`. The assets use the official AVD's debug-only loopback fixture transport. Keep binaries and fixture archives outside Git.
 
 ```sh
 python3 scripts/source-build/bionilux/assemble-debug-workspace-assets.py \

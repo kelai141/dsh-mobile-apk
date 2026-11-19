@@ -65,6 +65,12 @@ READY -> DISABLING -> INSTALLED_DISABLED
 - 重装更换 rootfs，但同一工作区路径必须跨重装存活；活 shell 属于进程，进程结束即失效。
 - APK 升级不重装运行时、不自动启用、不复活用户关闭的系统；自动更新只对已启用系统生效，且必须由用户打开开关。
 
+### Rootfs candidate handoff
+
+A runtime manifest may advertise `rootfsCandidateHandoff: true`. For that install, the Android shell creates a private, one-use candidate directory, downloads and verifies the original archive, safely extracts it, and atomically publishes a receipt with the generated candidate ID and asset identity. The page supplies the ID with the confirmed install request. The installer derives all paths within its private environment and accepts the candidate only for the selected manifest entry.
+
+The engine atomically claims the candidate within the install transaction, verifies the retained archive's size and SHA-256, and validates the tree's entry types and symlink boundaries before moving the tree to its destination. The shared staging cache keeps its normal ownership. The runtime still prepares the candidate, runs a real guest health probe, and writes the active record only after a healthy result. Failure discards the claimed candidate as part of transaction cleanup. Unclaimed receipts expire after one hour and are pruned during subsequent candidate preparation.
+
 ## 7. 控制台与 Debian shell（验收入口）
 
 - 控制台默认运行快照 bash（Termux），该行为不变。

@@ -1,6 +1,11 @@
 package com.dsharnessmobile.shell
 
 import java.io.File
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.util.UUID
 import org.json.JSONObject
 
 /**
@@ -20,6 +25,9 @@ internal object LinuxAssetPrepare {
 
   /** 宿主自己的暂存区（**不是** bootstrap 的最终插件目录；最终布局归引擎侧）。 */
   const val DIR_STAGING = "staging"
+  private const val ROOTFS_CANDIDATES = "rootfs-candidates"
+  private const val CANDIDATE_MAX_AGE_MS = 60L * 60L * 1000L
+  private val candidateName = Regex("[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 
   private val PART_DIR_PATTERN = Regex("^$DIR_STAGING-([a-f0-9]{64})\\.part$")
 
@@ -36,6 +44,7 @@ internal object LinuxAssetPrepare {
     val sha256: String? = null,
     val kind: String? = null,
     val stagedPath: String? = null,
+    val rootfsCandidate: String? = null,
     val bytes: Long = 0L,
   )
 
@@ -65,6 +74,7 @@ internal object LinuxAssetPrepare {
    */
   fun start(filesDir: File?, specJson: String): String {
     val spec: LinuxAssetIO.Spec
+    val candidateId: String?
     try {
       val o = JSONObject(specJson)
       val kind = LinuxAssetIO.Kind.parse(if (o.has("kind") && !o.isNull("kind")) o.getString("kind") else null)
@@ -79,6 +89,9 @@ internal object LinuxAssetPrepare {
         size = o.getLong("size"),
         kind = kind,
       )
+      candidateId = if (kind == LinuxAssetIO.Kind.ROOTFS && o.opt("rootfsCandidate") == true) {
+        UUID.randomUUID().toString()
+      } else null
     } catch (e: Exception) {
       return JSONObject()
         .put("ok", false)
@@ -98,7 +111,7 @@ internal object LinuxAssetPrepare {
         return JSONObject().put("ok", false).put("code", "linux-asset-busy")
           .put("detail", "已有一次准备在进行中").toString()
       }
-      snapshot = Snapshot(phase = PHASE_RUNNING, sha256 = spec.sha256, kind = spec.kind.wire)
+      snapshot = Snapshot(phase = PHASE_RUNNING, sha256 = spec.sha256, kind = spec.kind.wire, rootfsCandidate = candidateId)
     }
 
     // 门口就把「环境不在场」和「来源不合规」判掉：这两条不需要起线程，也不该留下任何状态。
@@ -112,11 +125,11 @@ internal object LinuxAssetPrepare {
     val root = File(filesDir!!, LinuxAssetIO.ENV_DIR)
     runner {
       val failure = try {
-        prepareInto(root, spec)
+        if (candidateId == null) prepareInto(root, spec) else prepareCandidate(root, spec, candidateId)
       } catch (e: Exception) {
         // 解包器已按失败关闭返回；这里兜住平台级异常（如无符号链接权限的 SecurityException），
         // 否则后台线程会死掉而状态永远停在 running。
-        workDir(root, spec.sha256)?.let { SnapshotFs.deletePath(it) }
+        if (candidateId == null) workDir(root, spec.sha256)?.let { SnapshotFs.deletePath(it) }
         LinuxAssetIO.Failure(
           LinuxAssetIO.CODE_UNSAFE_ARCHIVE,
           "准备异常（${e.javaClass.simpleName}）：${e.message}",
@@ -129,7 +142,7 @@ internal object LinuxAssetPrepare {
             code = null,
             detail = null,
             bytes = spec.size,
-            stagedPath = stagedDir(root, spec.sha256)?.absolutePath,
+            stagedPath = if (candidateId == null) stagedDir(root, spec.sha256)?.absolutePath else null,
           )
         }
       } else {
@@ -143,6 +156,7 @@ internal object LinuxAssetPrepare {
       .put("phase", PHASE_RUNNING)
       .put("sha256", spec.sha256)
       .put("kind", spec.kind.wire)
+      .put("rootfsCandidate", candidateId)
       .toString()
   }
 
@@ -153,6 +167,7 @@ internal object LinuxAssetPrepare {
       .put("sha256", snapshot.sha256 ?: JSONObject.NULL)
       .put("kind", snapshot.kind ?: JSONObject.NULL)
       .put("stagedPath", snapshot.stagedPath ?: JSONObject.NULL)
+      .put("rootfsCandidate", snapshot.rootfsCandidate)
       .put("bytes", snapshot.bytes)
       .put("code", snapshot.code ?: JSONObject.NULL)
       .put("detail", snapshot.detail ?: JSONObject.NULL)
@@ -174,6 +189,36 @@ internal object LinuxAssetPrepare {
   private fun workDir(root: File, sha256: String): File? {
     if (!LinuxAssetIO.SHA256_PATTERN.matches(sha256)) return null
     return LinuxAssetIO.resolveInside(root, "$DIR_STAGING-$sha256.part")
+  }
+
+  private fun prepareCandidate(root: File, spec: LinuxAssetIO.Spec, id: String): LinuxAssetIO.Failure? {
+    val parent = File(root, ROOTFS_CANDIDATES)
+    parent.mkdir()
+    if (!Files.isDirectory(parent.toPath(), NOFOLLOW_LINKS) || parent.canonicalFile.parentFile != root.canonicalFile) {
+      return LinuxAssetIO.Failure(LinuxAssetIO.CODE_DESTINATION_ESCAPE, "Invalid rootfs candidate directory")
+    }
+    val now = System.currentTimeMillis()
+    parent.listFiles()?.forEach { child ->
+      if (candidateName.matches(child.name) && Files.isDirectory(child.toPath(), NOFOLLOW_LINKS) &&
+        now - child.lastModified() > CANDIDATE_MAX_AGE_MS) SnapshotFs.deletePath(child)
+    }
+    val candidate = Files.createDirectory(File(parent, id).toPath()).toFile()
+    var prepared = false
+    try {
+      val archive = File(candidate, "asset.tar.xz")
+      LinuxAssetIO.download(spec, archive, root, opener, debugBuild)?.let { return it }
+      val unpacked = Files.createDirectory(File(candidate, "unpacked").toPath()).toFile()
+      LinuxAssetIO.extract(archive, unpacked, root, spec.kind, LinuxAssetIO.limitsFor(spec.kind))?.let { return it }
+      val receipt = JSONObject().put("id", id).put("url", spec.url).put("sha256", spec.sha256)
+        .put("size", spec.size).put("kind", spec.kind.wire).put("createdAt", now)
+      val receiptPart = File(candidate, "receipt.part")
+      receiptPart.writeText(receipt.toString())
+      Files.move(receiptPart.toPath(), File(candidate, "receipt.json").toPath(), ATOMIC_MOVE)
+      prepared = true
+      return null
+    } finally {
+      if (!prepared) SnapshotFs.deletePath(candidate)
+    }
   }
 
   /**
@@ -205,13 +250,16 @@ internal object LinuxAssetPrepare {
       SnapshotFs.deletePath(staging)
       return failure
     }
-    // 发布目录的父级必须先存在：否则 renameTo 会因目标父目录缺席而失败（实测到的失败形态）。
+    // The destination parent must exist before the atomic move.
     staged.parentFile?.mkdirs()
-    if (staged.exists() || !staging.renameTo(staged)) {
+    try {
+      if (staged.exists()) throw IOException("The staging destination already exists")
+      Files.move(staging.toPath(), staged.toPath(), ATOMIC_MOVE)
+    } catch (failure: IOException) {
       SnapshotFs.deletePath(staging)
       return LinuxAssetIO.Failure(
         LinuxAssetIO.CODE_DESTINATION_ESCAPE,
-        "暂存发布失败（目标已存在或跨卷）：${staged.absolutePath}",
+        "Could not publish the verified asset staging directory: ${failure.message}",
       )
     }
     return null

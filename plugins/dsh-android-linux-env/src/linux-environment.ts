@@ -1,4 +1,5 @@
 import { readdir, realpath, stat } from 'node:fs/promises'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { FiberState } from '@deepseek-ai/cordis'
@@ -6,6 +7,13 @@ import {
   authorizeMobileRoute, sendMobileRouteRejection,
   type MobileRouteRequest, type MobileRouteResponse, type MobileRouteAuthOptions,
 } from '@dsh-android/dsh-android-bridge'
+
+const rootfsInstallScope = new AsyncLocalStorage<{ candidateId: string; active: boolean }>()
+
+function requestedRootfsCandidate(): string | undefined {
+  const scope = rootfsInstallScope.getStore()
+  return scope?.active ? scope.candidateId : undefined
+}
 
 export interface BootstrapStatus {
   /** Finalized Bionilux shape. */
@@ -124,8 +132,29 @@ export function effectSafeApply(
 /** The runtime side's handle: exactly the shape the bootstrap's own `isManager` check accepts. */
 export interface RuntimeManager {
   install(...args: unknown[]): unknown
+  installFromRootfsCandidate?(manifest: unknown, runtimeId: unknown, candidateId: string): unknown
   uninstall(...args: unknown[]): unknown
   reinstall?(...args: unknown[]): unknown
+}
+
+function managerForInstall(manager: RuntimeManager): RuntimeManager {
+  if (requestedRootfsCandidate() === undefined) return manager
+  return new Proxy(manager, {
+    get(target, key) {
+      if (key === 'install') {
+        return (...args: unknown[]) => {
+          const candidateId = requestedRootfsCandidate()
+          if (candidateId === undefined) return target.install(...args)
+          if (typeof target.installFromRootfsCandidate !== 'function') {
+            throw new Error('The selected Linux runtime cannot accept a rootfs candidate')
+          }
+          return target.installFromRootfsCandidate(args[0], args[1], candidateId)
+        }
+      }
+      const value = Reflect.get(target, key, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
 }
 export interface PluginInstall { directory: string; entry?: string; config?: Record<string, unknown>; enable?: boolean }
 export interface PluginUninstall { runtimeId?: string; directory?: string; rollback?: unknown }
@@ -265,8 +294,13 @@ export function createLinuxPluginHost(options: {
       }
       const entry = await realpath(resolve(directory, defaultEntry(input.entry)))
       if (!inside(directory, entry)) throw new Error('Runtime plugin entry must be inside its verified directory')
+      if (requestedRootfsCandidate() !== undefined) {
+        const manifest = input.config?.manifest as { runtimes?: Array<{ id: string; rootfsCandidateHandoff?: boolean }> } | undefined
+        const selected = manifest?.runtimes?.find(item => item.id === input.config?.runtimeId)
+        if (selected?.rootfsCandidateHandoff !== true) throw new Error('The selected manifest does not allow rootfs candidate handoff')
+      }
       if (isActive() && activeDirectory === directory && manager !== undefined) {
-        return { directory, active: true, manager, rollback: release }
+        return { directory, active: true, manager: managerForInstall(manager), rollback: release }
       }
       const plugin = await (options.importModule ?? (url => import(url)))(pathToFileURL(entry).href)
       if (closed) throw stopping()
@@ -296,7 +330,7 @@ export function createLinuxPluginHost(options: {
         scope = activated
         manager = resolved
         activeDirectory = directory
-        return { directory, active: true, manager: resolved, rollback: release }
+        return { directory, active: true, manager: managerForInstall(resolved), rollback: release }
       } catch (error) {
         const failed = activated ?? ('dispose' in activation ? activation : undefined)
         await failed?.dispose()
@@ -400,7 +434,7 @@ interface WebServer { register(route: { kind: 'exact'; path: string; handler(req
  * runtimeId 由设置页按 manifest 的 `runtimes[]` 选（arm64/x64 各一份），**不在宿主写死**；
  * 缺席时交给 bootstrap 按 `process.arch` 取默认 id。
  */
-async function readConfirmation(req: Request): Promise<{ confirmed: boolean; runtimeId?: string }> {
+async function readConfirmation(req: Request): Promise<{ confirmed: boolean; runtimeId?: string; rootfsCandidate?: string }> {
   let size = 0
   const chunks: Buffer[] = []
   for await (const chunk of req) {
@@ -413,9 +447,14 @@ async function readConfirmation(req: Request): Promise<{ confirmed: boolean; run
   // 空体 = 没有确认，直接判否（不把 EOF 当 JSON 解析错误之外的语义）。
   const value: unknown = text === '' ? {} : JSON.parse(text)
   if (typeof value !== 'object' || value === null) return { confirmed: false }
-  const body = value as { confirmed?: unknown; runtimeId?: unknown }
+  const body = value as { confirmed?: unknown; runtimeId?: unknown; rootfsCandidate?: unknown }
   const runtimeId = typeof body.runtimeId === 'string' && /^[a-z0-9][a-z0-9-]*$/.test(body.runtimeId) ? body.runtimeId : undefined
-  return { confirmed: body.confirmed === true, ...(runtimeId === undefined ? {} : { runtimeId }) }
+  const rootfsCandidate = body.rootfsCandidate
+  if (rootfsCandidate !== undefined && (typeof rootfsCandidate !== 'string' ||
+      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(rootfsCandidate))) {
+    throw new Error('Invalid rootfs candidate identifier')
+  }
+  return { confirmed: body.confirmed === true, runtimeId, rootfsCandidate }
 }
 
 export function registerLinuxEnvironmentRoutes(options: {
@@ -470,17 +509,31 @@ export function registerLinuxEnvironmentRoutes(options: {
         busy = true
         try {
           let runtimeId: string | undefined
+          let rootfsCandidate: string | undefined
           if (action !== 'check') {
-            let confirmation: { confirmed: boolean; runtimeId?: string }
+            let confirmation: Awaited<ReturnType<typeof readConfirmation>>
             try { confirmation = await readConfirmation(req) } catch { send(res, 400, { error: '请求确认信息无效。' }); return }
             if (!confirmation.confirmed) { send(res, 400, { error: '操作需要用户明确确认。' }); return }
             runtimeId = confirmation.runtimeId
+            rootfsCandidate = confirmation.rootfsCandidate
+            if (rootfsCandidate !== undefined && action !== 'install') {
+              send(res, 400, { error: 'Rootfs candidates are accepted only when installing.' }); return
+            }
           }
           switch (action) {
             case 'check': await bootstrap.checkForUpdates({ source: 'manual' }); break
             // confirmed/activate 必须逐次显式下发：bootstrap 的 install/reinstall 要求两者皆为 true，
             // uninstall 要求 confirmed:true。runtimeId 由 UI 按 process.arch 选，缺席交给 bootstrap。
-            case 'install': await bootstrap.install({ ...(runtimeId === undefined ? {} : { runtimeId }), confirmed: true, activate: true } as never); break
+            case 'install': {
+              const install = () => bootstrap.install({ ...(runtimeId === undefined ? {} : { runtimeId }), confirmed: true, activate: true })
+              if (rootfsCandidate === undefined) await install()
+              else {
+                const scope = { candidateId: rootfsCandidate, active: true }
+                try { await rootfsInstallScope.run(scope, install) }
+                finally { scope.active = false }
+              }
+              break
+            }
             case 'reinstall': await bootstrap.reinstall({ confirmed: true, activate: true } as never); break
             case 'uninstall': await bootstrap.uninstall({ confirmed: true } as never); break
             case 'auto-update-on': await bootstrap.setAutoUpdateEnabled(true); break

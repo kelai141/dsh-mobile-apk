@@ -292,6 +292,7 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
     setError('')
     let preparedRuntimeId = selectedRuntime
     try {
+      let rootfsCandidate: string | undefined
       if (!reinstall) {
         setPhase('manifest')
         setProgress({ stage: 'manifest' })
@@ -315,7 +316,7 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
         }
         preparedRuntimeId = runtime.id
         setProgress({ stage: 'assets', index: 0, total: specs.length, bytes: totalBytes(specs) })
-        await prepareAssets(
+        rootfsCandidate = await prepareAssets(
           window.androidBridge,
           specs as AssetSpec[],
           (item: AssetProgress) => {
@@ -327,7 +328,7 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
       setProgress({ stage: 'installing' })
       const next = reinstall
         ? await reinstallEnvironment()
-        : await installEnvironment(preparedRuntimeId !== '' ? preparedRuntimeId : undefined)
+        : await installEnvironment(preparedRuntimeId !== '' ? preparedRuntimeId : undefined, rootfsCandidate)
       if (typeof next.installed === 'boolean') setStatus(next)
       setPhase('done')
       await refresh()

@@ -68,19 +68,21 @@ function makeFetch(routes: Record<string, { status?: number; body?: unknown }>) 
 }
 
 /** 假桥：linuxAssetPrepare 立即受理，status 在下一次轮询时 ok。 */
-function makeBridge() {
-  const prepared: Array<{ url: string; sha256: string; size: number }> = []
+function makeBridge(candidateId?: string) {
+  const prepared: Array<{ url: string; sha256: string; size: number; rootfsCandidate?: boolean }> = []
   let pending: string | null = null
+  let pendingCandidate: string | undefined
   return {
     prepared,
     bridge: {
       linuxAssetPrepare: (specJson: string) => {
-        const spec = JSON.parse(specJson) as { url: string; sha256: string; size: number }
+        const spec = JSON.parse(specJson) as typeof prepared[number]
         prepared.push(spec)
         pending = spec.sha256
-        return JSON.stringify({ ok: true, phase: 'running', sha256: spec.sha256 })
+        pendingCandidate = spec.rootfsCandidate ? candidateId : undefined
+        return JSON.stringify({ ok: true, phase: 'running', sha256: spec.sha256, rootfsCandidate: pendingCandidate })
       },
-      linuxAssetPrepareStatus: () => JSON.stringify({ phase: 'ok', sha256: pending, stagedPath: '/staging/' + pending }),
+      linuxAssetPrepareStatus: () => JSON.stringify({ phase: 'ok', sha256: pending, stagedPath: '/staging/' + pending, rootfsCandidate: pendingCandidate }),
     },
   }
 }
@@ -155,6 +157,28 @@ describe('LinuxEnvironmentSection', () => {
     await act(async () => { check.click() })
     expect(checks).toBe(2)
     expect(element.querySelector('[data-linux-auto-check="update-available"]')?.textContent).toContain('0.10.9')
+  })
+
+  it('uses the prepared rootfs identity only for a handoff-capable runtime', async () => {
+    const runtime = { ...MANIFEST.runtimes[0], id: 'debian-workspace-lite-x64', architecture: 'x64', rootfsCandidateHandoff: true }
+    const { calls, impl } = makeFetch({
+      '/api/android/linux-environment/status': { body: { installed: false, architecture: 'x64', defaultRuntimeId: runtime.id } },
+      '/api/android/linux-environment/manifest': { body: { manifest: { ...MANIFEST, runtimes: [runtime] } } },
+      '/api/android/linux-environment/install': { body: STATUS_INSTALLED },
+    })
+    vi.stubGlobal('fetch', impl)
+    const candidateId = '12345678-1234-4123-8123-123456781234'
+    const { prepared, bridge } = makeBridge(candidateId)
+    Object.defineProperty(window, 'androidBridge', { value: bridge, configurable: true, writable: true })
+
+    const element = await render()
+    const install = element.querySelector('[data-linux-action="install"]') as HTMLButtonElement
+    await act(async () => { install.click() })
+
+    expect(prepared.filter(item => item.rootfsCandidate === true).map(item => item.sha256)).toEqual([SHA_C])
+    expect(calls.find(call => call.url.endsWith('/install'))?.body).toMatchObject({
+      confirmed: true, runtimeId: runtime.id, rootfsCandidate: candidateId,
+    })
   })
 
   it('stages the runtime plugin plus backend, rootfs and node before posting install', async () => {

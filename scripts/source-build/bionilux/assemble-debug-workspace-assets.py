@@ -17,9 +17,11 @@ ROOTFS_SHA256 = 'b6d7bf1024006658107d41a9b6baf6fcca5029716e2534ebb8a7c139c13cb3f
 LIBC_SHA256 = '19f4c66b4ea8e012a7c3ceadf94c860d49c3a3392757a53d10d6674bc12af35e'
 NODE_SHA256 = '7d54320366c6df7b7149802fb11bab3e669de84f2da9ce0721e678b007ff79ea'
 PROFILE = Path(__file__).resolve().with_name('android-x86_64-runtime-assets.patch')
+ROOTFS_HANDOFF = PROFILE.with_name('android-rootfs-handoff.patch')
 PREPARE = 'scripts/prepare-android-rootfs.sh'
 LDCONFIG = 'scripts/ldconfig-android.sh'
 MANAGER = 'modules/manager.js'
+PLUGIN_ENTRY = 'lib/index.js'
 
 
 def sha256(path: Path) -> str:
@@ -48,7 +50,7 @@ def stage_asset(base: Path, directory: Path, asset: dict) -> Path:
 
 
 def patched_sources(work: Path, backend: Path, plugin: Path) -> dict[str, bytes]:
-    for source, names in ((backend, (PREPARE, LDCONFIG)), (plugin, (MANAGER,))):
+    for source, names in ((backend, (PREPARE, LDCONFIG)), (plugin, (MANAGER, PLUGIN_ENTRY))):
         with tarfile.open(source, 'r:xz') as archive:
             for member in archive:
                 name = member.name.removeprefix('./')
@@ -56,10 +58,11 @@ def patched_sources(work: Path, backend: Path, plugin: Path) -> dict[str, bytes]
                     target = work / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(archive.extractfile(member).read())
-    with PROFILE.open('rb') as patch:
-        subprocess.run(['patch', '--batch', '--forward', '--fuzz=0', '-d', str(work), '-p1'],
-                       stdin=patch, check=True)
-    sources = {name: (work / name).read_bytes() for name in (PREPARE, LDCONFIG, MANAGER)}
+    for profile in (PROFILE, ROOTFS_HANDOFF):
+        with profile.open('rb') as patch:
+            subprocess.run(['patch', '--batch', '--forward', '--fuzz=0', '-d', str(work), '-p1'],
+                           stdin=patch, check=True)
+    sources = {name: (work / name).read_bytes() for name in (PREPARE, LDCONFIG, MANAGER, PLUGIN_ENTRY)}
     token = b'@COMPAT_LIBC_SHA256@'
     if sources[MANAGER].count(token) != 1:
         raise ValueError('Missing or ambiguous compatibility libc digest in runtime manager')
@@ -126,7 +129,7 @@ def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path) -> 
                           {'android-x86_64/libc.so.6': compatible_libc})
         baseline['backendAsset'] = descriptor(backend_target, baseline['backendAsset'], unpacked)
         plugin_target = result / plugin.name
-        unpacked = repack(plugin, plugin_target, {MANAGER: sources[MANAGER]})
+        unpacked = repack(plugin, plugin_target, {name: sources[name] for name in (MANAGER, PLUGIN_ENTRY)})
         manifest['plugins']['runtime'] = descriptor(plugin_target, manifest['plugins']['runtime'], unpacked)
         node_target = result / stock_node.name
         unpacked = repack(stock_node, node_target, {'bin/node': compatible_node})
@@ -138,6 +141,7 @@ def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path) -> 
             unpacked = sum(member.size for member in archive)
         manifest['runtimes'].append({**baseline, 'id': 'debian-workspace-lite-x64',
                                      'label': 'Debian workspace lite (diagnostic)',
+                                     'rootfsCandidateHandoff': True,
                                      'rootfsAsset': descriptor(rootfs_target, baseline['rootfsAsset'], unpacked)})
         (result / 'linux-release.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
         subprocess.run(['mv', '-T', '--no-clobber', '--', str(result), str(destination)], check=True)
