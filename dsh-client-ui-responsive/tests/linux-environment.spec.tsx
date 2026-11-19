@@ -342,7 +342,7 @@ describe('LinuxEnvironmentSection', () => {
     expect((element.querySelector('[data-linux-action="back"]') as HTMLButtonElement).disabled).toBe(false)
   }, 20000)
 
-  it('disables the primary action when the installed version is current and keeps reinstall available', async () => {
+  it('shows release status when current and keeps reinstall available under Linux settings', async () => {
     // 宿主状态可变：首轮自动 check 时已是最新（updateAvailable=false），之后上游才发 1.3.0。
     let upstreamReleased = false
     let checkCount = 0
@@ -363,12 +363,9 @@ describe('LinuxEnvironmentSection', () => {
     }))
 
     const element = await render()
-    const primary = element.querySelector('[data-linux-action="update"]') as HTMLButtonElement
-    expect(primary.disabled).toBe(true)
-    expect(primary.getAttribute('data-linux-primary')).toBe('current')
-    expect(primary.textContent).toContain('已是最新版本')
+    expect(element.querySelector('[data-linux-action="update"]')).toBeNull()
     expect(element.querySelector('[data-linux-auto-check="up-to-date"]')).not.toBeNull()
-    // 重新安装与检查更新不受影响。
+    await act(async () => { (element.querySelector('[data-linux-action="settings"]') as HTMLButtonElement).click() })
     expect((element.querySelector('[data-linux-action="reinstall"]') as HTMLButtonElement).disabled).toBe(false)
     const check = element.querySelector('[data-linux-action="check"]') as HTMLButtonElement
     expect(check.disabled).toBe(false)
@@ -377,7 +374,7 @@ describe('LinuxEnvironmentSection', () => {
       check.click()
       await new Promise((resolve) => { setTimeout(resolve, 50) })
     })
-    // 手动 check 报出新版本后主按钮解禁。
+    const primary = element.querySelector('[data-linux-action="update"]') as HTMLButtonElement
     expect(primary.disabled).toBe(false)
     expect(primary.getAttribute('data-linux-primary')).toBe('update')
     expect(primary.textContent).toContain('1.3.0')
@@ -492,6 +489,7 @@ describe('LinuxEnvironmentSection', () => {
       const autoHint = element.querySelector('[data-linux-auto-check="failed"]')
       expect(autoHint?.textContent).toContain(expectedHint)
       expect(autoHint?.textContent).toContain('GitHub request failed (403)')
+      await act(async () => { (element.querySelector('[data-linux-action="settings"]') as HTMLButtonElement).click() })
       expect((element.querySelector('[data-linux-action="reinstall"]') as HTMLButtonElement).disabled).toBe(false)
       expect((element.querySelector('[data-linux-action="uninstall"]') as HTMLButtonElement).disabled).toBe(false)
       expect((element.querySelector('[data-linux-action="back"]') as HTMLButtonElement).disabled).toBe(false)

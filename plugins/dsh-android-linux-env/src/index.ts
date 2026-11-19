@@ -15,6 +15,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import type Subprocess from '@deepseek-ai/dsh-subprocess'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   authorizeMobileRoute,
@@ -38,6 +39,7 @@ import { createLinuxBootstrapConfig } from './linux-host-asset-io.js'
 import { mountLinuxBootstrap, readLinuxManifest } from './linux-bootstrap-loader.js'
 import { createLinuxLifecycle, onEngineShutdown } from './linux-lifecycle.js'
 import { LINUX_TOOL_GUIDANCE, registerLinuxToolContract } from './linux-tool-contract.js'
+import { createLinuxTerminal, TerminalError } from './linux-terminal.js'
 
 export const name = 'dsh-android-linux-env'
 export const inject = ['tools', 'webServer', 'sandboxPolicy', 'sessions'] as const
@@ -426,6 +428,11 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
     root: process.env.DSH_FILES_DIR ? join(process.env.DSH_FILES_DIR, 'linux-environment', 'plugins') : undefined,
     activate: (plugin, config) => cordisScope(ctx.plugin(plugin as Parameters<Context['plugin']>[0], config)),
   })
+  let subprocess: Subprocess | undefined
+  if (typeof ctx.inject === 'function') ctx.inject(['subprocess'], scope => {
+    subprocess = scope.get('subprocess') as Subprocess
+    scope.effect(() => () => { subprocess = undefined })
+  })
   if (typeof ctx.provide === 'function') {
     ctx.provide('linuxPluginHost', pluginHost)
     const shutdown = async () => { lifecycle.stop(); await pluginHost.shutdown(); lifecycle.stopped() }
@@ -456,6 +463,14 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
       effect: register => ctx.effect(register),
       auth: authOptions,
       bootstrap: () => serviceOf<LinuxBootstrap>(ctx, 'linuxBootstrap'),
+      runtime: pluginHost.activeRuntime,
+      terminal: createLinuxTerminal({
+        runtime: pluginHost.activeRuntime,
+        spawn: spec => {
+          if (!subprocess) throw new TerminalError(503, 'linux-terminal-pty-unavailable')
+          return subprocess.spawnTerminal(spec)
+        },
+      }),
       // 只读持久 state 里的 availableManifest/pinnedManifest：给 UI 先准备资产，不触网、不安装。
       manifest: () => {
         const files = process.env.DSH_FILES_DIR

@@ -233,7 +233,7 @@ export const MOBILE_SETTINGS_CSS: string = `
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-areas: 'icon label chevron' 'icon desc chevron';
+    grid-template-areas: 'icon label chevron';
     /* 行间隙归零、说明自带 2px 上边距：两种行的行盒高度只由内容决定，
        图标跨两行时的中线才有确定值（真正解决下沉的是下面那条 other 行规则）。 */
     /* 统一尺度（4px 基数）：图文间距 12、上下留白 12、两侧留白 16。 */
@@ -244,8 +244,8 @@ export const MOBILE_SETTINGS_CSS: string = `
     box-sizing: border-box;
     width: 100%;
     height: auto;
-    min-height: 56px;
-    padding: 12px 16px;
+    min-height: 48px;
+    padding: 9px 16px;
     border-radius: var(--dsw-radius-md);
   }
 
@@ -308,15 +308,7 @@ export const MOBILE_SETTINGS_CSS: string = `
   }
 
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > span[data-dsh-settings-nav-desc] {
-    margin-top: 2px;
-    grid-area: desc;
-    min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    color: var(--dsw-alias-label-secondary);
-    font-size: 13px;
-    line-height: 18px;
+    display: none;
   }
 
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > span[data-dsh-settings-nav-chevron] {

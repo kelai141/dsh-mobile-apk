@@ -23,6 +23,7 @@ import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { cp, lstat, mkdir, readdir, readFile, readlink, symlink } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { prepareRuntimeInstallation } from './linux-upgrade.js'
 
 /** 与 Kotlin `LinuxAssetIO.ENV_DIR` 同口径（`check-linux-host-staging-invariant` 守）。 */
 export const LINUX_ENV_DIR = 'linux-environment'
@@ -246,6 +247,7 @@ export function createLinuxBootstrapConfig(options: {
     releaseUrl,
     linuxAssetIO,
     fetchImpl: createLinuxReleaseFetch({ filesDir }),
+    prepareRuntimeInstallation,
     // The runtime manager needs ApplicationInfo.nativeLibraryDir: an app
     // process on targetSdk >= 29 may only execute apk_data_file, so the glibc
     // loader ships there instead of in the rootfs.

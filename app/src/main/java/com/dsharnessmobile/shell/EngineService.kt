@@ -55,6 +55,10 @@ class EngineService : Service() {
     engineManager = EngineManager(this, EngineManager.ensurePickToken())
     serviceEpoch.set(ServiceEpoch())
     instance = this
+    if (!userShutdown) {
+      LinuxInstallJob.resumePending(this)
+      LinuxInstallJob.scheduleAutomaticUpdate(this)
+    }
     // 0.14.0-preview §6.2/§6.3：通知信道消费点 + 通知应答流（两者都是进程级幂等单例）。
     // 落在这里而不是 OverlayService：通知必须**独立于悬浮球开关**生存（§6.0 风险 2）。
     NotifyStore.start(this)

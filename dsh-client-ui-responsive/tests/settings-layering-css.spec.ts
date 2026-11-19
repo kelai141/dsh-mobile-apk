@@ -65,11 +65,11 @@ describe('竖屏设置分层样式', () => {
     expect(fallback, '回退规则不得为空').not.toBe('')
   })
 
-  it('一级行是「图标 + 标题 + 一行短说明 + 箭头」三列两行网格', () => {
+  it('一级行是「图标 + 标题 + 箭头」单行网格', () => {
     const block = MOBILE_SETTINGS_CSS.split('> nav button {')[1]?.split('}')[0] ?? ''
     expect(block, '一级行必须是网格布局').toContain('grid-template-columns')
     expect(block).toContain("'icon label chevron'")
-    expect(block).toContain("'icon desc chevron'")
+    expect(block).not.toContain("'icon desc chevron'")
   })
 
   it('自有分区的图标：每行只留一个可见图标（上游那个被隐藏，不是并排两个）', () => {
