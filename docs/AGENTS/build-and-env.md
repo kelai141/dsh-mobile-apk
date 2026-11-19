@@ -363,3 +363,9 @@ Windows 优先用 rustc 1.99.0 的 GNU host toolchain（默认 MSVC 常缺 `link
 **快照指纹门禁**：干净工作树缺少归档时，默认档打印具名 SKIP 和计数，严格档返回失败。有归档且三份指纹一致时，打印通过和 SKIP=0。覆盖了两档输出后，SKIP 审计不再为本门禁保留缺口登记。
 
 Gradle 组装后，`build-apk-engine.mjs` 调用 `check-snapshot-fingerprint.mjs --apk` 流式读取 APK 内的快照。ZIP 的 CRC、快照字节的 SHA-256、内嵌指纹和 Hard 插件清单必须与本次构建输入一致。校验失败时终止交付。
+
+### Offline Debian workspace candidate
+
+Run `node scripts/build-linux-workspace-rootfs.mjs <trusted-seed.tar.xz> <seed-sha256> <output.tar.xz>` with Node.js and a local Linux Docker engine. The seed is a trusted, flattened Debian trixie amd64 filesystem export containing Bash, Git, OpenSSH, CA certificates, APT, tar, and xz and the Debian deb822 source file. Pin its digest in the build inputs; the builder does not provision the initial seed from a mutable repository. Keep seed and output archives outside Git. Docker retains the imported untagged image and the command reports its ID.
+
+The builder verifies the seed before importing, runs without network access, and keeps the APT database and signed HTTPS sources. It excludes host-generated networking files and serializes hardlinks as regular files without dereferencing symlinks; the Android asset extractor rejects hardlink entries. The output is a rootfs asset only, not an APK or a runtime release. Node and the Bionilux backend are independent assets. Android activation must be verified separately before adoption.
