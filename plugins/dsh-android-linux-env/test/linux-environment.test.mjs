@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
 import ts from 'typescript'
-import { createLinuxPluginHost, registerLinuxEnvironmentRoutes, checkLinuxEnvironmentAfterMobileChange, normalizeLinuxStatus, cordisScope } from '../lib/linux-environment.js'
+import { createLinuxPluginHost, registerLinuxEnvironmentRoutes, checkLinuxEnvironmentOnStartup, normalizeLinuxStatus, cordisScope } from '../lib/linux-environment.js'
 
 // Cordis 4.0.5 erases its exported const enum from JS; compile that declaration for these fixtures.
 const fiberSource = await readFile(new URL(import.meta.resolve('@deepseek-ai/cordis/src/fiber.ts')), 'utf8')
@@ -141,21 +141,20 @@ test('operations serialize and expose busy status without concurrent mutation', 
   assert.equal((await first).code, 200)
 })
 
-test('automatic checks require installed baseline mismatch and respect persisted attempt deduplication', async () => {
+test('startup checks depend on opt-in and installation, regardless of the Mobile version', async () => {
   for (const state of [
     {},
     { installedLinuxVersion: '1', installedSystemMobileVersion: '0.14.8' },
-    { autoUpdateEnabled: true, installedLinuxVersion: '1', installedSystemMobileVersion: '0.14.9' },
-    { autoUpdateEnabled: true, installedLinuxVersion: '1' },
-    { autoUpdateEnabled: true, installedLinuxVersion: '1', installedSystemMobileVersion: '0.14.8', lastAutomaticCheckMobileVersion: '0.14.9' },
+    { autoUpdateEnabled: true },
+    { autoUpdateEnabled: true, installedLinuxVersion: '1', operation: 'installing' },
   ]) {
     const bootstrap = makeBootstrap(state)
-    await checkLinuxEnvironmentAfterMobileChange(bootstrap)
+    await checkLinuxEnvironmentOnStartup(bootstrap)
     assert.deepEqual(bootstrap.calls, [])
   }
-  const bootstrap = makeBootstrap({ autoUpdateEnabled: true, installedLinuxVersion: '1', installedSystemMobileVersion: '0.14.8' })
-  await checkLinuxEnvironmentAfterMobileChange(bootstrap)
-  assert.deepEqual(bootstrap.calls, [['check', { source: 'mobile-version-change' }]])
+  const bootstrap = makeBootstrap({ autoUpdateEnabled: true, installedLinuxVersion: '1', installedSystemMobileVersion: '0.14.9' })
+  await checkLinuxEnvironmentOnStartup(bootstrap)
+  assert.deepEqual(bootstrap.calls, [['check', { source: 'automatic' }]])
 })
 
 test('pluginHost uses real Cordis activation, awaits initialization and disposes on uninstall', async () => {
@@ -471,12 +470,12 @@ test('automatic checks stay off when the runtime injection was removed or the sy
     { installed: true, autoUpdate: true, mobileVersion: '0.14.9', installedSystemMobileVersion: '0.14.8', enabled: false },
   ]) {
     const bootstrap = makeBootstrap(state)
-    await checkLinuxEnvironmentAfterMobileChange(bootstrap)
+    await checkLinuxEnvironmentOnStartup(bootstrap)
     assert.deepEqual(bootstrap.calls, [], JSON.stringify(state))
   }
   const allowed = makeBootstrap({ installed: true, autoUpdate: true, mobileVersion: '0.14.9', installedSystemMobileVersion: '0.14.8', injectionActivated: true })
-  await checkLinuxEnvironmentAfterMobileChange(allowed)
-  assert.deepEqual(allowed.calls, [['check', { source: 'mobile-version-change' }]])
+  await checkLinuxEnvironmentOnStartup(allowed)
+  assert.deepEqual(allowed.calls, [['check', { source: 'automatic' }]])
 })
 
 test('uninstall accepts the documented argument object and still releases the scope', async () => {

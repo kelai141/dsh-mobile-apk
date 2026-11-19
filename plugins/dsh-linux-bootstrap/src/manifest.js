@@ -74,7 +74,7 @@ export function validateManifestShape(manifest, latestTag) {
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new TypeError('Release manifest must be a JSON object')
   if (manifest.schemaVersion !== 1) throw new TypeError('Unsupported release manifest schemaVersion')
   if (typeof manifest.version !== 'string' || !parseVersion(manifest.version)) throw new TypeError('Manifest version must be semantic version')
-  if (typeof manifest.minMobileVersion !== 'string' || !parseVersion(manifest.minMobileVersion)) throw new TypeError('Manifest minMobileVersion must be semantic version')
+  if (manifest.minMobileVersion !== undefined && !parseVersion(manifest.minMobileVersion)) throw new TypeError('Manifest minMobileVersion must be semantic version')
   const version = manifest.version.replace(/^v/, '')
   const tag = `v${version}`
   if (latestTag && latestTag !== tag && latestTag !== version) throw new TypeError('Latest release tag does not match manifest version')

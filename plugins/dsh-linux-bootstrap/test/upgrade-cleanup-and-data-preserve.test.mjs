@@ -94,7 +94,7 @@ async function stageDummyAsset(stagingRoot, sha256) {
   return dir
 }
 
-async function createUpgradeFixture({ managerInstallShouldFail = false } = {}) {
+async function createUpgradeFixture({ managerInstallShouldFail = false, appVersion = '0.15.1' } = {}) {
   const filesRoot = await mkdtemp(path.join(tmpdir(), 'dsh-upgrade-cleanup-'))
   const dataDir = path.join(filesRoot, 'linux-environment')
   const stagingRoot = path.join(dataDir, 'staging')
@@ -117,6 +117,7 @@ async function createUpgradeFixture({ managerInstallShouldFail = false } = {}) {
   const manifestV2 = makeManifest('0.10.8', pluginV2, digestsV2)
 
   let activeManifest = manifestV1
+  const latestRequests = []
   let failNetwork = false
   let failManagerInstall = managerInstallShouldFail
   let activeDirectory = null
@@ -161,7 +162,7 @@ async function createUpgradeFixture({ managerInstallShouldFail = false } = {}) {
       downloadAsset: async () => { throw new Error('must use hostStagingRoot') },
       extractArchive: async () => { throw new Error('must use hostStagingRoot') },
     },
-    fetchImpl: async (input) => {
+    fetchImpl: async (input, init) => {
       const url = typeof input === 'string' ? input : String(input?.url ?? input)
       if (failNetwork) {
         const error = new Error('GitHub request failed (403)')
@@ -171,6 +172,7 @@ async function createUpgradeFixture({ managerInstallShouldFail = false } = {}) {
       const body = JSON.stringify(activeManifest)
       const tag = `v${activeManifest.version}`
       if (url.includes('/releases/latest')) {
+        latestRequests.push(init)
         return new Response(JSON.stringify({
           tag_name: tag,
           assets: [{
@@ -182,7 +184,7 @@ async function createUpgradeFixture({ managerInstallShouldFail = false } = {}) {
       }
       return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
     },
-    appVersionProvider: { getVersion: () => '0.15.1' },
+    appVersionProvider: { getVersion: () => appVersion },
     arch: 'arm64',
   })
 
@@ -198,11 +200,38 @@ async function createUpgradeFixture({ managerInstallShouldFail = false } = {}) {
     digestsV2,
     sharedNodeSha,
     bootstrap,
+    latestRequests,
     setManifestV2: () => { activeManifest = manifestV2 },
     setFailNetwork: (value) => { failNetwork = value },
     setFailManagerInstall: (value) => { failManagerInstall = value },
   }
 }
+
+test('release discovery and staged downloads are independent of Mobile version', async (t) => {
+  const f = await createUpgradeFixture({ appVersion: '0.1.0' })
+  t.after(() => rm(f.filesRoot, { recursive: true, force: true }))
+  const initial = await f.bootstrap.checkForUpdates({ source: 'manual' })
+  assert.equal(initial.installed, false)
+  assert.equal(initial.latestReleaseVersion, '0.10.7')
+  assert.equal(f.latestRequests[0].cache, 'no-store')
+  assert.equal(f.latestRequests[0].headers['Cache-Control'], 'no-cache')
+
+  await stagePluginInHostStaging(f.stagingRoot, f.pluginV1)
+  await stageDummyAsset(f.stagingRoot, f.digestsV1.backend)
+  await stageDummyAsset(f.stagingRoot, f.digestsV1.rootfs)
+  await stageDummyAsset(f.stagingRoot, f.sharedNodeSha)
+  await f.bootstrap.install({ confirmed: true, activate: true })
+  await f.bootstrap.setAutoUpdateEnabled(true)
+  f.setManifestV2()
+
+  const startup = await f.bootstrap.checkForUpdates({ source: 'automatic' })
+  assert.equal(startup.latestReleaseVersion, '0.10.8')
+  assert.equal(startup.version, '0.10.7')
+  await f.bootstrap.checkForUpdates({ source: 'automatic' })
+  assert.equal(f.latestRequests.length, 2)
+  await f.bootstrap.checkForUpdates({ source: 'manual' })
+  assert.equal(f.latestRequests.length, 3)
+})
 
 test('overwrite upgrade prunes old runtime slots, old staging dirs, and .part leftovers while preserving user data and shared assets', async (t) => {
   const f = await createUpgradeFixture()

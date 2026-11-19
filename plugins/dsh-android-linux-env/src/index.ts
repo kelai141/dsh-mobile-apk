@@ -31,7 +31,7 @@ import { PROBE_BINARIES, REQUIRED_TOOLCHAIN, TOOLCHAIN_REPRESENTATIVE } from '@d
 // 块 E：白名单扫描/执行/标签（设计与判据见 runtime-cache.ts 头注释）。
 import { displayLabel, executeCleanup, planCleanup, type CleanupPlan } from './runtime-cache.js'
 import {
-  createLinuxPluginHost, checkLinuxEnvironmentAfterMobileChange, registerLinuxEnvironmentRoutes, cordisScope,
+  createLinuxPluginHost, checkLinuxEnvironmentOnStartup, registerLinuxEnvironmentRoutes, cordisScope,
   type LinuxBootstrap,
 } from './linux-environment.js'
 import { createLinuxBootstrapConfig } from './linux-host-asset-io.js'
@@ -433,13 +433,12 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
     ctx.effect(() => shutdown)
   }
   if (typeof ctx.inject === 'function') {
-    // 版本变化检查只在内部 bootstrap 插件**已启用**（服务在场）后发生一次，且还需应用版本变化与
-    // 用户开启自动更新；服务缺席（未启用）不重试、不轮询。
+    // Linux 已安装且用户开启自动检查时，服务就绪后查询发布通道。
     ctx.inject(['linuxBootstrap'], scope => {
       const bootstrap = serviceOf<LinuxBootstrap>(scope, 'linuxBootstrap')
       if (bootstrap) void lifecycle.attach(bootstrap).catch(error => lifecycle.fail(error))
-      if (bootstrap) void checkLinuxEnvironmentAfterMobileChange(bootstrap).catch(() => {
-        ctx.logger?.('dsh-android-linux-env')?.warn?.('Linux 环境版本变化检查失败，请通过设置页重试。')
+      if (bootstrap) void checkLinuxEnvironmentOnStartup(bootstrap).catch(() => {
+        ctx.logger?.('dsh-android-linux-env')?.warn?.('Linux 环境自动检查失败，请通过设置页重试。')
       })
     })
   }

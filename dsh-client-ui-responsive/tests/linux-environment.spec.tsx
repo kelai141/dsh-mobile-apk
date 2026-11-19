@@ -139,6 +139,24 @@ describe('index.ts registration', () => {
 })
 
 describe('LinuxEnvironmentSection', () => {
+  it('can check the upstream release before Linux is installed', async () => {
+    let checks = 0
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.endsWith('/check')) checks += 1
+      const version = checks > 1 ? '0.10.9' : '0.10.8'
+      return { ok: true, status: 200, json: async () => ({
+        installed: false, availableVersion: version, latestReleaseVersion: version, updateAvailable: true,
+      }) }
+    }))
+    const element = await render()
+    const check = element.querySelector('[data-linux-action="check"]') as HTMLButtonElement
+    expect(check.disabled).toBe(false)
+    expect(element.querySelector('[data-linux-auto-check="update-available"]')?.textContent).toContain('0.10.8')
+    await act(async () => { check.click() })
+    expect(checks).toBe(2)
+    expect(element.querySelector('[data-linux-auto-check="update-available"]')?.textContent).toContain('0.10.9')
+  })
+
   it('stages the runtime plugin plus backend, rootfs and node before posting install', async () => {
     const { calls, impl } = makeFetch({
       '/api/android/linux-environment/status': { body: { installed: false, architecture: 'arm64', defaultRuntimeId: 'debian-minimal' } },
@@ -440,14 +458,14 @@ describe('LinuxEnvironmentSection', () => {
       expect(calls.filter((u) => u.endsWith('/status')).length).toBeGreaterThanOrEqual(4)
       expect(calls.filter((u) => u.endsWith('/check')).length).toBe(1)
 
-      // One-click upgrade prepares the new release's assets and posts install without re-hitting /check.
+      // The explicit download rechecks the channel before preparing the verified assets.
       await act(async () => {
         primary.click()
         await vi.advanceTimersByTimeAsync(100)
       })
       expect(prepared[0].sha256).toBe('e'.repeat(64))
       expect(calls.some((u) => u.endsWith('/install'))).toBe(true)
-      expect(calls.filter((u) => u.endsWith('/check')).length).toBe(1)
+      expect(calls.filter((u) => u.endsWith('/check')).length).toBe(2)
       expect(element.querySelector('[data-linux-ready="true"]')).not.toBeNull()
     } finally {
       vi.useRealTimers()
