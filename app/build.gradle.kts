@@ -300,6 +300,15 @@ providers.gradleProperty("nativeSessionFlockDir").orNull?.let { flockDir ->
   }
 }
 
+// The Android guest compatibility build supplies executable native files for local debugging.
+providers.gradleProperty("nativeLinuxCompatibilityDir").orNull?.let { compatibilityDir ->
+  android {
+    sourceSets.getByName("debug").jniLibs.srcDir(file(compatibilityDir))
+    packaging.jniLibs.useLegacyPackaging = true
+    packaging.jniLibs.keepDebugSymbols.addAll(listOf("**/libbionilux-loader.so", "**/libbionilux-ldconfig.so"))
+  }
+}
+
 // The Linux runtime needs an executable glibc loader, and an app process on
 // targetSdk >= 29 may only execve apk_data_file. The loader therefore ships as
 // lib/<abi>/libbionilux-loader.so and is installed into nativeLibraryDir, which

@@ -2264,6 +2264,8 @@ glob:dsh-host-web-compat/scripts/*
 dsh-shell-termux/src/index.ts
 scripts/build-apk-013.ps1
 scripts/build-apk-dev-fast.mjs
+scripts/lib/bionilux-debug-native.mjs
+scripts/lib/bionilux-debug-native.test.mjs
 scripts/source-build/bionilux/prepare-glibc-source.py
 scripts/source-build/bionilux/glibc-2.41-android-x86_64.patch
 scripts/build-snapshot-013.mjs

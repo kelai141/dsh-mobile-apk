@@ -149,6 +149,12 @@ python3 scripts/source-build/bionilux/prepare-glibc-source.py inputs keyrings/de
 
 Build glibc from the resulting source tree. The profile selects available Linux calls for descriptor duplication and filesystem operations, retains kernel permission decisions, and uses glibc's existing thread fallbacks. The guest launcher sets `GLIBC_TUNABLES=glibc.pthread.rseq=0` before starting glibc. Keep the loader, guest libc, and static `ldconfig` source provenance together.
 
+For local verification with an x86-64 snapshot, pass the native build output to the debug assembler. The directory supplies `libbionilux-loader.so`, `libbionilux-ldconfig.so`, and their `SHA256SUMS` records. The assembler checks the input hashes and ELF architecture, then checks both embedded executables and the snapshot fingerprint before copying the APK.
+
+```sh
+node dsh-mobile-apk/scripts/build-apk-dev-fast.mjs --abi x86_64 --bionilux-native-dir out/guest-native
+```
+
 ### Harness 上游候选巡检
 
 `巡检 Harness 上游候选` 每周、巡检或基线文件变更的 PR，以及手动触发时，将官方默认分支与
