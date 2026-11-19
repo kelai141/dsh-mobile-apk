@@ -47,7 +47,7 @@ export interface LinuxStatus {
   busy?: boolean
   operation?: string
   runtimeId?: string
-  runtime?: { id?: string; runtimeId?: string } | null
+  runtime?: { id?: string; runtimeId?: string; healthy?: boolean; nodeAssetSha256?: string } | null
   runtimes?: Array<{ id: string; label?: string; architecture?: string }>
   defaultRuntimeId?: string
   architecture?: string
@@ -73,6 +73,7 @@ export interface ManifestRuntime {
   rootfsAsset?: ManifestAsset
   nodeAsset?: ManifestAsset
   rootfsCandidateHandoff?: boolean
+  sharedNodeReuse?: boolean
 }
 
 /** Verified release manifest (only the fields this section consumes). */
@@ -88,11 +89,13 @@ export class RouteError extends Error {
   readonly status: number
   /** 宿主给出的真因（服务端的 detail 字段），没有时为空串。 */
   readonly detail: string
-  constructor(message: string, status = 0, detail = '') {
+  readonly reason: string
+  constructor(message: string, status = 0, detail = '', reason = '') {
     super(message)
     this.name = 'RouteError'
     this.status = status
     this.detail = detail
+    this.reason = reason
   }
 }
 
@@ -126,7 +129,8 @@ async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown):
     // detail 是宿主的真因（例如 Cordis 的 Invalid effect、runtime verify() 的断言）。
     // 没有它，用户和排查者都只能看到一句「请检查环境状态与日志」，而日志在不可调试包上取不到。
     const detail = typeof payload?.detail === 'string' ? payload.detail : ''
-    throw new RouteError(error !== '' ? error : 'HTTP ' + response.status, response.status, detail)
+    throw new RouteError(error !== '' ? error : 'HTTP ' + response.status, response.status, detail,
+      typeof payload?.reason === 'string' ? payload.reason : '')
   }
   if (payload === null) throw new RouteError('The host returned a non-JSON response', response.status)
   return payload as T
@@ -438,4 +442,34 @@ export async function prepareAssets(
     report('staged')
   }
   return rootfsCandidate
+}
+
+/** Skip eager preparation only for the active manager's verified, content-addressed Node. */
+export async function installRuntimeAssets(
+  runtime: ManifestRuntime,
+  specs: AssetSpec[],
+  current: LinuxStatus | undefined,
+  prepare: (assets: AssetSpec[]) => Promise<string | undefined>,
+  activate: (candidate?: string) => Promise<LinuxStatus>,
+): Promise<LinuxStatus> {
+  const node = specs.find(spec => spec.field === 'nodeAsset')
+  if (!node || !runtime.sharedNodeReuse || !runtime.rootfsCandidateHandoff ||
+      current?.runtime?.healthy !== true || current.runtime.nodeAssetSha256 !== node.sha256) {
+    return activate(await prepare(specs))
+  }
+
+  const candidate = await prepare(specs.filter(spec => spec !== node))
+  if (!candidate) {
+    // Older Android bridges stage the rootfs using the shared directory.
+    await prepare([node])
+    return activate()
+  }
+  try {
+    return await activate(candidate)
+  } catch (error) {
+    if (!(error instanceof RouteError) || error.status !== 409 || error.reason !== 'linux-node-stage-required') throw error
+    // The manager requests Node before claiming the candidate. The same ID is valid for this retry.
+    await prepare([node])
+    return activate(candidate)
+  }
 }

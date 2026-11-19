@@ -71,6 +71,10 @@ A runtime manifest may advertise `rootfsCandidateHandoff: true`. For that instal
 
 The engine atomically claims the candidate within the install transaction, verifies the retained archive's size and SHA-256, and validates the tree's entry types and symlink boundaries before moving the tree to its destination. The shared staging cache keeps its normal ownership. The runtime still prepares the candidate, runs a real guest health probe, and writes the active record only after a healthy result. Failure discards the claimed candidate as part of transaction cleanup. Unclaimed receipts expire after one hour and are pruned during subsequent candidate preparation.
 
+### Shared Node preparation during a runtime update
+
+An opted-in runtime reports the archive digest of its healthy shared Node. When that digest matches the selected release, the Android settings page prepares the runtime plugin, backend and rootfs. The manager checks the Node installation under its install lock and runs the guest Node and npm health probe before activation. When Node needs materialization and its staged asset cannot be used, the manager reports `LINUX_NODE_STAGE_REQUIRED` before claiming the rootfs. A successful rollback allows the host to return HTTP 409 with reason `linux-node-stage-required`. The client stages Node and retries once with the same candidate. Other errors retain their normal failure behavior.
+
 ## 7. 控制台与 Debian shell（验收入口）
 
 - 控制台默认运行快照 bash（Termux），该行为不变。

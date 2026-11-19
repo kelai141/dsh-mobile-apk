@@ -37,13 +37,13 @@ import {
   fetchManifest,
   fetchStatus,
   installEnvironment,
+  installRuntimeAssets,
   prepareAssets,
   reinstallEnvironment,
   setAutoUpdate,
   totalBytes,
   uninstallEnvironment,
   type AssetProgress,
-  type AssetSpec,
   type LinuxStatus,
 } from './transport.ts'
 
@@ -188,10 +188,12 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
   const sectionRef = useRef<HTMLElement>(null)
   const autoCheckStartedRef = useRef(false)
 
-  const refresh = useCallback(async (): Promise<void> => {
+  const refresh = useCallback(async (): Promise<LinuxStatus | undefined> => {
     try {
-      setStatus(await fetchStatus())
+      const next = await fetchStatus()
+      setStatus(next)
       setStatusError('')
+      return next
     } catch (cause) {
       setStatusError(failureText(cause))
     }
@@ -290,9 +292,12 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
     if (inFlight) return
     inFlight = true
     setError('')
-    let preparedRuntimeId = selectedRuntime
     try {
-      let rootfsCandidate: string | undefined
+      let next: LinuxStatus
+      const installing = (): void => {
+        setPhase('installing')
+        setProgress({ stage: 'installing' })
+      }
       if (!reinstall) {
         setPhase('manifest')
         setProgress({ stage: 'manifest' })
@@ -305,30 +310,29 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
           setAutoCheckState('failed')
           setAutoCheckError(failureText(cause))
         }
-        await refresh()
+        const current = await refresh()
         const manifest = await fetchManifest()
         const { runtime, specs } = assetsFor(manifest, {
-          runtimeId: preparedRuntimeId !== '' ? preparedRuntimeId : undefined,
+          runtimeId: selectedRuntime !== '' ? selectedRuntime : undefined,
           architecture: status?.architecture,
         })
         if (runtime === null) {
           throw new AssetError('No runtime in this release matches this device', { code: 'linux-runtime-not-found' })
         }
-        preparedRuntimeId = runtime.id
-        setProgress({ stage: 'assets', index: 0, total: specs.length, bytes: totalBytes(specs) })
-        rootfsCandidate = await prepareAssets(
-          window.androidBridge,
-          specs as AssetSpec[],
-          (item: AssetProgress) => {
+        next = await installRuntimeAssets(runtime, specs, current, assets => {
+          setPhase('assets')
+          setProgress({ stage: 'assets', index: 0, total: assets.length, bytes: totalBytes(assets) })
+          return prepareAssets(window.androidBridge, assets, (item: AssetProgress) => {
             setProgress({ stage: 'assets', index: item.index, total: item.total, field: item.field, phase: item.phase })
-          },
-        )
+          })
+        }, candidate => {
+          installing()
+          return installEnvironment(runtime.id, candidate)
+        })
+      } else {
+        installing()
+        next = await reinstallEnvironment()
       }
-      setPhase('installing')
-      setProgress({ stage: 'installing' })
-      const next = reinstall
-        ? await reinstallEnvironment()
-        : await installEnvironment(preparedRuntimeId !== '' ? preparedRuntimeId : undefined, rootfsCandidate)
       if (typeof next.installed === 'boolean') setStatus(next)
       setPhase('done')
       await refresh()

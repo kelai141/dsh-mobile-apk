@@ -11,7 +11,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { readFileSync } from 'node:fs'
 import { LinuxEnvironmentSection } from '../src/client/linux-environment/LinuxEnvironmentSection.tsx'
-import { fetchManifest } from '../src/client/linux-environment/transport.ts'
+import { assetsFor, fetchManifest, installRuntimeAssets, RouteError } from '../src/client/linux-environment/transport.ts'
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -549,3 +549,56 @@ describe('LinuxEnvironmentSection', () => {
   })
 })
 
+
+
+describe('verified shared Node updates', () => {
+  const runtime = { ...MANIFEST.runtimes[0], rootfsCandidateHandoff: true, sharedNodeReuse: true }
+  const { specs } = assetsFor({ ...MANIFEST, runtimes: [runtime] })
+  const healthy = { runtime: { healthy: true, nodeAssetSha256: SHA_D } }
+  const candidate = '12345678-1234-4123-8123-123456781234'
+
+  it('omits staging only while the active digest and target capabilities match', async () => {
+    const activate = vi.fn(async () => STATUS_INSTALLED)
+    for (const [current, stagesNode] of [
+      [healthy, false],
+      [{ runtime: { healthy: false, nodeAssetSha256: SHA_D } }, true],
+      [{ runtime: { healthy: true, nodeAssetSha256: SHA_C } }, true],
+      [undefined, true],
+    ] as const) {
+      const prepare = vi.fn(async (_assets: typeof specs) => candidate)
+      await installRuntimeAssets(runtime, specs, current, prepare, activate)
+      expect(prepare.mock.calls[0][0].some(asset => asset.field === 'nodeAsset')).toBe(stagesNode)
+    }
+    const prepare = vi.fn(async (_assets: typeof specs) => candidate)
+    await installRuntimeAssets({ ...runtime, sharedNodeReuse: false }, specs, healthy, prepare, activate)
+    expect(prepare).toHaveBeenCalledWith(specs)
+  })
+
+  it('prepares only Node and retries the same candidate once on a manager cache miss', async () => {
+    const prepare = vi.fn(async (_assets: typeof specs) => candidate)
+    const missing = new RouteError('Missing Node', 409, '', 'linux-node-stage-required')
+    const activate = vi.fn(async (_id?: string) => STATUS_INSTALLED).mockRejectedValueOnce(missing)
+    await installRuntimeAssets(runtime, specs, healthy, prepare, activate)
+    expect(prepare.mock.calls.map(([assets]) => assets.map(asset => asset.field))).toEqual([
+      ['runtime-plugin', 'backendAsset', 'rootfsAsset'], ['nodeAsset'],
+    ])
+    expect(activate.mock.calls).toEqual([[candidate], [candidate]])
+    activate.mockReset().mockRejectedValue(missing)
+    await expect(installRuntimeAssets(runtime, specs, healthy, prepare, activate)).rejects.toBe(missing)
+    expect(activate).toHaveBeenCalledTimes(2)
+  })
+
+  it('stages Node on a legacy bridge and leaves unrelated installation failures visible', async () => {
+    const prepare = vi.fn(async (_assets: typeof specs): Promise<string | undefined> => undefined)
+    const activate = vi.fn(async (_id?: string) => STATUS_INSTALLED)
+    await installRuntimeAssets(runtime, specs, healthy, prepare, activate)
+    expect(prepare.mock.calls[1][0].map(asset => asset.field)).toEqual(['nodeAsset'])
+    expect(activate.mock.calls).toEqual([[]])
+    prepare.mockClear().mockResolvedValue(candidate)
+    const busy = new RouteError('Busy', 409)
+    activate.mockClear().mockRejectedValue(busy)
+    await expect(installRuntimeAssets(runtime, specs, healthy, prepare, activate)).rejects.toBe(busy)
+    expect(activate).toHaveBeenCalledTimes(1)
+    expect(prepare).toHaveBeenCalledTimes(1)
+  })
+})

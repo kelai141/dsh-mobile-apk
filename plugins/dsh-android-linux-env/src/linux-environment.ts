@@ -546,6 +546,12 @@ export function registerLinuxEnvironmentRoutes(options: {
           // 「请检查环境状态与日志」，而日志在不可调试包上根本拿不到 —— 现场等于无证据。
           // 这里沿用本插件 env 路由的既有形态（error 给稳定标识，detail 给真因）。
           const detail = failure instanceof Error ? failure.message : String(failure)
+          const error = failure as { code?: string; rollbackError?: unknown; assetRollbackError?: unknown } | null
+          if (action === 'install' && error?.code === 'LINUX_NODE_STAGE_REQUIRED' &&
+              !error.rollbackError && !error.assetRollbackError) {
+            send(res, 409, { error: 'The shared Node asset needs preparation.', detail, reason: 'linux-node-stage-required' })
+            return
+          }
           send(res, 500, { error: 'Linux 环境操作失败，请检查环境状态与日志后重试。', detail, reason: 'linux-environment-op-failed' })
         }
         finally { busy = false }

@@ -18,6 +18,7 @@ LIBC_SHA256 = '19f4c66b4ea8e012a7c3ceadf94c860d49c3a3392757a53d10d6674bc12af35e'
 NODE_SHA256 = '7d54320366c6df7b7149802fb11bab3e669de84f2da9ce0721e678b007ff79ea'
 PROFILE = Path(__file__).resolve().with_name('android-x86_64-runtime-assets.patch')
 ROOTFS_HANDOFF = PROFILE.with_name('android-rootfs-handoff.patch')
+SHARED_NODE_REUSE = PROFILE.with_name('android-shared-node-reuse.patch')
 PREPARE = 'scripts/prepare-android-rootfs.sh'
 LDCONFIG = 'scripts/ldconfig-android.sh'
 MANAGER = 'modules/manager.js'
@@ -58,7 +59,7 @@ def patched_sources(work: Path, backend: Path, plugin: Path) -> dict[str, bytes]
                     target = work / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(archive.extractfile(member).read())
-    for profile in (PROFILE, ROOTFS_HANDOFF):
+    for profile in (PROFILE, ROOTFS_HANDOFF, SHARED_NODE_REUSE):
         with profile.open('rb') as patch:
             subprocess.run(['patch', '--batch', '--forward', '--fuzz=0', '-d', str(work), '-p1'],
                            stdin=patch, check=True)
@@ -142,6 +143,7 @@ def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path) -> 
         manifest['runtimes'].append({**baseline, 'id': 'debian-workspace-lite-x64',
                                      'label': 'Debian workspace lite (diagnostic)',
                                      'rootfsCandidateHandoff': True,
+                                     'sharedNodeReuse': True,
                                      'rootfsAsset': descriptor(rootfs_target, baseline['rootfsAsset'], unpacked)})
         (result / 'linux-release.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
         subprocess.run(['mv', '-T', '--no-clobber', '--', str(result), str(destination)], check=True)
