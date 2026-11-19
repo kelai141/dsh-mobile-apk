@@ -173,6 +173,8 @@ For differential updates, build the optional planner with `cargo build --locked 
 
 For a smaller x86-64 guest Node asset, pass `--split-node-debug` with GNU binutils installed. The assembler verifies the pinned executable, preserves its build ID and adds a GNU debug link. Archive `symbols/node.debug` alongside the build for offline symbolization. Only the runtime executable belongs in the guest package.
 
+For an experimental Bionilux launcher build, run `python3 scripts/source-build/bionilux/prepare-launcher-source.py <bionilux-checkout> <goblin-0.10.7.crate> <new-source-dir>`. The profile extracts the pinned Bionilux revision and verifies Goblin against its Cargo lockfile. Large ordinary ELF symbol-name tables are UTF-8 validated together and read on demand. Dynamic string tables keep their usual index. Build from the prepared directory with `cargo build --locked --release --target x86_64-linux-android` and the Android NDK linker.
+
 Gradle packages the Linux rootfs verifier under the Android native library directory as `libdsh_rootfs_verify.so`. The builder's `--component linux-rootfs` mode verifies the pinned Rust/NDK toolchain, ELF architecture, page alignment and source-input manifest for each ABI before staging this executable.
 
 ### Harness 上游候选巡检
