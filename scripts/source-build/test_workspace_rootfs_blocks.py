@@ -1,3 +1,4 @@
+import hashlib
 import lzma
 import os
 from pathlib import Path
@@ -8,7 +9,8 @@ from unittest.mock import patch
 
 
 builder = Path(__file__).resolve().parent / 'bionilux' / 'assemble-debug-workspace-assets.py'
-pack_rootfs_blocks = runpy.run_path(str(builder))['pack_rootfs_blocks']
+assembler = runpy.run_path(str(builder))
+pack_rootfs_blocks = assembler['pack_rootfs_blocks']
 
 
 class RootfsBlocksTest(unittest.TestCase):
@@ -40,6 +42,30 @@ class RootfsBlocksTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     pack_rootfs_blocks(archive, work, planner)
                 self.assertEqual(original, archive.read_bytes())
+
+    def test_compact_profile_preserves_a_small_stream(self):
+        work, raw, archive, planner = self.fixture('4096 4096')
+        pack_rootfs_blocks(archive, work, planner, compact=True)
+        self.assertEqual(lzma.decompress(archive.read_bytes()), raw)
+
+    def test_compact_groups_regain_the_same_boundaries_after_an_edit(self):
+        unit = 1 << 20
+        # Choose fixed-size chunks that either trigger or defer a boundary.
+        chunks = {}
+        for byte in range(256):
+            chunk = bytes([byte]) * (4 * unit)
+            chunks[hashlib.sha256(chunk).digest()[3] & 1] = chunk
+            if len(chunks) == 2:
+                break
+        work, _, _, _ = self.fixture('4096 4096')
+        raw = work / 'group-input'
+        for keys, expected in [([1, 1, 1, 1, 1, 0, 1, 0], [16, 8, 8]),
+                               ([0, 1, 1, 1, 1, 1, 0, 1, 0], [4, 16, 8, 8])]:
+            with raw.open('wb') as output:
+                for key in keys:
+                    output.write(chunks[key])
+            result = assembler['compact_block_sizes'](raw, [4 * unit] * len(keys))
+            self.assertEqual(result, [size * unit for size in expected])
 
 
 if __name__ == '__main__':

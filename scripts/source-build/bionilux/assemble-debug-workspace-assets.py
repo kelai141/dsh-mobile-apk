@@ -119,7 +119,29 @@ def split_node_debug(node: bytes, work: Path, symbols: Path) -> bytes:
     return runtime.read_bytes()
 
 
-def pack_rootfs_blocks(archive: Path, work: Path, planner: Path) -> None:
+def compact_block_sizes(raw: Path, sizes: list[int]) -> list[int]:
+    # Cut on the contents of a FastCDC chunk rather than its position in the stream.
+    # Unchanged runs can then regain their original block boundaries after an edit.
+    groups = []
+    current = 0
+    with raw.open('rb') as source:
+        for size in sizes:
+            chunk = source.read(size)
+            if len(chunk) != size:
+                raise ValueError('Short rootfs chunk')
+            if current and current + size > (16 << 20):
+                groups.append(current)
+                current = 0
+            current += size
+            if current >= (4 << 20) and (hashlib.sha256(chunk).digest()[3] & 1) == 0:
+                groups.append(current)
+                current = 0
+    if current:
+        groups.append(current)
+    return groups if len(groups) > 1 else sizes
+
+
+def pack_rootfs_blocks(archive: Path, work: Path, planner: Path, compact: bool = False) -> None:
     raw = work / 'rootfs-source.tar'
     with lzma.open(archive, 'rb') as source, raw.open('xb') as output:
         shutil.copyfileobj(source, output, length=256 * 1024)
@@ -130,10 +152,13 @@ def pack_rootfs_blocks(archive: Path, work: Path, planner: Path) -> None:
     if not 2 <= len(sizes) <= 512 or any(n <= 0 or n > (8 << 20) for n in sizes) or sum(sizes) != raw.stat().st_size:
         raise ValueError('Invalid rootfs block boundaries')
     packed = work / 'rootfs-blocks.tar.xz'
+    if compact:
+        sizes = compact_block_sizes(raw, sizes)
     block_list = ','.join(map(str, sizes))
+    filters = ['--x86', '--lzma2=dict=8MiB'] if compact else ['--lzma2=dict=4MiB']
     environment = {key: value for key, value in os.environ.items() if key not in ('XZ_DEFAULTS', 'XZ_OPT')}
     with packed.open('xb') as output:
-        subprocess.run(['xz', '-T2', '--check=crc64', f'--block-list={block_list}', '--lzma2=dict=4MiB',
+        subprocess.run(['xz', '-T2', '--check=crc64', f'--block-list={block_list}', *filters,
                         '-c', '--', str(raw)], stdout=output, env=environment, check=True)
     with lzma.open(packed, 'rb') as decoded:
         if hashlib.file_digest(decoded, 'sha256').hexdigest() != sha256(raw):
@@ -142,7 +167,9 @@ def pack_rootfs_blocks(archive: Path, work: Path, planner: Path) -> None:
 
 
 def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path, block_planner: Path | None = None,
-             split_symbols: bool = False) -> None:
+             split_symbols: bool = False, compact_blocks: bool = False) -> None:
+    if compact_blocks and block_planner is None:
+        raise ValueError('Compact rootfs blocks require a block planner')
     if output.exists() or output.is_symlink():
         raise ValueError(f'Asset destination already exists: {output}')
     destination = output.parent.resolve(strict=True) / output.name
@@ -181,7 +208,7 @@ def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path, blo
         shutil.copyfile(rootfs, rootfs_target)
         verify(rootfs_target, ROOTFS_SHA256)
         if block_planner is not None:
-            pack_rootfs_blocks(rootfs_target, work, block_planner)
+            pack_rootfs_blocks(rootfs_target, work, block_planner, compact_blocks)
         with tarfile.open(rootfs_target, 'r:xz') as archive:
             unpacked = sum(member.size for member in archive)
         manifest['runtimes'].append({**baseline, 'id': 'debian-workspace-lite-x64',
@@ -204,11 +231,14 @@ def main() -> None:
     parser.add_argument('output', type=Path, help='new directory for fixture assets')
     parser.add_argument('--rootfs-block-planner', type=Path, metavar='BINARY',
                         help='build content-defined XZ blocks with the compiled dsh-rootfs-blocks planner')
+    parser.add_argument('--compact-rootfs-blocks', action='store_true',
+                        help='group adjacent FastCDC chunks and apply the x86 XZ filter for a smaller full download')
     parser.add_argument('--split-node-debug', action='store_true',
                         help='package a stripped guest Node and save its detached GNU symbols under symbols/')
     args = parser.parse_args()
     try:
-        assemble(args.base, args.rootfs, args.libc, args.node, args.output, args.rootfs_block_planner, args.split_node_debug)
+        assemble(args.base, args.rootfs, args.libc, args.node, args.output, args.rootfs_block_planner,
+                 args.split_node_debug, args.compact_rootfs_blocks)
     except (OSError, ValueError, tarfile.TarError, subprocess.CalledProcessError) as error:
         parser.exit(1, f'{parser.prog}: {error}\n')
 
