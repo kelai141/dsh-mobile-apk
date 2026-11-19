@@ -3,6 +3,7 @@ package com.dsharnessmobile.shell
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.Paths
 import java.security.MessageDigest
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
@@ -470,7 +471,7 @@ class LinuxAssetPrepareTest {
     if (!symlinksUnavailable) {
       assertEquals("准备失败原因：$rootfsState", LinuxAssetPrepare.PHASE_OK, rootfsState.getString("phase"))
       val staged = stagedDir(bytes)
-      assertEquals("/usr/bin", java.nio.file.Files.readSymbolicLink(File(staged, "unpacked/bin").toPath()).toString())
+      assertEquals(Paths.get("/usr/bin"), Files.readSymbolicLink(File(staged, "unpacked/bin").toPath()))
       assertTrue(File(staged, "unpacked/usr/bin/bash").isFile)
     }
 

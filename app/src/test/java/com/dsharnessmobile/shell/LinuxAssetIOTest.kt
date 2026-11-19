@@ -3,6 +3,7 @@ package com.dsharnessmobile.shell
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.Paths
 import java.security.MessageDigest
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
@@ -439,8 +440,8 @@ class LinuxAssetIOTest {
         "rootfs 的绝对 guest 链接必须保留且不得被宿主解引用",
         failure,
       )
-      assertEquals("usr/bin", Files.readSymbolicLink(File(dest, "bin").toPath()).toString())
-      assertEquals("/bin/bash", Files.readSymbolicLink(File(dest, "usr/local/bin/sh").toPath()).toString())
+      assertEquals(Paths.get("usr/bin"), Files.readSymbolicLink(File(dest, "bin").toPath()))
+      assertEquals(Paths.get("/bin/bash"), Files.readSymbolicLink(File(dest, "usr/local/bin/sh").toPath()))
       assertTrue(File(dest, "usr/bin/bash").isFile)
     } finally {
       SnapshotFs.deletePath(root)
