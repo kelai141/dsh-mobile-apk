@@ -67,6 +67,43 @@ class LinuxRootfsBlocksTest {
     assertArrayEquals(remote.payload, target.readBytes())
   }
 
+  @Test fun repeatedIdenticalCompressedBlocksCanServeMultipleTargetPositions() {
+    val prior = encode(listOf(data[2], data[2]) + data.drop(3))
+    val remote = Network(encode(data.drop(3) + listOf(data[2], data[2])))
+    assertTrue(attempt(prior, remote))
+    assertEquals(listOf(4096L), remote.ranges)
+    assertArrayEquals(remote.payload, target.readBytes())
+  }
+
+  @Test fun differentCachedBlocksOfTheSameShapeStillUseTheNetwork() {
+    val other = data[2].clone().apply { this[14] = this[14].inc() }
+    val prior = encode(listOf(data[2], other) + data.drop(3))
+    val remote = Network(encode(listOf(other, data[2]) + data.drop(3)))
+    assertTrue(attempt(prior, remote))
+    assertTrue(remote.ranges.sum() > 4096L)
+    assertArrayEquals(remote.payload, target.readBytes())
+  }
+
+  @Test fun aTargetWithTheRepeatedShapeButDifferentContentCannotReplaceTheCandidate() {
+    val prior = encode(listOf(data[2], data[2]) + data.drop(3))
+    val other = data[2].clone().apply { this[14] = this[14].inc() }
+    val remote = Network(encode(listOf(other, data[2]) + data.drop(3)))
+    target.writeText("retained")
+    assertFalse(attempt(prior, remote))
+    assertEquals("retained", target.readText())
+    assertArrayEquals(prior, File(cache, LinuxRootfsArchiveCache.NAME).readBytes())
+  }
+
+  @Test fun duplicateLookupStopsAtItsLocalReadBudget() {
+    val large = ByteArray(8 * 1024 * 1024).also { Random(42).nextBytes(it) }
+    val prior = encode(listOf(large, large))
+    val remote = Network(prior)
+    target.writeText("retained")
+    assertFalse(attempt(prior, remote))
+    assertEquals(listOf(4096L), remote.ranges)
+    assertEquals("retained", target.readText())
+  }
+
   @Test fun twoDisjointRangesOverlapInTimeAndNeverRefetchTheTrailer() {
     val payload = encode(data) + ByteArray(8)
     val tailStart = payload.size - 4096L

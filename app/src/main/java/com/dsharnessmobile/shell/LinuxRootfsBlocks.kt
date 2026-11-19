@@ -10,6 +10,7 @@ import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.StandardOpenOption.READ
+import java.security.MessageDigest
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
@@ -24,6 +25,7 @@ internal object LinuxRootfsBlocks {
   private const val MAX_BLOCKS = 512
   private const val MAX_MISSING_RANGES = 10
   private const val PARALLEL_BYTES = 4L * 1024 * 1024
+  private const val MAX_DUPLICATE_READ_BYTES = 16L * 1024 * 1024
 
   private data class Shape(val compressed: Long, val plain: Long, val check: Int)
   private data class Block(val offset: Long, val shape: Shape) {
@@ -32,6 +34,38 @@ internal object LinuxRootfsBlocks {
 
   private data class Span(val start: Long, val end: Long) {
     val length get() = end - start
+  }
+
+  private fun reusableBlocks(source: FileChannel, old: List<Block>, target: List<Block>): Map<Shape, Block> {
+    val needed = target.mapTo(HashSet()) { it.shape }
+    val result = mutableMapOf<Shape, Block>()
+    var remainingBudget = MAX_DUPLICATE_READ_BYTES
+    val buffer by lazy(LazyThreadSafetyMode.NONE) { ByteBuffer.allocate(64 * 1024) }
+    val digest by lazy(LazyThreadSafetyMode.NONE) { MessageDigest.getInstance("SHA-256") }
+    fun fingerprint(block: Block): ByteArray {
+      source.position(block.offset)
+      var remaining = block.shape.compressed
+      while (remaining > 0) {
+        buffer.clear().limit(minOf(remaining, buffer.capacity().toLong()).toInt())
+        val n = source.read(buffer)
+        if (n <= 0) throw EOFException()
+        digest.update(buffer.array(), 0, n)
+        remaining -= n
+      }
+      return digest.digest()
+    }
+    for ((shape, matches) in old.groupBy { it.shape }) {
+      if (shape !in needed) continue
+      if (matches.size > 1) {
+        val cost = matches.size * shape.compressed
+        if (cost > remainingBudget) continue
+        remainingBudget -= cost
+        val first = fingerprint(matches.first())
+        if (matches.drop(1).any { !first.contentEquals(fingerprint(it)) }) continue
+      }
+      result[shape] = matches.first()
+    }
+    return result
   }
 
   // The footer repeats both stream flags. The XZ parser checks its CRC and index,
@@ -114,8 +148,6 @@ internal object LinuxRootfsBlocks {
         val size = source.size()
         if (size !in (HEADER + TAIL + 1).toLong()..LinuxAssetIO.MAX_DOWNLOAD_BYTES) return@Opener -1L
         val old = Edges(size, source.bytesAt(0, HEADER), source.bytesAt(size - TAIL, TAIL)).blocks()
-        // The index is a lookup hint. Ambiguous matches stay on the network.
-        val byShape = old.groupBy { it.shape }.mapValues { it.value.singleOrNull() }
         fun fetch(start: Long, count: Long, out: OutputStream) {
           if (!http.fetchRange(url, spec.size, start, count, out)) throw IOException("Asset range unavailable")
         }
@@ -126,6 +158,8 @@ internal object LinuxRootfsBlocks {
         val tail = edge(tailStart, TAIL)
         val edges = Edges(spec.size, headerFromFooter(tail), tail)
         val blocks = edges.blocks()
+        // Index dimensions are hints. Repeated dimensions must identify identical cached bytes.
+        val byShape = reusableBlocks(source, old, blocks)
         val runs = mutableListOf<Span>()
         for (block in blocks) {
           if (byShape[block.shape] != null) continue
