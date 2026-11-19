@@ -3,6 +3,7 @@ package com.dsharnessmobile.shell
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.Proxy
 import java.net.URL
@@ -366,9 +367,45 @@ internal object LinuxAssetIO {
     fun fetch(url: String, dest: File, maxBytes: Long): Long
   }
 
-  /** 生产下载器：https + 主机白名单逐跳校验 + 有界流式落盘。 */
-  object HttpOpener : Opener {
-    override fun fetch(url: String, dest: File, maxBytes: Long): Long {
+  interface RangeOpener : Opener {
+    fun fetchRange(url: String, total: Long, start: Long, bytes: Long, output: OutputStream): Boolean
+  }
+
+  /** Every request applies the same redirect policy, including individual byte ranges. */
+  object HttpOpener : RangeOpener {
+    override fun fetch(url: String, dest: File, maxBytes: Long): Long =
+      request(url, null) { conn ->
+        if (conn.responseCode != 200) return@request -1L
+        dest.outputStream().use { output -> copyBounded(conn, output, maxBytes) }
+      }
+
+    override fun fetchRange(url: String, total: Long, start: Long, bytes: Long, output: OutputStream): Boolean {
+      if (total !in 1..MAX_DOWNLOAD_BYTES || bytes !in 1..total || start !in 0..(total - bytes)) return false
+      val last = start + bytes - 1
+      return request(url, "bytes=$start-$last") { conn ->
+        if (conn.responseCode != 206 || conn.getHeaderField("Content-Range") != "bytes $start-$last/$total" ||
+            conn.contentLengthLong != bytes || conn.contentEncoding?.equals("identity", ignoreCase = true) == false) {
+          return@request -1L
+        }
+        copyBounded(conn, output, bytes)
+      } == bytes
+    }
+
+    private fun copyBounded(conn: HttpURLConnection, output: OutputStream, maxBytes: Long): Long =
+      conn.inputStream.use { input ->
+        val buffer = ByteArray(128 * 1024)
+        var count = 0L
+        while (true) {
+          val n = input.read(buffer)
+          if (n < 0) break
+          count += n
+          if (count > maxBytes) throw IOException("Asset response exceeds $maxBytes bytes")
+          output.write(buffer, 0, n)
+        }
+        count
+      }
+
+    private inline fun request(url: String, range: String?, accept: (HttpURLConnection) -> Long): Long {
       var current = url
       var hops = 0
       while (true) {
@@ -376,37 +413,20 @@ internal object LinuxAssetIO {
         conn.connectTimeout = 10_000
         conn.readTimeout = 30_000
         conn.instanceFollowRedirects = false
+        if (range != null) {
+          conn.setRequestProperty("Range", range)
+          conn.setRequestProperty("Accept-Encoding", "identity")
+        }
         try {
-          val code = conn.responseCode
-          if (code in 300..399) {
-            val location = conn.getHeaderField("Location")
-              ?: return -1
-            hops += 1
-            if (hops > MAX_REDIRECTS) return -1
-            // 相对 Location 按当前 URL 解析，再逐跳复核（自动跟随不校验中间跳，故关掉它）。
-            val resolved = try { URL(URL(current), location).toString() } catch (_: Exception) { return -1 }
-            if (hopVerdict(resolved) != null) {
-              android.util.Log.w(TAG, "linux-asset redirect rejected: $resolved")
-              return -1
-            }
-            current = resolved
-            continue
+          if (conn.responseCode !in 300..399) return accept(conn)
+          val location = conn.getHeaderField("Location") ?: return -1
+          if (++hops > MAX_REDIRECTS) return -1
+          val resolved = try { URL(URL(current), location).toString() } catch (_: Exception) { return -1 }
+          if (hopVerdict(resolved) != null) {
+            android.util.Log.w(TAG, "linux-asset redirect rejected: $resolved")
+            return -1
           }
-          if (code != 200) return -1
-          var read = 0L
-          dest.outputStream().use { out ->
-            conn.inputStream.use { input ->
-              val buf = ByteArray(128 * 1024)
-              while (true) {
-                val n = input.read(buf)
-                if (n < 0) break
-                read += n
-                if (read > maxBytes) throw IOException("下载体量超过上限 $maxBytes")
-                out.write(buf, 0, n)
-              }
-            }
-          }
-          return read
+          current = resolved
         } finally {
           conn.disconnect()
         }

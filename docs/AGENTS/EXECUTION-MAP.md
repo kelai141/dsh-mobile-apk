@@ -2520,6 +2520,8 @@ plugins/dsh-android-linux-env/src/linux-tool-contract.ts
 app/src/main/java/com/dsharnessmobile/shell/LinuxAssetExtractor.kt
 app/src/main/java/com/dsharnessmobile/shell/LinuxXzInputStream.java
 app/src/main/java/com/dsharnessmobile/shell/LinuxRootfsArchiveCache.kt
+app/src/main/java/com/dsharnessmobile/shell/LinuxRootfsBlocks.kt
+app/src/test/java/com/dsharnessmobile/shell/LinuxRootfsBlocksTest.kt
 app/src/main/java/com/dsharnessmobile/shell/LinuxArchiveFileIO.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/LinuxArchiveFileIOTest.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/LinuxRootfsArchiveCacheTest.kt
@@ -2566,3 +2568,5 @@ For file-backed Linux assets, LinuxAssetExtractor opens LinuxXzInputStream befor
 Before downloading a rootfs candidate, LinuxAssetPrepare tries the last compressed rootfs in the app cache. Both the local copy and a fresh download go through LinuxAssetIO size, SHA-256 and source validation before extraction. The installer independently revalidates the candidate before activation.
 
 Android extraction checks each parent with lstat. Regular files are created exclusively, written through the open descriptor and assigned their final owner permissions before the descriptor closes.
+
+When a cached XZ archive differs, LinuxRootfsBlocks uses bounded header and index reads to identify reusable compressed blocks. LinuxAssetIO validates each HTTP range and checks the entire reconstructed archive before publication. An unsupported layout, missing range or digest mismatch takes the full download path.

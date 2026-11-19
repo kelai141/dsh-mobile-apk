@@ -350,3 +350,5 @@ LinuxXzInputStream.java owns the Android Linux archive reader and its native dec
 LinuxRootfsArchiveCache keeps one compressed rootfs in Android cache storage. Each candidate receives a separately verified private copy.
 
 LinuxArchiveFileIO implements Android directory checks, exclusive file creation and descriptor-based permissions for LinuxAssetExtractor.
+
+LinuxRootfsBlocks.kt reconstructs changed multi-block XZ assets using the private cache and byte ranges from the verified release origin.

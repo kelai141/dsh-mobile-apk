@@ -207,7 +207,12 @@ internal object LinuxAssetPrepare {
     try {
       val archive = File(candidate, "asset.tar.xz")
       val restored = LinuxRootfsArchiveCache.restore(cacheDir, archive, spec, root, debugBuild)
-      if (!restored) LinuxAssetIO.download(spec, archive, root, opener, debugBuild)?.let { return it }
+      if (!restored) {
+        val network = opener
+        val reconstructed = network is LinuxAssetIO.RangeOpener &&
+          LinuxRootfsBlocks.restore(cacheDir, archive, spec, root, debugBuild, network)
+        if (!reconstructed) LinuxAssetIO.download(spec, archive, root, network, debugBuild)?.let { return it }
+      }
       val unpacked = Files.createDirectory(File(candidate, "unpacked").toPath()).toFile()
       LinuxAssetIO.extract(archive, unpacked, root, spec.kind, LinuxAssetIO.limitsFor(spec.kind))?.let { return it }
       if (!restored) LinuxRootfsArchiveCache.remember(cacheDir, archive)
