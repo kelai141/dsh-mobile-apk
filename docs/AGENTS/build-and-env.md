@@ -173,6 +173,8 @@ For differential updates, build the optional planner with `cargo build --locked 
 
 With the planner enabled, `--compact-rootfs-blocks` groups nearby chunks using a content-based cut and a 16 MiB cap. It applies the x86 instruction filter and an 8 MiB LZMA2 dictionary. This reduces the full x86-64 download while increasing some differential transfers.
 
+`--tar-aligned-rootfs-blocks` selects XZ boundaries from the verified tar itself. It separates installation namespaces and end padding, splits long runs at member names, and caps blocks at 16 MiB. The decoded tar bytes remain identical. This option works without an external planner.
+
 For a smaller x86-64 guest Node asset, pass `--split-node-debug` with GNU binutils installed. The assembler verifies the pinned executable, preserves its build ID and adds a GNU debug link. Archive `symbols/node.debug` alongside the build for offline symbolization. Only the runtime executable belongs in the guest package.
 
 For an experimental Bionilux launcher build, run `python3 scripts/source-build/bionilux/prepare-launcher-source.py <bionilux-checkout> <goblin-0.10.7.crate> <new-source-dir>`. The profile extracts the pinned Bionilux revision and verifies Goblin against its Cargo lockfile. Large ordinary ELF symbol-name tables are UTF-8 validated together and read on demand. Dynamic string tables keep their usual index. Build from the prepared directory with `cargo build --locked --release --target x86_64-linux-android` and the Android NDK linker.

@@ -141,21 +141,59 @@ def compact_block_sizes(raw: Path, sizes: list[int]) -> list[int]:
     return groups if len(groups) > 1 else sizes
 
 
-def pack_rootfs_blocks(archive: Path, work: Path, planner: Path, compact: bool = False) -> None:
+def tar_block_sizes(raw: Path) -> list[int]:
+    # Keep namespace transitions and the variable tar end padding in separate XZ blocks.
+    offsets = [0]
+
+    def cut(end: int) -> None:
+        while end - offsets[-1] > (16 << 20):
+            offsets.append(offsets[-1] + (8 << 20))
+        if end > offsets[-1]:
+            offsets.append(end)
+
+    namespace_depth = {'etc': 1, 'opt': 1, 'usr': 2, 'var': 1}
+    scope = None
+    payload_end = 0
+    with tarfile.open(raw, 'r:', encoding='utf-8', errors='surrogateescape') as archive:
+        for member in archive:
+            name = member.name.removeprefix('./')
+            parts = name.split('/', 2)
+            region = parts[:namespace_depth.get(parts[0], 0)]
+            distance = member.offset - offsets[-1]
+            if region != scope or distance >= (8 << 20) or (
+                distance >= (2 << 20) and
+                hashlib.blake2s(member.name.encode('utf-8', 'surrogateescape'), digest_size=4).digest()[0] & 7 == 0
+            ):
+                cut(member.offset)
+            scope = region
+            payload_end = archive.offset
+    cut(payload_end)
+    cut(raw.stat().st_size)
+    return [end - start for start, end in zip(offsets, offsets[1:])]
+
+
+def pack_rootfs_blocks(archive: Path, work: Path, planner: Path | None, compact: bool = False,
+                      tar_aligned: bool = False) -> None:
     raw = work / 'rootfs-source.tar'
     with lzma.open(archive, 'rb') as source, raw.open('xb') as output:
         shutil.copyfileobj(source, output, length=256 * 1024)
-    with raw.open('rb') as source:
-        lengths = subprocess.run([str(planner.resolve(strict=True))], stdin=source, stdout=subprocess.PIPE,
-                                 text=True, check=True).stdout.splitlines()
-    sizes = [int(value) for value in lengths]
-    if not 2 <= len(sizes) <= 512 or any(n <= 0 or n > (8 << 20) for n in sizes) or sum(sizes) != raw.stat().st_size:
+    if tar_aligned:
+        sizes = tar_block_sizes(raw)
+    else:
+        if planner is None:
+            raise ValueError('Content-defined blocks require a block planner')
+        with raw.open('rb') as source:
+            lengths = subprocess.run([str(planner.resolve(strict=True))], stdin=source, stdout=subprocess.PIPE,
+                                     text=True, check=True).stdout.splitlines()
+        sizes = [int(value) for value in lengths]
+    maximum = (16 if tar_aligned else 8) << 20
+    if not 2 <= len(sizes) <= 512 or any(n <= 0 or n > maximum for n in sizes) or sum(sizes) != raw.stat().st_size:
         raise ValueError('Invalid rootfs block boundaries')
     packed = work / 'rootfs-blocks.tar.xz'
     if compact:
         sizes = compact_block_sizes(raw, sizes)
     block_list = ','.join(map(str, sizes))
-    filters = ['--x86', '--lzma2=dict=8MiB'] if compact else ['--lzma2=dict=4MiB']
+    filters = ['--x86', '--lzma2=dict=8MiB'] if compact or tar_aligned else ['--lzma2=dict=4MiB']
     environment = {key: value for key, value in os.environ.items() if key not in ('XZ_DEFAULTS', 'XZ_OPT')}
     with packed.open('xb') as output:
         subprocess.run(['xz', '-T2', '--check=crc64', f'--block-list={block_list}', *filters,
@@ -167,7 +205,9 @@ def pack_rootfs_blocks(archive: Path, work: Path, planner: Path, compact: bool =
 
 
 def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path, block_planner: Path | None = None,
-             split_symbols: bool = False, compact_blocks: bool = False) -> None:
+             split_symbols: bool = False, compact_blocks: bool = False, tar_aligned: bool = False) -> None:
+    if tar_aligned and (compact_blocks or block_planner is not None):
+        raise ValueError('Tar-aligned blocks select their own boundaries')
     if compact_blocks and block_planner is None:
         raise ValueError('Compact rootfs blocks require a block planner')
     if output.exists() or output.is_symlink():
@@ -207,8 +247,8 @@ def assemble(base: Path, rootfs: Path, libc: Path, node: Path, output: Path, blo
         rootfs_target = result / 'debian-workspace-lite-x86_64-diagnostic.tar.xz'
         shutil.copyfile(rootfs, rootfs_target)
         verify(rootfs_target, ROOTFS_SHA256)
-        if block_planner is not None:
-            pack_rootfs_blocks(rootfs_target, work, block_planner, compact_blocks)
+        if block_planner is not None or tar_aligned:
+            pack_rootfs_blocks(rootfs_target, work, block_planner, compact_blocks, tar_aligned)
         with tarfile.open(rootfs_target, 'r:xz') as archive:
             unpacked = sum(member.size for member in archive)
         manifest['runtimes'].append({**baseline, 'id': 'debian-workspace-lite-x64',
@@ -233,12 +273,14 @@ def main() -> None:
                         help='build content-defined XZ blocks with the compiled dsh-rootfs-blocks planner')
     parser.add_argument('--compact-rootfs-blocks', action='store_true',
                         help='group adjacent FastCDC chunks and apply the x86 XZ filter for a smaller full download')
+    parser.add_argument('--tar-aligned-rootfs-blocks', action='store_true',
+                        help='place XZ block boundaries at tar namespace transitions and before end padding')
     parser.add_argument('--split-node-debug', action='store_true',
                         help='package a stripped guest Node and save its detached GNU symbols under symbols/')
     args = parser.parse_args()
     try:
         assemble(args.base, args.rootfs, args.libc, args.node, args.output, args.rootfs_block_planner,
-                 args.split_node_debug, args.compact_rootfs_blocks)
+                 args.split_node_debug, args.compact_rootfs_blocks, args.tar_aligned_rootfs_blocks)
     except (OSError, ValueError, tarfile.TarError, subprocess.CalledProcessError) as error:
         parser.exit(1, f'{parser.prog}: {error}\n')
 

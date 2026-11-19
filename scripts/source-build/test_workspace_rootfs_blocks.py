@@ -1,8 +1,10 @@
 import hashlib
+import io
 import lzma
 import os
 from pathlib import Path
 import runpy
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -66,6 +68,54 @@ class RootfsBlocksTest(unittest.TestCase):
                     output.write(chunks[key])
             result = assembler['compact_block_sizes'](raw, [4 * unit] * len(keys))
             self.assertEqual(result, [size * unit for size in expected])
+
+    def test_tar_boundaries_keep_other_namespaces_and_end_padding_independent(self):
+        streams = []
+        for extra in (False, True):
+            work, _, archive, _ = self.fixture('4096 4096')
+            source = work / 'original.tar'
+            with tarfile.open(source, 'w') as tar:
+                for name in ['etc/config', 'opt/item', *(['root/item'] if extra else []), 'usr/bin/tool', 'var/data']:
+                    entry = tarfile.TarInfo(name)
+                    entry.size = len(name)
+                    tar.addfile(entry, io.BytesIO(name.encode()))
+            raw = source.read_bytes()
+            archive.write_bytes(lzma.compress(raw))
+            sizes = assembler['tar_block_sizes'](source)
+            with source.open('rb') as reader:
+                blocks = [reader.read(n) for n in sizes]
+            self.assertTrue(blocks[-1] and not any(blocks[-1]))
+            streams.append(blocks)
+            pack_rootfs_blocks(archive, work, None, tar_aligned=True)
+            self.assertEqual(lzma.decompress(archive.read_bytes()), raw)
+        before, after = streams
+        self.assertEqual(before[:-1], after[:2] + after[3:-1])
+        self.assertNotEqual(before[-1], after[-1])
+
+    def test_large_tar_member_is_covered_by_bounded_blocks(self):
+        work, _, _, _ = self.fixture('4096 4096')
+        source = work / 'large.tar'
+        payload = bytes(20 << 20)
+        with tarfile.open(source, 'w') as tar:
+            entry = tarfile.TarInfo('usr/lib/large')
+            entry.size = len(payload)
+            tar.addfile(entry, io.BytesIO(payload))
+        sizes = assembler['tar_block_sizes'](source)
+        self.assertEqual(sum(sizes), source.stat().st_size)
+        self.assertLessEqual(max(sizes), 16 << 20)
+
+    def test_tar_with_too_many_blocks_preserves_original_archive(self):
+        work, _, archive, _ = self.fixture('4096 4096')
+        source = work / 'many.tar'
+        with tarfile.open(source, 'w') as tar:
+            for i in range(513):
+                directory = 'etc' if i % 2 else 'var'
+                tar.addfile(tarfile.TarInfo(f'{directory}/item-{i}'))
+        original = lzma.compress(source.read_bytes())
+        archive.write_bytes(original)
+        with self.assertRaisesRegex(ValueError, 'Invalid rootfs block boundaries'):
+            pack_rootfs_blocks(archive, work, None, tar_aligned=True)
+        self.assertEqual(archive.read_bytes(), original)
 
 
 if __name__ == '__main__':
