@@ -41,6 +41,7 @@ export interface LinuxStatus {
   installedSystemMobileVersion?: string
   autoUpdate?: boolean
   availableVersion?: string
+  latestReleaseVersion?: string
   updateAvailable?: boolean
   updateBlocked?: boolean
   busy?: boolean

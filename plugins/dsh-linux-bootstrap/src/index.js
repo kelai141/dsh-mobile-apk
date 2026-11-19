@@ -27,6 +27,7 @@ export const STATE_FILE_NAME = 'linux-bootstrap-state.json'
 const isManager = (value) => value && typeof value.install === 'function' && typeof value.uninstall === 'function'
 const safeError = (error) => error instanceof Error ? error.message : String(error)
 const optionalVersion = (value) => typeof value === 'string' && parseVersion(value) ? value.replace(/^v/, '') : null
+const AUTOMATIC_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 
 function appVersionReader(provider) {
   return async () => {
@@ -47,7 +48,7 @@ function initialState(autoUpdate) {
     schemaVersion: 1,
     autoUpdateEnabled: autoUpdate === true,
     installedSystemMobileVersion: null,
-    lastAutomaticCheckMobileVersion: null,
+    lastAutomaticCheckAt: null,
     installedLinuxVersion: null,
     enabled: false,
     injectionActivated: false,
@@ -123,7 +124,7 @@ function statusShape(state, mobileVersion, operation, packageVersion, arch) {
     checkError: state.lastCheckError ?? null,
     lastCheckError: state.lastCheckError ?? null,
     lastCheckAt: state.lastCheckAt,
-    lastAutomaticCheckMobileVersion: state.lastAutomaticCheckMobileVersion,
+    lastAutomaticCheckAt: state.lastAutomaticCheckAt,
   })
 }
 
@@ -145,9 +146,11 @@ async function persistState(statePath, state) {
 
 function validateStoredState(value) {
   if (!value || value.schemaVersion !== 1 || typeof value.autoUpdateEnabled !== 'boolean') throw new Error('Linux bootstrap state is invalid or unsupported')
-  for (const key of ['installedSystemMobileVersion', 'lastAutomaticCheckMobileVersion', 'installedLinuxVersion', 'latestReleaseVersion']) {
+  for (const key of ['installedSystemMobileVersion', 'installedLinuxVersion', 'latestReleaseVersion']) {
     value[key] = optionalVersion(value[key])
   }
+  value.lastAutomaticCheckAt = Number.isFinite(Date.parse(value.lastAutomaticCheckAt)) ? value.lastAutomaticCheckAt : null
+  delete value.lastAutomaticCheckMobileVersion
   value.enabled = value.enabled === true
   value.injectionActivated = value.injectionActivated === true
   return value
@@ -197,7 +200,6 @@ export function createMobileBootstrap(options = {}) {
   if (!pluginHost || typeof pluginHost.install !== 'function' || typeof pluginHost.uninstall !== 'function') throw new TypeError('linuxPluginHost.install and uninstall are required')
   if (typeof downloadAsset !== 'function' || typeof extractArchive !== 'function') throw new TypeError('linuxAssetIO.downloadAsset and extractArchive are required')
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be fetch-compatible')
-  if (typeof appVersionProvider !== 'function' && !(appVersionProvider && (typeof appVersionProvider.getVersion === 'function' || typeof appVersionProvider.getCurrentVersion === 'function')) && installedMobileVersion == null) throw new TypeError('appVersionProvider is required')
   if (initialManager !== undefined && !isManager(initialManager)) throw new TypeError('manager must expose install() and uninstall()')
   if (managerProvider !== undefined && typeof managerProvider !== 'function') throw new TypeError('managerProvider must be a function')
   if (getManager !== undefined && typeof getManager !== 'function') throw new TypeError('getManager must be a function')
@@ -237,7 +239,7 @@ export function createMobileBootstrap(options = {}) {
     return current
   }
   const updateMobileVersion = async () => {
-    mobileVersion = await readAppVersion()
+    mobileVersion = await readAppVersion().catch(() => null)
     return mobileVersion
   }
   const fetchManifest = async () => {
@@ -245,10 +247,6 @@ export function createMobileBootstrap(options = {}) {
     let checked = validateManifestShape(manifest, releaseTag)
     if (typeof verifyManifest === 'function' && await verifyManifest(checked) !== true) throw new Error('Release manifest verification failed')
     return checked
-  }
-  const ensureMobileCompatible = (manifest, current) => {
-    if (!current) throw new Error('Current DSH Mobile version is unavailable')
-    if (compareVersions(current, manifest.minMobileVersion) < 0) throw new Error(`Linux release requires DSH Mobile ${manifest.minMobileVersion} or newer`)
   }
   const resolveManager = async ({ hostResult, directory, config }) => {
     const candidate = hostResult?.manager ?? hostResult?.service?.manager ?? hostResult?.service ?? manager
@@ -406,7 +404,6 @@ export function createMobileBootstrap(options = {}) {
     const runtime = selectRuntimeForArch(manifest, runtimeId, hostArch)
     runtimeId = runtime.id
     await updateMobileVersion()
-    ensureMobileCompatible(manifest, mobileVersion)
     if (state.installedLinuxVersion) {
       const comparison = compareVersions(manifest.version, state.installedLinuxVersion)
       if (comparison < 0) throw new Error(`Refusing to downgrade Linux runtime ${state.installedLinuxVersion} to ${manifest.version}`)
@@ -481,7 +478,6 @@ export function createMobileBootstrap(options = {}) {
       state.injectionActivated = true
       state.lastError = null
       state.installedSystemMobileVersion = mobileVersion
-      state.lastAutomaticCheckMobileVersion = automatic ? mobileVersion : state.lastAutomaticCheckMobileVersion
       state.pinnedManifest = publicManifest(manifest)
       state.availableManifest = publicManifest(manifest)
       state.latestReleaseVersion = manifest.version
@@ -548,27 +544,30 @@ export function createMobileBootstrap(options = {}) {
   }
 
   async function checkForUpdatesInternal({ automatic = false } = {}) {
-    await updateMobileVersion()
-    if (automatic && (!state.autoUpdateEnabled || !state.enabled || !state.injectionActivated || !state.installedLinuxVersion || !state.installedSystemMobileVersion || !mobileVersion || state.installedSystemMobileVersion === mobileVersion || state.lastAutomaticCheckMobileVersion === mobileVersion)) return emit()
+    if (automatic) {
+      if (!state.autoUpdateEnabled || !state.enabled || !state.injectionActivated || !state.installedLinuxVersion) return emit()
+      const elapsed = Date.now() - Date.parse(state.lastAutomaticCheckAt)
+      if (elapsed >= 0 && elapsed < AUTOMATIC_CHECK_INTERVAL_MS) return emit()
+      state.lastAutomaticCheckAt = new Date().toISOString()
+    }
     operation = automatic ? 'automatic-check' : 'checking'
     state.lastCheckError = null
     state.updateBlocked = false
     emit()
     try {
       const manifest = await fetchManifest()
-      ensureMobileCompatible(manifest, mobileVersion)
+      if (!manifest.runtimes.some(runtime => runtime.architecture === hostArch)) {
+        throw new Error(`The latest Linux release has no runtime for ${hostArch}`)
+      }
       state.availableManifest = publicManifest(manifest)
       state.latestReleaseVersion = manifest.version
       state.lastCheckAt = new Date().toISOString()
       const comparison = state.installedLinuxVersion ? compareVersions(manifest.version, state.installedLinuxVersion) : 1
       state.updateBlocked = comparison < 0
       state.updateAvailable = comparison > 0 || !state.installedLinuxVersion
-      if (automatic) {
-        state.lastAutomaticCheckMobileVersion = mobileVersion
-        await save()
-        if (state.updateAvailable && state.enabled && state.injectionActivated) await installRuntime({ manifest, runtimeId: state.runtimeId ?? defaultRuntimeIdForArch(hostArch), automatic: true })
-      } else {
-        await save()
+      await save()
+      if (automatic && !requireStagedBundle && state.updateAvailable) {
+        await installRuntime({ manifest, runtimeId: state.runtimeId ?? defaultRuntimeIdForArch(hostArch), automatic: true })
       }
       return emit()
     } catch (error) {
@@ -576,13 +575,8 @@ export function createMobileBootstrap(options = {}) {
       // checks never mark a healthy installed Linux runtime as failed.
       state.lastCheckError = safeError(error)
       state.lastCheckAt = new Date().toISOString()
-      if (automatic) {
-        state.lastAutomaticCheckMobileVersion = mobileVersion
-        await save()
-      } else {
-        await save()
-        throw error
-      }
+      await save()
+      if (!automatic) throw error
       return emit()
     } finally {
       operation = 'idle'
@@ -606,12 +600,7 @@ export function createMobileBootstrap(options = {}) {
     await synchronizeInjectionState()
   }
 
-  ready = load().then(() => serial(async () => {
-    if (state.installedLinuxVersion && state.enabled && state.injectionActivated && state.autoUpdateEnabled && state.installedSystemMobileVersion && mobileVersion && state.installedSystemMobileVersion !== mobileVersion && state.lastAutomaticCheckMobileVersion !== mobileVersion) {
-      return checkForUpdatesInternal({ automatic: true })
-    }
-    return emit()
-  })).catch((error) => {
+  ready = load().then(emit).catch((error) => {
     state.lastError = safeError(error)
     emit()
   })
@@ -626,16 +615,14 @@ export function createMobileBootstrap(options = {}) {
      * Check the release channel for a newer Linux version.
      *
      * `manual` is the user's explicit action and always hits the network.
-     * `mobile-version-change` is the host-triggered automatic path: it is
-     * deduplicated per DSH Mobile version inside this service and only proceeds
-     * for an already installed and still injected system with the user's
-     * auto-update preference on.
+     * `automatic` checks at most once a day for an enabled runtime whose user opted in.
+     * Android hosts requiring staged assets use the panel to prepare and install them.
      */
     checkForUpdates: ({ source = 'manual' } = {}) => {
-      if (source !== 'manual' && source !== 'mobile-version-change') {
-        return Promise.reject(new TypeError('source must be manual or mobile-version-change'))
+      if (source !== 'manual' && source !== 'automatic' && source !== 'mobile-version-change') {
+        return Promise.reject(new TypeError('source must be manual or automatic'))
       }
-      return ready.then(() => serial(() => checkForUpdatesInternal({ automatic: source === 'mobile-version-change' })))
+      return ready.then(() => serial(() => checkForUpdatesInternal({ automatic: source !== 'manual' })))
     },
     /** Re-read the host's injection view (used after the user changes the injection directory). */
     syncInjectionState: () => ready.then(() => serial(async () => { await synchronizeInjectionState(); return emit() })),
@@ -696,7 +683,7 @@ export function createMobileBootstrap(options = {}) {
         state.enabled = false
         state.injectionActivated = false
         state.installedSystemMobileVersion = null
-        state.lastAutomaticCheckMobileVersion = null
+        state.lastAutomaticCheckAt = null
         state.pinnedManifest = null
         state.runtime = null
         state.updateAvailable = Boolean(state.availableManifest)

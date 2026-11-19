@@ -55,9 +55,11 @@ const POLL_MS = 2000
  * 与引擎侧串行队列互补（那边 busy 时回 409）。
  */
 let inFlight = false
-/** 挂载级自动查新单飞守卫，防止并发重复 POST /check 撞 409。 */
-let inFlightAutoCheck: Promise<LinuxStatus> | null = null
-const AUTO_CHECK_FRESH_MS = 60_000
+/** 合并同时发起的查询。完成后下一次查询重新访问发布通道。 */
+let releaseCheck: Promise<LinuxStatus> | null = null
+function queryLatestRelease(): Promise<LinuxStatus> {
+  return releaseCheck ?? (releaseCheck = checkForUpdates().finally(() => { releaseCheck = null }))
+}
 
 type Phase = 'idle' | 'manifest' | 'assets' | 'installing' | 'checking' | 'uninstalling' | 'done' | 'failed'
 type AutoCheckState = 'idle' | 'checking' | 'done' | 'failed'
@@ -183,8 +185,8 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
   const [phase, setPhase] = useState<Phase>('idle')
   const [autoCheckState, setAutoCheckState] = useState<AutoCheckState>('idle')
   const [autoCheckError, setAutoCheckError] = useState('')
+  const sectionRef = useRef<HTMLElement>(null)
   const autoCheckStartedRef = useRef(false)
-  const autoCheckedAtRef = useRef(0)
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -200,13 +202,9 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
     const runAutoCheck = (): void => {
       setAutoCheckState('checking')
       setAutoCheckError('')
-      const pending = inFlightAutoCheck ?? (inFlightAutoCheck = checkForUpdates().finally(() => {
-        inFlightAutoCheck = null
-      }))
-      void pending.then(
+      void queryLatestRelease().then(
         (checked) => {
           if (!active) return
-          autoCheckedAtRef.current = Date.now()
           if (checked !== null && typeof checked === 'object') setStatus(checked)
           setStatusError('')
           setAutoCheckState('done')
@@ -222,20 +220,29 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
       )
     }
     const load = (): void => {
+      if (typeof IntersectionObserver === 'function' && sectionRef.current?.getClientRects().length === 0) {
+        autoCheckStartedRef.current = false
+        return
+      }
       void fetchStatus().then(
         (next) => {
           if (!active) return
           setStatus(next)
           setStatusError('')
-          if (!autoCheckStartedRef.current) {
+          if (!autoCheckStartedRef.current && next.busy !== true && !inFlight) {
             autoCheckStartedRef.current = true
-            if (next.busy !== true && !inFlight) runAutoCheck()
+            runAutoCheck()
           }
         },
         (cause: unknown) => { if (active) setStatusError(failureText(cause)) },
       )
     }
     load()
+    const section = sectionRef.current
+    const observer = typeof IntersectionObserver === 'function' && section !== null
+      ? new IntersectionObserver(() => { if (document.visibilityState === 'visible') load() })
+      : undefined
+    if (section !== null) observer?.observe(section)
     // 可见时才轮询：后台 WebView 不打扰引擎。
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') load()
@@ -244,6 +251,7 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
     document.addEventListener('visibilitychange', onVisible)
     return () => {
       active = false
+      observer?.disconnect()
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', onVisible)
     }
@@ -282,36 +290,30 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
     if (inFlight) return
     inFlight = true
     setError('')
+    let preparedRuntimeId = selectedRuntime
     try {
-      if (inFlightAutoCheck !== null) {
-        try { await inFlightAutoCheck } catch { /* non-fatal */ }
-      }
       if (!reinstall) {
         setPhase('manifest')
         setProgress({ stage: 'manifest' })
-        // Refresh the persisted manifest first unless the page-open auto-check
-        // just succeeded moments ago, keeping GitHub API calls lean while
-        // still falling back to the persisted manifest when offline/403.
-        const recentlyChecked = autoCheckState === 'done' && (Date.now() - autoCheckedAtRef.current) < AUTO_CHECK_FRESH_MS
-        if (!recentlyChecked) {
-          try {
-            await checkForUpdates()
-            autoCheckedAtRef.current = Date.now()
-            setAutoCheckState('done')
-            setAutoCheckError('')
-          } catch {
-            // Keep going on the persisted manifest.
-          }
+        try {
+          await queryLatestRelease()
+          setAutoCheckState('done')
+          setAutoCheckError('')
+        } catch (cause) {
+          // The existing verified manifest remains usable for cached assets.
+          setAutoCheckState('failed')
+          setAutoCheckError(failureText(cause))
         }
         await refresh()
         const manifest = await fetchManifest()
         const { runtime, specs } = assetsFor(manifest, {
-          runtimeId: selectedRuntime !== '' ? selectedRuntime : undefined,
+          runtimeId: preparedRuntimeId !== '' ? preparedRuntimeId : undefined,
           architecture: status?.architecture,
         })
         if (runtime === null) {
           throw new AssetError('No runtime in this release matches this device', { code: 'linux-runtime-not-found' })
         }
+        preparedRuntimeId = runtime.id
         setProgress({ stage: 'assets', index: 0, total: specs.length, bytes: totalBytes(specs) })
         await prepareAssets(
           window.androidBridge,
@@ -325,7 +327,7 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
       setProgress({ stage: 'installing' })
       const next = reinstall
         ? await reinstallEnvironment()
-        : await installEnvironment(selectedRuntime !== '' ? selectedRuntime : undefined)
+        : await installEnvironment(preparedRuntimeId !== '' ? preparedRuntimeId : undefined)
       if (typeof next.installed === 'boolean') setStatus(next)
       setPhase('done')
       await refresh()
@@ -344,15 +346,14 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
     setError('')
     setPhase(nextPhase)
     try {
-      if (inFlightAutoCheck !== null) {
-        try { await inFlightAutoCheck } catch { /* non-fatal */ }
+      if (nextPhase !== 'checking' && releaseCheck !== null) {
+        try { await releaseCheck } catch { /* A query failure does not block local operations. */ }
       }
       // 动作返回的宿主状态先落地：手动 check 刚刷新出的 updateAvailable 不会被紧随其后的
       // 状态轮询（可能还是上一拍缓存）抹掉。
       const next = await action()
       if (next !== null && typeof next === 'object') setStatus(next)
       if (nextPhase === 'checking') {
-        autoCheckedAtRef.current = Date.now()
         setAutoCheckState('done')
         setAutoCheckError('')
       }
@@ -374,6 +375,7 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
 
   return (
     <section
+      ref={sectionRef}
       className="dsh-linux-env"
       data-plugin="linux-environment"
       data-linux-environment="true"
@@ -413,7 +415,9 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
       )}
       {autoCheckState === 'done' && !attempting && phase !== 'failed' && installed && status?.updateAvailable === false && status?.updateBlocked !== true && (
         <p className="dsh-linux-env-hint" data-linux-auto-check="up-to-date">
-          {tr('已查询上游最新版本：当前已是最新。', 'Checked upstream: already up to date.')}
+          {status.latestReleaseVersion
+            ? tr('已安装上游最新版本 ' + status.latestReleaseVersion + '。', 'Latest upstream release ' + status.latestReleaseVersion + ' is installed.')
+            : tr('已查询上游最新版本：当前已是最新。', 'Checked upstream: already up to date.')}
         </p>
       )}
       {autoCheckState === 'failed' && autoCheckError !== '' && !attempting && phase !== 'failed' && (
@@ -456,8 +460,8 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
         />
         <span>
           {tr(
-            '自动更新（已启用时，DSH Mobile 版本变化后检查较新的 Linux 运行时）',
-            'Automatic updates (after a DSH Mobile version change, check for a newer Linux runtime)',
+            '启动时自动检查 Linux 更新',
+            'Automatically check for Linux updates on startup',
           )}
         </span>
       </label>
@@ -493,8 +497,8 @@ export function LinuxEnvironmentSection({ close }: PropsRuntime<'settings.sectio
           type="button"
           className="dsh-dev-btn"
           data-linux-action="check"
-          disabled={busy || !installed}
-          onClick={() => { void run(() => checkForUpdates(), 'checking') }}
+          disabled={busy}
+          onClick={() => { void run(queryLatestRelease, 'checking') }}
         >
           {tr('检查更新', 'Check for updates')}
         </button>

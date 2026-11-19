@@ -34,7 +34,11 @@ export async function fetchLatestManifest(releaseUrl, fetchImpl) {
     if (!match) throw new TypeError('releaseUrl must identify a GitHub repository or its latest-release page')
     apiUrl = `https://api.github.com/repos/${match[1]}/${match[2]}/releases/latest`
   }
-  const releaseResponse = await fetchImpl(apiUrl, { redirect: 'follow', headers: { Accept: 'application/vnd.github+json' } })
+  const releaseResponse = await fetchImpl(apiUrl, {
+    redirect: 'follow',
+    cache: 'no-store',
+    headers: { Accept: 'application/vnd.github+json', 'Cache-Control': 'no-cache' },
+  })
   assertResponse(releaseResponse, apiUrl)
   const release = await releaseResponse.json()
   if (!release || typeof release.tag_name !== 'string' || !Array.isArray(release.assets)) throw new TypeError('Invalid GitHub latest-release response')

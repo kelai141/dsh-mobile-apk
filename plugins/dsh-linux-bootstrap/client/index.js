@@ -308,8 +308,8 @@ export function LinuxEnvironmentSection({ linuxBootstrap }) {
         onChange: (event) => { void toggleAutoUpdate(event.currentTarget.checked) },
       }),
       tr(
-        '自动更新（已启用时，DSH Mobile 版本变化后检查较新的 Linux 运行时）',
-        'Automatic updates (after a DSH Mobile version change, check for a newer Linux runtime)',
+        '启动时自动检查 Linux 更新',
+        'Automatically check for Linux updates on startup',
       ),
     ),
     progress ? h(ProgressLine, { progress }) : null,
@@ -333,7 +333,7 @@ export function LinuxEnvironmentSection({ linuxBootstrap }) {
         {
           type: 'button',
           'data-linux-action': 'check',
-          disabled: busy || !installed,
+          disabled: busy,
           onClick: () => { void check() },
         },
         tr('检查更新', 'Check for updates'),

@@ -98,7 +98,7 @@ re-adding it, and only an explicit install can bring it back.
 | Method | Behaviour |
 |---|---|
 | `status()` | Current state object (see below). |
-| `checkForUpdates({ source })` | `'manual'` always queries the release channel and **only reports**; `'mobile-version-change'` is the host-triggered automatic path. |
+| `checkForUpdates({ source })` | `'manual'` always queries the release channel and reports the latest version. `'automatic'` is the host-triggered startup check. |
 | `install({ runtimeId, confirmed, activate })` | Requires `confirmed: true` **and** `activate: true`; downloads, verifies, stages and activates. |
 | `reinstall({ confirmed, activate })` | Same guarantees, forcing a re-stage of the pinned release. |
 | `uninstall({ confirmed })` | Requires `confirmed: true`; removes the runtime and the plugin scope. |
@@ -118,17 +118,12 @@ the host-architecture runtimes list.
 
 * Automatic updating is **off** until the user turns it on (`autoUpdateEnabled`
   defaults to `false`).
-* An automatic check runs only when all of these hold: a runtime is installed,
-  the plugin is still injected, the user enabled auto-update, and the current
-  **DSH Mobile app version differs** from the app version recorded when the
-  runtime was installed or last updated.
-* Each changed app version is checked at most once; toggling the preference,
-  restarting the app, regaining network, or a new release alone never triggers a
-  check.
-* A newer Linux release is installed automatically in that case; an equal or
-  older one is not reinstalled (downgrades are blocked).
-* A manual check is never downgraded to an install: it reports
-  `updateAvailable`, and the user confirms the install separately.
+* The Android host requests an automatic check at startup when the user has
+  opted in and the runtime is installed and enabled. Checks are limited to once
+  every 24 hours and report available updates in the panel.
+* Manual checks query upstream before or after installation. Device architecture
+  and verified assets govern installation. The Android panel prepares the
+  selected assets and the user confirms installation separately.
 
 ## Routes (for the shell adapter)
 
@@ -142,9 +137,9 @@ re-implementing the transaction:
 
 Mutating actions require `{"confirmed": true}` in the body.
 
-`POST …/auto-check` (source `mobile-version-change`) is provided as an **optional**
+`POST …/auto-check` (source `automatic`) is provided as an **optional**
 convenience: a host that triggers the automatic check when the `linuxBootstrap`
-service becomes ready calls `checkForUpdates({ source: 'mobile-version-change' })`
+service becomes ready calls `checkForUpdates({ source: 'automatic' })`
 directly and needs no route. Do not expose both paths; the duplicate would be a
 dead surface.
 
@@ -160,7 +155,7 @@ links to both plugin Release pages from the manifest.
 ## Verification status
 
 Package-level behaviour is covered by `node --test` (manifest shape, checksum
-rejection before activation, opt-in activation, per-app-version dedup,
+rejection before activation, opt-in activation, startup check deduplication,
 manual-check isolation, never-resurrect after manual removal, rollback, and the
 cutover/abort semantics of the runtime manager). Real-device installation, the
 Android `isInjected` implementation and the guest DNS path are tracked as open

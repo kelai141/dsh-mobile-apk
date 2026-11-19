@@ -9,7 +9,7 @@
  *
  * What it asserts:
  *   1. the vendored file set is exactly the upstream package minus `test/`, plus the two files we add;
- *   2. every upstream-faithful file still hashes to the recorded digest (EOL-normalized, so a CRLF
+ *   2. every reviewed vendor file still hashes to the recorded digest (EOL-normalized, so a CRLF
  *      checkout is not reported as drift);
  *   3. the two deliberate deviations are still present — an `exports`/`main` pointing at `./lib`
  *      (what the snapshot injector carries) and `private: true` with no `test` script;
@@ -33,7 +33,8 @@ const PACKAGE_DIR = join(ROOT, 'plugins', 'dsh-linux-bootstrap')
 const UPSTREAM_PACKAGE = 'packages/linux-bootstrap'
 
 /**
- * Upstream-faithful files (upstream source + client minus package.json, which we adapt).
+ * Pinned upstream base plus reviewed Android release-discovery and staging changes.
+ * Hashes cover the sources and tests actually copied into this repository.
  * Digests are over LF-normalized text: `core.autocrlf` would otherwise make the same commit hash
  * differently on Windows and Linux.
  */
@@ -41,17 +42,17 @@ const MANIFEST = {
   'test/rollback-trace-1528.test.mjs': 'ac891c9a72e73a94464181298e7c2a98451f24866139eb1dbe6ec61185e0cf23',
   'test/asset-bundle-rollback.test.mjs': '33371c99e467e6ae9a23b879ede6e0383fe6c6f6abb5d25669592eb636edf967',
   'test/install-offline-and-error-persist.test.mjs': '3c1d467ec28ab05e5115f6cc8cebfeed74fb7319386d89933c3dd231f4dd2b5d',
-  'test/upgrade-cleanup-and-data-preserve.test.mjs': 'a6aab101a2c5a5634dae2cdfe49894284cac6bb9b77c5e793b54467dcde0ea56',
-  'README.md': '9809a0991a5314ae7baafdae3a53147099b1dbc66100060519d157512732b8bb',
+  'test/upgrade-cleanup-and-data-preserve.test.mjs': 'e4436114462ca08fc731131fbbfb3e6fa0daa6ce8c89cf2efd55a020a6bb5707',
+  'README.md': 'e5e4814d9d5026861b5ea592c96660026feb64cfd3e49f0650c0efe4469e95eb',
   'client/api.js': 'e53e3a05f6c9922a9186101a88430fea231880356045289439434e61089ccc38',
   'client/assets.js': '9cbb67716f7d0b7d433d5e3a4d324b16f5121fd7eea64f77f71a4cc02708bc5c',
   'client/i18n.js': '77077f806bfd3f0124a04024de7614d12524474366fcae58ea1dcac3da287a50',
-  'client/index.js': '5c53f8eddad50e1092ce7f46c5efb19776f5bf0f9310e50c5c0df8299e60f5aa',
+  'client/index.js': 'd2347a0c96fed11d9521cac5bf470231c09629c66256bb10b31047f4e95c35db',
   'src/asset-bundle.js': '7f230cce7d74e1538e704377bbf74fa6519ee956f92a2d943bf722a65b010871',
-  'src/github.js': '8bf1bdac19fb17dc866087342b55714661e762124953bb6f697a4c87f04e70c3',
-  'src/index.js': '8f1701acbd9d21f608c40dc1253a10d05e7e221d6140be80590ce11e99eab6fa',
-  'src/manifest.js': '45b0655c3702bd236090776e3d1b276416ab5a643a2ed58b47b4343bf5c8b86c',
-  'src/routes.js': '678391176bcd81ba6cbbbab293a4731d07e37e99c51178d7605821eac6aa5bb9',
+  'src/github.js': 'eb94f71c3cb1199a9f87dda94f7cd4642dec5c90e158f188dca8ff3d1cd85caf',
+  'src/index.js': 'a1c6e5650bcc17864a7ab1515f0a768d92d35487c9b7f663a5221507830ac647',
+  'src/manifest.js': '169dc63151ad1deab8a73a2e1086be048f145cc59eea58280caf48d72471f2d4',
+  'src/routes.js': '5a975edf454e38b1dfcd9537c20c279ed2a32154bc8fc59f995a0c0932343795',
   'src/status.js': '494238e39094999e44105d1c56ca562f88ce3e65146bd3070806d4c82dd98f7b',
   'src/version.js': 'd0131f71b60ff38183070ddd3ef7142a98ae8a2cb54e2a57b725fa2e0d6b3636',
 }
@@ -170,8 +171,8 @@ function run({ quiet = false } = {}) {
   }
   if (unrecorded.length > 0) fail(`digest table not populated (${unrecorded.join(', ')}): run --print`)
   else if (drifted.length === 0) ok(`${Object.keys(MANIFEST).length} upstream-faithful files match their recorded digests`)
-  else fail(`vendored source drifted from the recorded upstream content: ${drifted.join(', ')}`
-    + ' — re-vendor from the pinned commit and update the table with --print, or revert the edit')
+  else fail(`vendored source drifted from the recorded vendor content: ${drifted.join(', ')}`
+    + ' — review the source change before updating the table with --print, or revert the edit')
 
   // 3. the deviations that make this copy chain-ready, and the provenance pin itself.
   const pkg = JSON.parse(readFileSync(join(PACKAGE_DIR, 'package.json'), 'utf8'))
@@ -214,7 +215,7 @@ function selfTest() {
   const controls = [
     {
       label: 'negative control: a digest mismatch is reported',
-      expect: /drifted from the recorded upstream content/,
+      expect: /drifted from the recorded vendor content/,
       run: () => {
         const saved = MANIFEST['src/index.js']
         MANIFEST['src/index.js'] = '0'.repeat(64)

@@ -22,7 +22,7 @@ export function createRouteHandlers(bootstrap) {
     check: write(() => bootstrap.checkForUpdates({ source: 'manual' })),
     // Host-triggered automatic check: not a user action, so no confirmation
     // prompt. Dedup and the app-version gate live inside the service.
-    autoCheck: () => bootstrap.checkForUpdates({ source: 'mobile-version-change' }),
+    autoCheck: () => bootstrap.checkForUpdates({ source: 'automatic' }),
     syncInjection: () => bootstrap.syncInjectionState(),
     install: write((body) => bootstrap.install({ runtimeId: body.runtimeId, confirmed: true, activate: true })),
     reinstall: write(() => bootstrap.reinstall({ confirmed: true, activate: true })),

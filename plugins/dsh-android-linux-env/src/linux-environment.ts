@@ -36,7 +36,6 @@ export interface BootstrapStatus {
   defaultRuntimeId?: string
   runtimes?: Array<{ id?: string; label?: string; architecture?: string; installed?: boolean }>
   latestReleaseVersion?: string | null
-  lastAutomaticCheckMobileVersion?: string | null
   lastError?: string | null
   plugins?: { bootstrap?: { releaseUrl?: string }; runtime?: { releaseUrl?: string } }
 }
@@ -44,7 +43,7 @@ export interface BootstrapStatus {
 export interface LinuxBootstrap {
   subscribe?(listener: (status: BootstrapStatus) => void): () => void
   status(): BootstrapStatus | Promise<BootstrapStatus>
-  checkForUpdates(options: { source: 'manual' | 'mobile-version-change' }): unknown | Promise<unknown>
+  checkForUpdates(options: { source: 'manual' | 'automatic' }): unknown | Promise<unknown>
   /** bootstrap 要求 confirmed:true 且 activate:true；runtimeId 缺席时按宿主 arch 取默认。 */
   install(options: { runtimeId?: string; confirmed?: boolean; activate?: boolean }): unknown | Promise<unknown>
   reinstall(options?: { confirmed?: boolean; activate?: boolean }): unknown | Promise<unknown>
@@ -365,25 +364,21 @@ export function normalizeLinuxStatus(status: BootstrapStatus) {
     operation: status.operation ?? undefined,
     ...((status.checkError ?? status.lastCheckError) ? { checkError: status.checkError ?? status.lastCheckError } : {}),
     error: status.error ?? status.lastError ??
-      (updateBlocked ? '此系统版本与当前应用不兼容，暂不能安装更新。' : undefined),
+      (updateBlocked ? '上游版本低于已安装版本，暂不能更新。' : undefined),
   }
 }
 
 /**
- * One attempt per app version, only when the system is still installed and still present.
- * The bootstrap owns persistence and dedupe; this gate only decides whether to ask at all.
+ * Start the opted-in check after the installed runtime has been restored.
+ * The bootstrap owns the persisted time-based cooldown.
  */
-export async function checkLinuxEnvironmentAfterMobileChange(bootstrap: LinuxBootstrap): Promise<void> {
+export async function checkLinuxEnvironmentOnStartup(bootstrap: LinuxBootstrap): Promise<void> {
   const status = await bootstrap.status()
   const installed = status.installed ?? Boolean(status.installedLinuxVersion)
-  const mobileVersion = status.mobileVersion ?? status.currentMobileVersion
   if ((status.autoUpdate ?? status.autoUpdateEnabled) !== true || !installed) return
   if (status.injectionActivated === false || status.enabled === false) return
-  if (!status.installedSystemMobileVersion || !mobileVersion) return
-  if (status.installedSystemMobileVersion === mobileVersion) return
-  if (status.lastAutomaticCheckMobileVersion === mobileVersion) return
   if (status.operation && status.operation !== 'idle') return
-  await bootstrap.checkForUpdates({ source: 'mobile-version-change' })
+  await bootstrap.checkForUpdates({ source: 'automatic' })
 }
 
 const ROUTES = [
