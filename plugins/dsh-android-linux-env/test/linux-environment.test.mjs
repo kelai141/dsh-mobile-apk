@@ -116,7 +116,7 @@ test('manifest route returns only the persisted manifest and never triggers a ch
   assert.deepEqual(empty.payload, { manifest: null })
 })
 
-test('missing bootstrap is explicit 503, blocked compatibility is visible, status is read-only', async () => {
+test('missing bootstrap is explicit 503, blocked downgrade is visible, status is read-only', async () => {
   assert.equal((await harness(undefined).call('status')).code, 200)
   const absent = harness(null)
   assert.equal((await absent.call('status')).code, 503)
@@ -124,7 +124,7 @@ test('missing bootstrap is explicit 503, blocked compatibility is visible, statu
   const h = harness(makeBootstrap({ updateBlocked: true, updateAvailable: true, latestReleaseVersion: '2.0.0' }))
   const response = await h.call('status')
   assert.equal(response.payload.availableVersion, undefined)
-  assert.match(response.payload.error, /不兼容/)
+  assert.match(response.payload.error, /低于已安装版本/)
   assert.deepEqual(h.bootstrap.calls, [])
 })
 
@@ -393,7 +393,7 @@ test('normalizer accepts the finalized Bionilux status shape and the earlier pro
   })
   assert.equal(legacy.installed, true)
   assert.equal(legacy.availableVersion, undefined)
-  assert.match(legacy.error, /不兼容/)
+  assert.match(legacy.error, /低于已安装版本/)
   assert.equal(legacy.mobileVersion, '0.14.8')
   assert.equal(legacy.autoUpdate, true)
   assert.deepEqual(normalizeLinuxStatus({}).mobileVersion, 'unknown', 'an absent version must not render blank')
