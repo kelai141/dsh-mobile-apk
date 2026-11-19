@@ -321,6 +321,8 @@ describe('C. 注入的可见返回控件', () => {
     expect(button.tagName).toBe('BUTTON')
     expect(button.type).toBe('button')
     expect(button.getAttribute('aria-label')).toBeTruthy()
+    expect(button.textContent).toBe('')
+    expect(button.querySelector('svg[aria-hidden="true"]')).not.toBeNull()
   })
 })
 

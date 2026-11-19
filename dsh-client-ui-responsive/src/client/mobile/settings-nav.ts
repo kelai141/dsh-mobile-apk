@@ -272,7 +272,7 @@ function sectionIcon(icon: SectionIcon): SVGSVGElement {
 }
 
 /** 画一个描边箭头；自带 SVG，不把图标库拉进插件。 */
-function strokeArrow(d: string): SVGSVGElement {
+export function strokeArrow(d: string): SVGSVGElement {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
   svg.setAttribute('viewBox', '0 0 18 18')
   svg.setAttribute('width', '18')
