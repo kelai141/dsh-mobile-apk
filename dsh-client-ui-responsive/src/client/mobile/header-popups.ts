@@ -15,6 +15,8 @@ const SUBAGENT_PANEL = '[data-subagent-panel]'
 const SUBAGENT_TRIGGER = '[data-subagent-action] button[aria-expanded="true"]'
 const VIEW_OPTIONS_MENU = '[role="menu"][class*="_viewOptionsMenu"]'
 const VIEW_OPTIONS_TRIGGER = '[data-sidebar-workspace-header] svg[data-icon="dsw-icon-sliders-two-outline-regular"]'
+const ACCOUNT_TRIGGER = '[data-slot="settings.launcher"] button[aria-haspopup="menu"][aria-expanded="true"]'
+const ACCOUNT_MENU = 'body > [role="menu"][data-anchor-side="top"][data-anchor-align="start"]'
 const MARKER = 'data-dsh-header-popup'
 const OWNED_STYLES = ['position', 'top', 'left', 'right', 'width', 'max-width', 'max-height', 'overflow-y', 'z-index'] as const
 const VIEWPORT_MARGIN = 12
@@ -42,6 +44,7 @@ export class HeaderPopups {
   private active: HTMLUListElement | null = null
   private catalog: HTMLElement | null = null
   private viewOptions: HTMLElement | null = null
+  private accountMenu: HTMLElement | null = null
   private original = new Map<string, StyleSnapshot>()
   private attached = false
   private scheduled = false
@@ -61,7 +64,7 @@ export class HeaderPopups {
   private readonly onScroll = (event: Event): void => {
     const affects = (panel: HTMLElement | null): boolean =>
       panel !== null && !(event.target instanceof Node && panel.contains(event.target))
-    if (this.active !== null || affects(this.catalog) || affects(this.viewOptions)) {
+    if (this.active !== null || affects(this.catalog) || affects(this.viewOptions) || affects(this.accountMenu)) {
       this.schedule()
     }
   }
@@ -99,8 +102,10 @@ export class HeaderPopups {
     this.restore()
     this.clearAnchoredStyles(this.catalog)
     this.clearAnchoredStyles(this.viewOptions)
+    this.clearAnchoredStyles(this.accountMenu)
     this.catalog = null
     this.viewOptions = null
+    this.accountMenu = null
   }
 
   private schedule(): void {
@@ -114,6 +119,7 @@ export class HeaderPopups {
       this.sync()
       this.syncCatalog()
       this.syncViewOptions()
+      this.syncAccountMenu()
     })
   }
 
@@ -194,13 +200,27 @@ export class HeaderPopups {
     this.viewOptions = this.syncAnchoredPopup(this.viewOptions, VIEW_OPTIONS_MENU, VIEW_OPTIONS_TRIGGER, 200, true)
   }
 
+  private syncAccountMenu(): void {
+    if (globalThis.CSS?.supports?.('top', 'anchor(bottom)')) return
+    const trigger = document.querySelector(ACCOUNT_TRIGGER)
+    const menus = trigger === null ? [] : [...document.querySelectorAll<HTMLElement>(ACCOUNT_MENU)]
+    const panel = menus.find(item => item.contains(document.activeElement)) ?? menus.at(-1) ?? null
+    this.accountMenu = this.placeAnchoredPopup(this.accountMenu, panel, trigger, undefined, false)
+  }
+
   private syncAnchoredPopup(
     previous: HTMLElement | null, panelSelector: string, triggerSelector: string, preferredWidth: number, alignEnd: boolean,
   ): HTMLElement | null {
-    const panel = document.querySelector<HTMLElement>(panelSelector)
+    return this.placeAnchoredPopup(previous, document.querySelector<HTMLElement>(panelSelector),
+      document.querySelector(triggerSelector)?.closest('button') ?? null, preferredWidth, alignEnd)
+  }
+
+  private placeAnchoredPopup(
+    previous: HTMLElement | null, panel: HTMLElement | null, trigger: Element | null,
+    preferredWidth: number | undefined, alignEnd: boolean,
+  ): HTMLElement | null {
     if (panel !== previous) this.clearAnchoredStyles(previous)
     if (panel === null) return null
-    const trigger = document.querySelector(triggerSelector)?.closest('button') ?? null
     const viewport = visibleViewport()
     if (trigger === null || viewport === null) {
       this.clearAnchoredStyles(panel)
@@ -225,7 +245,8 @@ export class HeaderPopups {
       (visual?.offsetLeft ?? 0) + (visual?.width || window.innerWidth),
       window.innerWidth - inset('--dsh-android-system-right'),
     ) - VIEWPORT_MARGIN
-    const width = Math.max(1, Math.min(preferredWidth, rightEdge - leftEdge))
+    const maxWidth = Math.max(1, rightEdge - leftEdge)
+    const width = Math.max(1, Math.min(preferredWidth ?? panel.getBoundingClientRect().width, maxWidth))
     const anchorLeft = alignEnd ? anchor.right - width : anchor.left
     const left = Math.max(leftEdge, Math.min(anchorLeft, rightEdge - width))
 
@@ -235,8 +256,8 @@ export class HeaderPopups {
     panel.style.setProperty('bottom', opensDown ? 'auto' : `${window.innerHeight - bottom}px`, 'important')
     panel.style.setProperty('left', `${left}px`, 'important')
     panel.style.setProperty('right', 'auto', 'important')
-    panel.style.setProperty('width', `${width}px`, 'important')
-    panel.style.setProperty('max-width', `${width}px`, 'important')
+    if (preferredWidth !== undefined) panel.style.setProperty('width', `${width}px`, 'important')
+    panel.style.setProperty('max-width', `${preferredWidth === undefined ? maxWidth : width}px`, 'important')
     panel.style.setProperty('max-height', `${Math.max(1, Math.min(560, Math.max(below, above)))}px`, 'important')
     return panel
   }

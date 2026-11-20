@@ -144,6 +144,30 @@ describe('手机顶栏内的后台任务浮窗', () => {
     expect(top + height).toBeLessThanOrEqual(588)
   })
 
+  it('anchors the footer account menu above its open trigger on legacy WebViews', async () => {
+    document.body.innerHTML = '<div data-slot="settings.launcher"><button aria-haspopup="menu" aria-expanded="true"></button></div>' +
+      '<div role="menu" data-anchor-side="top" data-anchor-align="start"><button>Settings</button></div>'
+    const trigger = document.querySelector<HTMLButtonElement>('[aria-expanded="true"]')!
+    const menu = document.querySelector<HTMLElement>('[role="menu"]')!
+    vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({ left: 8, right: 220, top: 548, bottom: 580 } as DOMRect)
+    vi.spyOn(menu, 'getBoundingClientRect').mockReturnValue({ width: 124 } as DOMRect)
+    vi.stubGlobal('visualViewport', Object.assign(new EventTarget(), { width: 360, height: 600, offsetTop: 0, offsetLeft: 0 }))
+    popup = new HeaderPopups()
+    popup.attach()
+    try {
+      await flush()
+      expect(menu.style.top).toBe('auto')
+      expect(menu.style.bottom).toBe(`${window.innerHeight - 543}px`)
+      expect(menu.style.left).toBe('12px')
+      expect(menu.style.width).toBe('')
+      trigger.setAttribute('aria-expanded', 'false')
+      await flush()
+      expect(menu.style.bottom).toBe('')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('忽略不属于后台任务的列表', async () => {
     const { fold, list } = mountMenu()
     list.setAttribute('aria-label', 'Agent Team')
