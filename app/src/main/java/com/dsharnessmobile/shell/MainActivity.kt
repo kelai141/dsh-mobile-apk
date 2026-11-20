@@ -700,7 +700,9 @@ class MainActivity : ComponentActivity() {
     val imeAnimations = mutableSetOf<WindowInsetsAnimationCompat>()
     fun updateWebIme(bottom: Int) {
       imeLayout.update(bottom)
-      webImeBottomInset = pxToCssPx(bottom, resources.displayMetrics.density)
+      val cssBottom = pxToCssPx(bottom, resources.displayMetrics.density)
+      if (webImeBottomInset == cssBottom) return
+      webImeBottomInset = cssBottom
       scheduleWebInsetsPush()
     }
     // Already accounted for in the WebView's layout, including on WebViews
@@ -712,6 +714,7 @@ class MainActivity : ComponentActivity() {
         .build())
     }
     ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+      imeLayout.refreshWindowBounds()
       val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
       val cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
       val mandatoryGestures = insets.getInsets(WindowInsetsCompat.Type.mandatorySystemGestures()).bottom
@@ -2159,12 +2162,11 @@ class MainActivity : ComponentActivity() {
           "px';var ime='" + webImeBottomInset +
           "px';var left='" + webSystemLeftInset +
           "px';var right='" + webSystemRightInset +
-          "px';root.style.setProperty(" +
-          "'--dsh-android-system-top',top);root.style.setProperty(" +
-          "'--dsh-android-system-bottom',system);root.style.setProperty(" +
-          "'--dsh-android-navbar-bottom',navbar);root.style.setProperty('--dsh-android-ime-bottom',ime);" +
-          "root.style.setProperty('--dsh-android-system-left',left);" +
-          "root.style.setProperty('--dsh-android-system-right',right);" +
+          "px';var style=root.style;function set(name,value){" +
+          "if(style.getPropertyValue(name)!==value)style.setProperty(name,value);}" +
+          "set('--dsh-android-system-top',top);set('--dsh-android-system-bottom',system);" +
+          "set('--dsh-android-navbar-bottom',navbar);set('--dsh-android-ime-bottom',ime);" +
+          "set('--dsh-android-system-left',left);set('--dsh-android-system-right',right);" +
           "root.toggleAttribute('data-dsh-ime',parseFloat(ime)>0);" +
           "})()"
       view.evaluateJavascript(insetsScript, null)

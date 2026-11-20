@@ -19,11 +19,11 @@
  * 手势模式下没有可遮挡的栏，交互面不该凭空留出一条纯背景带。
  * 壳侧变量缺失时（桌面/旧壳）回落到保守值，再回落到 0px。
  *
- * The Android host resizes the WebView to the keyboard edge. The IME marker
- * switches the hero alignment and removes the redundant navigation padding.
+ * Android resizes the WebView to the keyboard edge. The composer retains
+ * only the part of the navigation padding still outside the IME.
  *
  * #1782（用户真机 V2425A 1260x2800）：**键盘展开 + 输入框里有附件**时，输入框被抬到
- * 特别高。真因不在 IME 通道（那条按设计不进这里，实测 ime=0px 时同样复现），而在
+ * 特别高。实测 ime=0px 时同样复现，问题出在
  * seat 与它的滚动容器之间的高度关系：
  *   - 上游 `scrollBody` 是 `flex:1; min-height:0; overflow-y:auto` 的滚动盒；
  *   - seat 是 `flex:none` + `position:sticky; bottom:0`，**没有任何高度上限**；
@@ -38,29 +38,25 @@
  */
 export const COMPOSER_INSETS_CSS: string = `
 [data-composer-seat] [class*='composerStack'] {
-  padding-bottom: max(
-    env(safe-area-inset-bottom, 0px),
-    var(--dsh-android-navbar-bottom, var(--dsh-android-system-bottom, 0px))
-  );
+  padding-bottom: max(0px, calc(
+    max(env(safe-area-inset-bottom, 0px),
+        var(--dsh-android-navbar-bottom, var(--dsh-android-system-bottom, 0px)))
+    - var(--dsh-composer-ime-overlap, 0px)
+  ));
 }
 
 html[data-dsh-ime] [data-composer-seat] [class*='composerStack'] {
-  padding-bottom: 0;
+  --dsh-composer-ime-overlap: var(--dsh-android-ime-bottom, 0px);
 }
 
-/* The two spacers keep the hero centered in the original viewport until
-   the moving keyboard reaches it. The bottom spacer then stays at zero. */
-html[data-dsh-ime] [data-content-phase='hero'] [data-conversation-scroll] {
+/* Equal spacers center the hero throughout the viewport resize.
+   Both reach zero in short viewports, keeping overflow scrollable. */
+html [data-conversation-content][data-content-phase='hero'] > [data-conversation-scroll] {
   justify-content: flex-start;
 }
 
-html[data-dsh-ime] [data-content-phase='hero'] [data-conversation-scroll]::before {
-  content: '';
-  flex: 1 1 var(--dsh-android-ime-bottom, 0px);
-  min-height: 0;
-}
-
-html[data-dsh-ime] [data-content-phase='hero'] [data-conversation-scroll]::after {
+html [data-conversation-content][data-content-phase='hero'] > [data-conversation-scroll]::before,
+html [data-conversation-content][data-content-phase='hero'] > [data-conversation-scroll]::after {
   content: '';
   flex: 1 0 0px;
 }

@@ -15,9 +15,22 @@ internal class MainWebImeLayout(
   private val location = IntArray(2)
   private val visibleFrame = Rect()
   private var imeBottom = 0
+  private var windowHeight = 0
 
   init {
-    root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> layout() }
+    root.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+      if (left != oldLeft || top != oldTop || right != oldRight || bottom != oldBottom) {
+        refreshWindowBounds()
+        layout()
+      }
+    }
+  }
+
+  // Window metrics can query WindowManager. Refresh on bounds/insets changes, outside IME progress.
+  fun refreshWindowBounds() {
+    if (Build.VERSION.SDK_INT >= 30) {
+      windowHeight = window.windowManager.currentWindowMetrics.bounds.height()
+    }
   }
 
   fun update(bottom: Int) {
@@ -33,7 +46,7 @@ internal class MainWebImeLayout(
         // Metrics are window-local here. The root may already have been
         // partly resized by the system, especially in freeform windows.
         root.getLocationInWindow(location)
-        val keyboardTop = window.windowManager.currentWindowMetrics.bounds.height() - imeBottom
+        val keyboardTop = windowHeight - imeBottom
         remainingImeOverlap(location[1] + root.height, keyboardTop, imeBottom)
       }
       else -> {
