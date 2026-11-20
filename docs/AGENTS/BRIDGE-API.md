@@ -266,8 +266,8 @@ bootstrap 调用 `linuxPluginHost.install({directory,entry='lib/index.js',config
 
 | JS 桥方法（`androidBridge`） | 语义 |
 |---|---|
-| `linuxAssetPrepare(specJson)` | 入参为资产清单 `{url, sha256, size, kind?, source?}`；落点由壳侧按摘要推导（`staging/<sha256>/`）。立即返回准备结果；来源或清单不合规时拒绝。 |
-| `linuxAssetPrepareStatus()` | 读取当前资产阶段、失败码与详情、暂存路径、字节数、总大小及速度。 |
+| `linuxAssetPrepare(specJson)` | Accepts `{url, sha256, size, kind, source?}` and an optional `rootfsCandidate: true` for rootfs. The shell derives the staging location and returns `{ok, phase}`. Candidate preparation also returns a shell-generated `rootfsCandidate` ID. |
+| `linuxAssetPrepareStatus()` | Returns `phase`, `code`, `detail`, `stagedPath`, `bytes`, `size`, `stage`, and `speed`. A candidate reports its `rootfsCandidate` ID and exposes no staging path. |
 | `linuxAssetPause()` | 请求暂停当前资产下载；只在下载阶段接受，校验与解包期间返回 `false`。 |
 | `linuxAssetResume()` | 使用当前资产原清单、摘要、大小及来源恢复下载，并复用 `.part` 文件中的已接收字节。 |
 | `linuxInstallJob(action, payload)` | `start` 校验并原子持久化安装任务后排队；`status` 返回任务与当前资产进度；`pause` 请求暂停；`retry` 恢复暂停或失败任务。任务文件为 `linux-environment/install-job.json`。 |
@@ -279,6 +279,8 @@ bootstrap 调用 `linuxPluginHost.install({directory,entry='lib/index.js',config
 **职责边界**：APK 负责资产下载、哈希/大小校验与安全解包；`linuxAssetIO.downloadAsset` 返回宿主暂存归档，`extractArchive` 将对应解包树复制到 bootstrap 暂存槽。bootstrap 按 manifest 自行复算归档摘要与大小，校验解包体量、包名和入口，再决定复用或重建，最终负责版本状态、安装事务、落位和 runtime 激活。任一暂存资产缺失或不符合清单时安装失败，不会激活不完整 runtime。
 
 自动更新准备由 APK 任务队列执行，bootstrap 管理偏好与更新判定。EngineService 启动时恢复待处理任务并检查自动更新条件；更新沿用已安装 runtimeId、manifest 清单和任务记录的下载来源。任务阶段、资产进度和失败原因通过 `linuxInstallJob('status', null)` 回读。bootstrap 依据持久化冷却时间执行启动检查；APK 或 Release 更新不会自动启用 Linux 插件。
+
+The client supplies the candidate ID to the authenticated `install` route when the selected runtime advertises candidate handoff. The engine re-verifies the candidate inside that transaction. See [the rootfs candidate handoff contract](LINUX-RUNTIME-CONTRACT.md#rootfs-candidate-handoff).
 
 页面状态由 `normalizeLinuxStatus` 映射，同时接受 Bionilux 定稿字段与此前提案字段；其中两条插件 `releaseUrl` 来自 bootstrap 状态（`pluginReleaseUrls` 或 `plugins.*.releaseUrl`），不拼接默认最新版本。Linux rootfs 是 glibc 运行支持，不是安全沙箱；guest root 不等于 Android root；Termux/Bionic Bash 与 Debian/glibc Linux Bash 分开展示，共享 glibc Node 不替换原有 Termux Node。已安装但 runtime 被手工移除时，页面显式显示「自动更新已停用」并要求重新放回并启用，而不是静默停更。内部 bootstrap 成品接线及真实安装验收状态见 `known-gaps.md`。
 

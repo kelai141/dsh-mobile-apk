@@ -1,0 +1,83 @@
+diff --git a/scripts/prepare-android-rootfs.sh b/scripts/prepare-android-rootfs.sh
+--- a/scripts/prepare-android-rootfs.sh
++++ b/scripts/prepare-android-rootfs.sh
+@@ -132,2 +132,4 @@
+-if ! guest /usr/sbin/ldconfig.distrib --version >/dev/null 2>&1; then
+-    die 'the diverted ldconfig does not run inside the guest'
++helper=${BIONILUX_NATIVE_LIB_DIR:?}/libbionilux-ldconfig.so
++[ -f "$helper" ] && [ -x "$helper" ] || die 'packaged ldconfig helper missing'
++if ! "$helper" --version >/dev/null 2>&1; then
++    die 'the packaged ldconfig helper does not run'
+diff --git a/scripts/ldconfig-android.sh b/scripts/ldconfig-android.sh
+--- a/scripts/ldconfig-android.sh
++++ b/scripts/ldconfig-android.sh
+@@ -1 +1 @@
+-#!/bin/sh
++#!/system/bin/sh
+@@ -14,0 +15 @@
++export PATH=/system/bin
+@@ -63,0 +65,3 @@
++
++distrib=${BIONILUX_NATIVE_LIB_DIR:?}/libbionilux-ldconfig.so
++[ -f "$distrib" ] && [ -x "$distrib" ] || die 'packaged ldconfig helper missing'
+@@ -154 +158,2 @@
+-lockdir="$rootfs/var/lock/bionilux-ldconfig.lock"
++lock_root="$rootfs/run/lock"
++lockdir="$lock_root/bionilux-ldconfig.lock"
+@@ -173 +178,7 @@
+-mkdir -p "$rootfs/var/lock" 2>/dev/null || die "cannot create $rootfs/var/lock"
++mkdir -p "$lock_root" 2>/dev/null || die "cannot create $lock_root"
++lock_root_real=$(resolve_path "$lock_root") || die "cannot resolve $lock_root"
++case $lock_root_real in
++    "$rootfs"/*) ;;
++    *) die "lock directory escapes the rootfs: $lock_root_real" ;;
++esac
++lockdir="$lock_root_real/bionilux-ldconfig.lock"
+diff --git a/modules/manager.js b/modules/manager.js
+--- a/modules/manager.js
++++ b/modules/manager.js
+@@ -1118,5 +1118,5 @@
+-      '[ -n "$BASH_VERSION" ]',
+-      '[ "$(/usr/bin/id -u)" = 0 ]',
+-      '/usr/bin/uname -m >/dev/null',
+-      '/usr/bin/ls / >/dev/null',
+-      'node --version >/dev/null',
++      "[ -n \"$BASH_VERSION\" ] || { printf '%s\\n' 'runtime probe failed at Bash version' >&2; exit 1; }",
++      "[ \"$(/usr/bin/id -u)\" = 0 ] || { printf '%s\\n' 'runtime probe failed at guest identity command substitution' >&2; exit 1; }",
++      "/usr/bin/uname -m >/dev/null || { printf '%s\\n' 'runtime probe failed at guest uname' >&2; exit 1; }",
++      "/usr/bin/ls / >/dev/null || { printf '%s\\n' 'runtime probe failed at guest root directory' >&2; exit 1; }",
++      "node -e 'if (process.platform !== \"linux\") process.exit(1)' >/dev/null || { printf '%s\\n' 'runtime probe failed at Node JavaScript' >&2; exit 1; }; npm --version >/dev/null || { printf '%s\\n' 'runtime probe failed at npm' >&2; exit 1; }",
+@@ -1412 +1412,7 @@
+-    if (this.nativeLibDir) environment.BIONILUX_NATIVE_LIB_DIR = this.nativeLibDir;
++    if (this.nativeLibDir) {
++      environment.BIONILUX_NATIVE_LIB_DIR = this.nativeLibDir;
++      if (process.platform === 'android' && this.arch === 'x64') {
++        environment.BIONILUX_HOST_PATHS = path.join(this.nativeLibDir, 'libbionilux-ldconfig.so') + ':/system/bin/sh';
++        environment.GLIBC_TUNABLES = 'glibc.pthread.rseq=0';
++      }
++    }
+@@ -1556,3 +1562,16 @@
+-    const libcPatch = await ensureGuestLibcSeccompPatch(instance.rootfs, { architecture: this.arch });
+-    if (libcPatch.status === 'unsupported') {
+-      throw new Error('guest libc seccomp patch failed: ' + libcPatch.reason);
++    if (this.arch !== 'x64') throw new Error('This diagnostic fixture requires x86_64');
++    const originalDigest = '9792e3cbb541c8f44c7acf5f14f4022ea62998ecc787d326bed4d8b6547dfd92';
++    const compatibleDigest = '@COMPAT_LIBC_SHA256@';
++    const libc = path.join(instance.rootfs, 'usr/lib/x86_64-linux-gnu/libc.so.6');
++    const realRootfs = await fs.realpath(instance.rootfs);
++    const realLibc = await fs.realpath(libc);
++    if (realLibc !== path.join(realRootfs, 'usr/lib/x86_64-linux-gnu/libc.so.6')) {
++      throw new Error('Unexpected libc target in diagnostic rootfs');
++    }
++    const hash = data => createHash('sha256').update(data).digest('hex');
++    const currentDigest = hash(await fs.readFile(realLibc));
++    if (currentDigest !== compatibleDigest) {
++      if (currentDigest !== originalDigest) throw new Error('Unexpected libc in diagnostic rootfs');
++      const compatible = await fs.readFile(path.join(instance.backend, 'android-x86_64/libc.so.6'));
++      if (hash(compatible) !== compatibleDigest) throw new Error('Invalid Android compatibility libc');
++      await writeFileAtomic(realLibc, compatible);
+@@ -2040,0 +2060,4 @@
++    if (process.platform === 'android' && this.arch === 'x64' && paths.nativeLibDir) {
++      hostPaths.push(path.join(paths.nativeLibDir, 'libbionilux-ldconfig.so'), '/system/bin/sh');
++      environment.GLIBC_TUNABLES = 'glibc.pthread.rseq=0';
++    }

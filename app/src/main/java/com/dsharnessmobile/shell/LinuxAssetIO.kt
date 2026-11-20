@@ -3,9 +3,11 @@ package com.dsharnessmobile.shell
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.Proxy
 import java.net.URL
+import java.nio.file.Files
 
 /**
  * Linux 环境资产 IO：宿主侧「下载 + 校验 + 安全解包」原语（0.15.0）。
@@ -27,7 +29,7 @@ import java.net.URL
  * 的来源面要求是「只认本仓 Releases 的 https 直连」，两者是相反的策略。这里只沿用它的
  * 连接超时/逐跳重定向/tmp + 原子 rename 形态，并把主机白名单改成逐跳强制。
  *
- * 绝不 shell out：解包全程走 commons-compress + tukaani xz 的进程内解码器。
+ * Tar extraction and XZ decoding run inside the host process.
  */
 internal object LinuxAssetIO {
 
@@ -339,16 +341,18 @@ internal object LinuxAssetIO {
     if (destCanon != rootCanon && !destCanon.startsWith(rootCanon + File.separator)) {
       return Failure(CODE_DESTINATION_ESCAPE, "下载目标越出允许根：${destination.absolutePath}")
     }
-    val tmp = File(destination.parentFile, destination.name + ".tmp")
+    val tmp = try {
+      val parent = destination.absoluteFile.parentFile ?: throw IOException("Asset has no parent directory")
+      Files.createDirectories(parent.toPath())
+      if (opener === HttpOpener) File(parent, destination.name + ".tmp")
+      else Files.createTempFile(parent.toPath(), ".${destination.name}-", ".tmp").toFile()
+    } catch (e: IOException) {
+      return Failure(CODE_DOWNLOAD_FAILED, e.message ?: e.javaClass.simpleName)
+    }
     try {
-      destination.parentFile?.mkdirs()
-      if (java.nio.file.Files.isSymbolicLink(tmp.toPath())) tmp.delete()
+      if (Files.isSymbolicLink(tmp.toPath())) Files.delete(tmp.toPath())
       val read = if (opener === HttpOpener) {
-        val sources = when {
-          fetchUrl != spec.url || spec.source == "official" -> listOf(fetchUrl)
-          spec.source == "auto" -> HttpOpener.preferredMirrors(fetchUrl) + fetchUrl
-          else -> listOf(MIRRORS.getValue(spec.source) + fetchUrl)
-        }
+        val sources = downloadSources(spec, fetchUrl)
         var count = -1L
         for (source in sources) {
           if (paused()) return Failure(CODE_PAUSED, "下载已暂停")
@@ -359,7 +363,6 @@ internal object LinuxAssetIO {
         }
         count
       } else {
-        tmp.delete()
         opener.fetch(fetchUrl, tmp, MAX_DOWNLOAD_BYTES)
       }
       if (paused()) return Failure(CODE_PAUSED, "下载已暂停")
@@ -377,13 +380,8 @@ internal object LinuxAssetIO {
         if (code == CODE_DIGEST_MISMATCH) tmp.delete()
         return Failure(code, detail)
       }
-      // #1057：校验通过后仍**读回已验证的字节**，再交给唯一原子写入口发布。
-      // 旧实现是「先 delete(destination) 再 rename，失败退 copyTo」——那两步都不是原子的：
-      // delete 后被杀就没有资产，copyTo 覆盖则会留下半份 tar.xz。
-      // 代价是这份资产（压缩包，量级几十 MB）要多读一次；换来的是「要发布的字节 == 已验证的字节」，
-      // 而不是「发布另一次写出的字节」。
-      java.io.RandomAccessFile(tmp, "rw").use { it.fd.sync() }
-      if (!AtomicFileReplace.publish(tmp, destination)) return Failure(CODE_DOWNLOAD_FAILED, "下载文件无法发布")
+      // Publish the same verified file. The atomic writer syncs it before the rename.
+      AtomicFileReplace.publishWritten(tmp, destination)
       return null
     } catch (e: Exception) {
       return Failure(CODE_DOWNLOAD_FAILED, e.message ?: e.javaClass.simpleName)
@@ -392,13 +390,23 @@ internal object LinuxAssetIO {
     }
   }
 
+  fun downloadSources(spec: Spec, fetchUrl: String): List<String> = when {
+    fetchUrl != spec.url || spec.source == "official" -> listOf(fetchUrl)
+    spec.source == "auto" -> HttpOpener.preferredMirrors(fetchUrl) + fetchUrl
+    else -> listOf(MIRRORS.getValue(spec.source) + fetchUrl)
+  }
+
   /** 下载器接口（单测注入内存实现，生产走 https）。返回实读字节数，失败返回 -1。 */
   fun interface Opener {
     fun fetch(url: String, dest: File, maxBytes: Long): Long
   }
 
+  interface RangeOpener : Opener {
+    fun fetchRange(url: String, total: Long, start: Long, bytes: Long, output: OutputStream): Boolean
+  }
+
   /** 生产下载器：https + 主机白名单逐跳校验 + 有界流式落盘。 */
-  object HttpOpener : Opener {
+  object HttpOpener : RangeOpener {
     @Volatile private var preferred: Pair<Long, List<String>>? = null
 
     fun preferredMirrors(url: String): List<String> {
@@ -447,6 +455,32 @@ internal object LinuxAssetIO {
       }
     }
 
+    override fun fetchRange(url: String, total: Long, start: Long, bytes: Long, output: OutputStream): Boolean {
+      if (total !in 1..MAX_DOWNLOAD_BYTES || bytes !in 1..total || start !in 0..(total - bytes)) return false
+      val last = start + bytes - 1
+      return request(url, "bytes=$start-$last") { conn ->
+        if (conn.responseCode != 206 || conn.getHeaderField("Content-Range") != "bytes $start-$last/$total" ||
+            conn.contentLengthLong != bytes || conn.contentEncoding?.equals("identity", ignoreCase = true) == false) {
+          return@request -1L
+        }
+        copyBounded(conn, output, bytes)
+      } == bytes
+    }
+
+    private fun copyBounded(conn: HttpURLConnection, output: OutputStream, maxBytes: Long): Long =
+      conn.inputStream.use { input ->
+        val buffer = ByteArray(128 * 1024)
+        var count = 0L
+        while (true) {
+          val n = input.read(buffer)
+          if (n < 0) break
+          count += n
+          if (count > maxBytes) throw IOException("Asset response exceeds $maxBytes bytes")
+          output.write(buffer, 0, n)
+        }
+        count
+      }
+
     override fun fetch(url: String, dest: File, maxBytes: Long): Long =
       transfer(url, dest, maxBytes, null, { false }, {})
 
@@ -456,20 +490,50 @@ internal object LinuxAssetIO {
     private fun transfer(
       url: String, dest: File, maxBytes: Long, size: Long?, paused: () -> Boolean, progress: (Long) -> Unit,
     ): Long {
-      var current = url
-      var hops = 0
-      val mirrorHost = MIRRORS.values.firstOrNull { url.startsWith(it) }?.let { URL(it).host }
       if (size != null && dest.length() > size) dest.delete()
       var offset = if (size != null) dest.length() else 0L
       if (size != null && offset == size && dest.isFile) return offset
       progress(offset)
+      return request(url, if (offset > 0) "bytes=$offset-" else null) { conn ->
+        val code = conn.responseCode
+        when (code) {
+          200 -> offset = 0
+          206 -> {
+            val range = conn.getHeaderField("Content-Range") ?: return@request -1L
+            if (offset == 0L || size == null || range != "bytes $offset-${size - 1}/$size") return@request -1L
+          }
+          else -> return@request -1L
+        }
+        var read = offset
+        java.io.FileOutputStream(dest, offset > 0).use { out ->
+          conn.inputStream.use { input ->
+            val buf = ByteArray(128 * 1024)
+            while (true) {
+              if (paused()) return@request -1L
+              val n = input.read(buf)
+              if (n < 0) break
+              read += n
+              if (read > maxBytes) throw IOException("下载体量超过上限 $maxBytes")
+              out.write(buf, 0, n)
+              progress(read)
+            }
+          }
+        }
+        read
+      }
+    }
+
+    private inline fun request(url: String, range: String?, accept: (HttpURLConnection) -> Long): Long {
+      var current = url
+      var hops = 0
+      val mirrorHost = MIRRORS.values.firstOrNull { url.startsWith(it) }?.let { URL(it).host }
       while (true) {
         val conn = URL(current).openConnection(Proxy.NO_PROXY) as HttpURLConnection
         conn.connectTimeout = 10_000
         conn.readTimeout = 30_000
         conn.instanceFollowRedirects = false
         conn.setRequestProperty("Accept-Encoding", "identity")
-        if (offset > 0) conn.setRequestProperty("Range", "bytes=$offset-")
+        if (range != null) conn.setRequestProperty("Range", range)
         try {
           val code = conn.responseCode
           if (code in 300..399) {
@@ -489,30 +553,7 @@ internal object LinuxAssetIO {
             current = resolved
             continue
           }
-          when (code) {
-            200 -> offset = 0
-            206 -> {
-              val range = conn.getHeaderField("Content-Range") ?: return -1
-              if (offset == 0L || size == null || range != "bytes $offset-${size - 1}/$size") return -1
-            }
-            else -> return -1
-          }
-          var read = offset
-          java.io.FileOutputStream(dest, offset > 0).use { out ->
-            conn.inputStream.use { input ->
-              val buf = ByteArray(128 * 1024)
-              while (true) {
-                if (paused()) return -1
-                val n = input.read(buf)
-                if (n < 0) break
-                read += n
-                if (read > maxBytes) throw IOException("下载体量超过上限 $maxBytes")
-                out.write(buf, 0, n)
-                progress(read)
-              }
-            }
-          }
-          return read
+          return accept(conn)
         } finally {
           conn.disconnect()
         }

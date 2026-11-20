@@ -253,14 +253,14 @@ class AndroidBridge(
   fun checkEngine(): String = trusted { EngineProbe.check().toString() }
 
   /**
-   * Linux 环境资产准备（实验性内部插件，默认不启用）。
-   *
-   * 只接资产清单（`url`/`sha256`/`size`），落点由宿主按摘要自行推导；除非 Linux 环境在场
-   * （根目录 + bootstrap 状态文件）一律拒绝，故它不会变成通用下载器。立即返回，结果用
-   * [linuxAssetPrepareStatus] 轮询 —— 下载不得阻塞 WebView 的 JS 线程。
+   * Prepare assets for an enabled Linux environment using manifest fields and host-owned paths.
+   * A rootfs update can reuse verified archive bytes from the app cache. Poll linuxAssetPrepareStatus for the result.
    */
   @JavascriptInterface
-  fun linuxAssetPrepare(specJson: String): String = trusted { LinuxAssetPrepare.start(ShellAppContext.get()?.filesDir, specJson) }
+  fun linuxAssetPrepare(specJson: String): String = trusted {
+    val context = ShellAppContext.get()
+    LinuxAssetPrepare.start(context?.filesDir, specJson, context?.cacheDir)
+  }
 
   @JavascriptInterface
   fun linuxAssetPrepareStatus(): String = trusted { LinuxAssetPrepare.status() }

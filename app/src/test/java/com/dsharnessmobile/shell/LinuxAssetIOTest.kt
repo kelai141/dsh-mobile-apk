@@ -3,6 +3,7 @@ package com.dsharnessmobile.shell
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.Paths
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.security.MessageDigest
@@ -354,7 +355,7 @@ class LinuxAssetIOTest {
       val okOpener = LinuxAssetIO.Opener { _, target, _ -> target.writeBytes(body); body.size.toLong() }
       assertNull(LinuxAssetIO.download(spec, dest, env, okOpener))
       assertTrue(dest.isFile)
-      assertFalse("tmp 不得留下", File(dest.parentFile, dest.name + ".tmp").exists())
+      assertEquals(listOf(dest.name), dest.parentFile.list()!!.toList())
 
       // 负控：摘要不符 → 判红且不发布
       val wrongDigest = spec.copy(sha256 = "1".repeat(64))
@@ -362,7 +363,7 @@ class LinuxAssetIOTest {
       val digestFailure = LinuxAssetIO.download(wrongDigest, digestDest, env, okOpener)
       assertEquals(LinuxAssetIO.CODE_DIGEST_MISMATCH, digestFailure!!.code)
       assertFalse("校验失败不得留下资产", digestDest.exists())
-      assertFalse("校验失败不得留下 tmp", File(digestDest.parentFile, digestDest.name + ".tmp").exists())
+      assertEquals(listOf(dest.name), dest.parentFile.list()!!.toList())
 
       // 负控：字节数不符（下载器多写一个字节）→ 判红且不发布
       val sizeDest = File(env, "cache/b.tar.xz")
@@ -415,7 +416,7 @@ class LinuxAssetIOTest {
       val failure = LinuxAssetIO.download(spec, dest, env, throwing)
       assertEquals(LinuxAssetIO.CODE_DOWNLOAD_FAILED, failure!!.code)
       assertFalse("异常路径不得留下资产", dest.exists())
-      assertFalse("异常路径不得留下 tmp", File(dest.parentFile, dest.name + ".tmp").exists())
+      assertTrue(dest.parentFile.list()!!.isEmpty())
     } finally {
       SnapshotFs.deletePath(root)
     }
@@ -473,8 +474,8 @@ class LinuxAssetIOTest {
         "rootfs 的绝对 guest 链接必须保留且不得被宿主解引用",
         failure,
       )
-      assertEquals("usr/bin", Files.readSymbolicLink(File(dest, "bin").toPath()).toString())
-      assertEquals("/bin/bash", Files.readSymbolicLink(File(dest, "usr/local/bin/sh").toPath()).toString())
+      assertEquals(Paths.get("usr/bin"), Files.readSymbolicLink(File(dest, "bin").toPath()))
+      assertEquals(Paths.get("/bin/bash"), Files.readSymbolicLink(File(dest, "usr/local/bin/sh").toPath()))
       assertTrue(File(dest, "usr/bin/bash").isFile)
     } finally {
       SnapshotFs.deletePath(root)

@@ -1,0 +1,10 @@
+diff --git a/deps/uv/src/unix/linux.c b/deps/uv/src/unix/linux.c
+--- a/deps/uv/src/unix/linux.c
++++ b/deps/uv/src/unix/linux.c
+@@ -455,5 +455,5 @@
+ static int uv__use_io_uring(uint32_t flags) {
+-#if defined(__ANDROID_API__)
++#if 1 /* Linux guest on Android */
+   return 0;  /* Possibly available but blocked by seccomp. */
+ #elif defined(__arm__) && __SIZEOF_POINTER__ == 4
+   /* See https://github.com/libuv/libuv/issues/4158. */

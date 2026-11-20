@@ -8,7 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -405,6 +405,73 @@ test('the JS staging derivation agrees with the Kotlin publisher verbatim', asyn
 })
 
 // ── 默认不启用：本模块不制造任何启用 ────────────────────────────────────────
+
+async function stageRootfsCandidate(filesDir) {
+  const root = linuxEnvironmentRoot(filesDir)
+  const id = '12345678-1234-4123-8123-123456781234'
+  const candidate = join(root, 'rootfs-candidates', id)
+  const attempt = join(root, 'runtime', '.staging', 'install-test', 'instance')
+  const tree = join(candidate, 'unpacked')
+  const archive = Buffer.from('Rootfs candidate archive')
+  const asset = { url: 'https://github.com/kelai141/dsh-bionilux/releases/download/v1.2.0/rootfs.tar.xz',
+    sha256: createHash('sha256').update(archive).digest('hex'), size: archive.length }
+  await mkdir(attempt, { recursive: true })
+  await mkdir(tree, { recursive: true })
+  await writeFile(join(candidate, 'receipt.json'), JSON.stringify({ ...asset, id, kind: 'rootfs', createdAt: Date.now() }))
+  await writeFile(join(candidate, RETAINED_ARCHIVE), archive)
+  await writeFile(join(tree, 'rootfs-marker'), 'candidate')
+  return { root, id, candidate, tree, asset, destination: join(attempt, 'rootfs') }
+}
+
+test('rootfs handoff moves the owned tree once and preserves shared staging', async () => {
+  const filesDir = await tempFilesDir()
+  try {
+    const prepared = await stageRootfsCandidate(filesDir)
+    const shared = unpackedTreeFor(filesDir, prepared.asset.sha256)
+    await mkdir(shared, { recursive: true })
+    await writeFile(join(shared, 'sentinel'), 'shared')
+    const oldInode = (await lstat(join(prepared.tree, 'rootfs-marker'))).ino
+    const io = createHostAssetIO({ filesDir })
+    await io.claimRootfsCandidate(prepared.id, prepared.asset, prepared.destination)
+    assert.equal((await lstat(join(prepared.destination, 'rootfs-marker'))).ino, oldInode)
+    assert.equal(await readFile(join(shared, 'sentinel'), 'utf8'), 'shared')
+    await assert.rejects(io.claimRootfsCandidate(prepared.id, prepared.asset, prepared.destination))
+  } finally {
+    await rm(filesDir, { recursive: true, force: true })
+  }
+})
+
+test('rootfs handoff rejects mismatched receipts and rehashes the retained archive before adopting the tree', async () => {
+  const filesDir = await tempFilesDir()
+  try {
+    const prepared = await stageRootfsCandidate(filesDir)
+    const io = createHostAssetIO({ filesDir })
+    await assert.rejects(io.claimRootfsCandidate(prepared.id, { ...prepared.asset, sha256: 'f'.repeat(64) }, prepared.destination), /receipt/)
+    assert.ok(existsSync(prepared.candidate))
+    await writeFile(join(prepared.candidate, RETAINED_ARCHIVE), 'x'.repeat(prepared.asset.size))
+    await assert.rejects(io.claimRootfsCandidate(prepared.id, prepared.asset, prepared.destination), /digest/)
+    assert.ok(!existsSync(prepared.destination))
+    assert.ok(!existsSync(prepared.candidate))
+  } finally {
+    await rm(filesDir, { recursive: true, force: true })
+  }
+})
+
+test('candidate verification rejects an out-of-tree link before publishing the tree', async () => {
+  const filesDir = await tempFilesDir()
+  try {
+    const prepared = await stageRootfsCandidate(filesDir)
+    await symlink('../../external', join(prepared.tree, 'external-link'), 'file')
+    await assert.rejects(
+      createHostAssetIO({ filesDir }).claimRootfsCandidate(prepared.id, prepared.asset, prepared.destination),
+      { code: 'linux-host-tree-unsafe' },
+    )
+    assert.ok(!existsSync(prepared.destination))
+    assert.ok(!existsSync(prepared.candidate))
+  } finally {
+    await rm(filesDir, { recursive: true, force: true })
+  }
+})
 
 test('the config neither enables nor installs anything on its own', async () => {
   const filesDir = await tempFilesDir()

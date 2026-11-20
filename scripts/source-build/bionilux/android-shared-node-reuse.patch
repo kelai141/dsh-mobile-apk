@@ -1,0 +1,29 @@
+--- a/modules/manager.js
++++ b/modules/manager.js
+@@ -1094,6 +1094,8 @@
+       state: healthy ? 'healthy' : health.healthy && !verdict ? 'unverified' : 'unhealthy',
+       reason: health.reason ?? (verdict ? verdict.reason : 'runtime has not been verified'),
+       runtimeId: record.runtimeId,
++      ...(healthy && /^sha256-[0-9a-f]{64}$/.test(record.nodeKey)
++        ? { nodeAssetSha256: record.nodeKey.slice(7) } : {}),
+       version: record.version,
+       architecture: record.architecture,
+       instanceId: record.instanceId,
+@@ -1708,8 +1710,15 @@
+     if (this._nodeIsHealthy(node)) return { node, created: false };
+     const nodeStage = path.join(staging, 'node');
+     const archive = path.join(staging, 'node.archive');
+-    await this._materialize(runtime.nodeAsset, archive, nodeStage, 'node');
+-    if (!this._nodeIsHealthy(nodeStage)) throw new Error('shared Linux Node archive is incomplete or invalid');
++    try {
++      await this._materialize(runtime.nodeAsset, archive, nodeStage, 'node');
++      if (!this._nodeIsHealthy(nodeStage)) throw new Error('shared Linux Node archive is incomplete or invalid');
++    } catch (cause) {
++      // Node is prepared before the rootfs candidate is claimed or the active record is changed.
++      const error = new Error('Could not prepare the shared Node asset: ' + cause.message, { cause });
++      error.code = 'LINUX_NODE_STAGE_REQUIRED';
++      throw error;
++    }
+     const hadBrokenNode = existsSync(node);
+     if (hadBrokenNode && activeRecord) await this._stopChildren();
+     const retired = path.join(staging, 'node.retired');

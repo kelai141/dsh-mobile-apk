@@ -17,6 +17,7 @@ import {
   fetchManifest,
   fetchStatus,
   installEnvironment,
+  installRuntimeAssets,
   installJobStatus,
   prepareAssets,
   reinstallEnvironment,
@@ -26,7 +27,6 @@ import {
   totalBytes,
   uninstallEnvironment,
   type AssetProgress,
-  type AssetSpec,
   type LinuxStatus,
   type InstallJob,
 } from './transport.ts'
@@ -203,10 +203,12 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
     return () => terminal?.removeEventListener('dsh-settings-sublayer-pop', pop)
   }, [terminalOpen, toolsOpen])
 
-  const refresh = useCallback(async (): Promise<void> => {
+  const refresh = useCallback(async (): Promise<LinuxStatus | undefined> => {
     try {
-      setStatus(await fetchStatus())
+      const next = await fetchStatus()
+      setStatus(next)
       setStatusError('')
+      return next
     } catch (cause) {
       setStatusError(failureText(cause))
     }
@@ -319,8 +321,12 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
     if (inFlight) return
     inFlight = true
     setError('')
-    let preparedRuntimeId = selectedRuntime
     try {
+      let next: LinuxStatus
+      const installing = (): void => {
+        setPhase('installing')
+        setProgress({ stage: 'installing' })
+      }
       if (!reinstall) {
         setPhase('manifest')
         setProgress({ stage: 'manifest' })
@@ -333,37 +339,35 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
           setAutoCheckState('failed')
           setAutoCheckError(failureText(cause))
         }
-        await refresh()
+        const current = await refresh()
         const manifest = await fetchManifest()
         const { runtime, specs } = assetsFor(manifest, {
-          runtimeId: preparedRuntimeId !== '' ? preparedRuntimeId : undefined,
+          runtimeId: selectedRuntime !== '' ? selectedRuntime : undefined,
           architecture: status?.architecture,
         })
         if (runtime === null) {
           throw new AssetError('No runtime in this release matches this device', { code: 'linux-runtime-not-found' })
         }
-        preparedRuntimeId = runtime.id
         if (window.androidBridge?.linuxInstallJob && manifest.version) {
-          startInstallJob(manifest.version, runtime.id, specs, source)
+          startInstallJob(manifest.version, runtime.id, specs, source, runtime.sharedNodeReuse === true)
           setJob(installJobStatus())
           setPhase('idle')
           return
         }
-        setProgress({ stage: 'assets', index: 0, total: specs.length, bytes: totalBytes(specs) })
-        await prepareAssets(
-          window.androidBridge,
-          specs as AssetSpec[],
-          (item: AssetProgress) => {
+        next = await installRuntimeAssets(runtime, specs, current, assets => {
+          setPhase('assets')
+          setProgress({ stage: 'assets', index: 0, total: assets.length, bytes: totalBytes(assets) })
+          return prepareAssets(window.androidBridge, assets, (item: AssetProgress) => {
             setProgress({ stage: 'assets', ...item })
-          },
-          undefined, undefined, source,
-        )
+          }, undefined, undefined, source)
+        }, candidate => {
+          installing()
+          return installEnvironment(runtime.id, candidate)
+        })
+      } else {
+        installing()
+        next = await reinstallEnvironment()
       }
-      setPhase('installing')
-      setProgress({ stage: 'installing' })
-      const next = reinstall
-        ? await reinstallEnvironment()
-        : await installEnvironment(preparedRuntimeId !== '' ? preparedRuntimeId : undefined)
       if (typeof next.installed === 'boolean') setStatus(next)
       setPhase('done')
       await refresh()

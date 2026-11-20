@@ -19,9 +19,11 @@
  * 路径由 **manifest 的摘要**推导，调用方不能指定落点（与 Kotlin 侧同一个判据口径）：
  * `<filesDir>/linux-environment/staging/<sha256>/`。
  */
+import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
-import { cp, lstat, mkdir, readdir, readFile, readlink, symlink } from 'node:fs/promises'
+import { createReadStream, lstatSync } from 'node:fs'
+import { cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, symlink, unlink } from 'node:fs/promises'
+import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { prepareRuntimeInstallation } from './linux-upgrade.js'
 
@@ -36,6 +38,8 @@ export const UNPACKED_DIR = 'unpacked'
 
 /** 摘要必须是 64 位小写十六进制 —— 它同时是**路径段的来源**（与 Kotlin `specVerdict` 一致）。 */
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
+const CANDIDATE_ID_PATTERN = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/
+const CANDIDATE_MAX_AGE_MS = 60 * 60 * 1000
 
 export const CODE_ASSET_NOT_PREPARED = 'linux-asset-not-prepared'
 export const CODE_ASSET_SPEC_INVALID = 'linux-asset-spec-invalid'
@@ -94,9 +98,11 @@ export function unpackedTreeFor(filesDir: string, sha256: unknown): string | nul
   return staged === null ? null : join(staged, UNPACKED_DIR)
 }
 
-async function sha256OfFile(file: string): Promise<string> {
+const RUNTIME_HASH_CHUNK_BYTES = 1024 * 1024
+
+async function sha256OfFile(file: string, highWaterMark?: number): Promise<string> {
   const hash = createHash('sha256')
-  for await (const chunk of createReadStream(file)) hash.update(chunk as Buffer)
+  for await (const chunk of createReadStream(file, { highWaterMark })) hash.update(chunk as Buffer)
   return hash.digest('hex')
 }
 
@@ -118,11 +124,11 @@ async function assertPlainDirectory(directory: string, code: string, what: strin
  * 宿主侧的树来自 Kotlin 的硬化解包（`SnapshotExtractor` 已拒穿越/符号链接逃逸），这里是
  * **第二道**：跨语言边界时不信上游结论，踏到的每个条目的实时类型才是判据。
  */
-async function copyStagedTree(source: string, destination: string, kind = 'plugin', sourceRoot = source): Promise<void> {
+async function prepareStagedTree(source: string, destination?: string, kind = 'plugin', sourceRoot = source): Promise<void> {
   for (const entry of await readdir(source, { withFileTypes: true })) {
     const from = join(source, entry.name)
-    const to = join(destination, entry.name)
-    const info = await lstat(from)
+    const to = destination === undefined ? undefined : join(destination, entry.name)
+    const info = destination === undefined ? lstatSync(from) : await lstat(from)
     if (info.isSymbolicLink()) {
       if (kind !== 'rootfs' && kind !== 'node') {
         throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, `宿主解包树含符号链接：${entry.name}`)
@@ -137,18 +143,88 @@ async function copyStagedTree(source: string, destination: string, kind = 'plugi
         throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, `资产符号链接越界：${entry.name}`)
       }
       // Copy the link itself. Never dereference a guest path on the host.
-      await symlink(isAbsolute(link) ? relative(dirname(from), target) || '.' : link, to)
+      const safeTarget = isAbsolute(link) ? relative(dirname(from), target) || '.' : link
+      if (to !== undefined) await symlink(safeTarget, to)
+      else if (safeTarget !== link) {
+        await unlink(from)
+        await symlink(safeTarget, from)
+      }
       continue
     }
     if (info.isDirectory()) {
-      await mkdir(to, { recursive: true })
-      await copyStagedTree(from, to, kind, sourceRoot)
+      if (to !== undefined) await mkdir(to, { recursive: true })
+      await prepareStagedTree(from, to, kind, sourceRoot)
     } else if (info.isFile()) {
-      await cp(from, to)
+      if (to !== undefined) await cp(from, to)
     } else {
       throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, `宿主解包树含不支持的条目类型：${entry.name}`)
     }
   }
+}
+
+// An exclusively claimed tree can contain thousands of entries. Keep its real-time
+// type checks on a dedicated worker so storage latency cannot stall engine requests.
+const ROOTFS_WORKER_TASK = 'dsh-android.verify-claimed-rootfs'
+
+if (!isMainThread && parentPort && workerData?.task === ROOTFS_WORKER_TASK) {
+  const port = parentPort
+  try {
+    await prepareStagedTree(workerData.tree, undefined, 'rootfs')
+    port.postMessage({ ok: true })
+  } catch (error) {
+    if (!(error instanceof LinuxHostAssetError)) throw error
+    port.postMessage({ ok: false, code: error.code, message: error.message })
+  }
+}
+
+function verifyRootfsInWorker(tree: string): Promise<void> {
+  const worker = new Worker(new URL(import.meta.url), {
+    workerData: { task: ROOTFS_WORKER_TASK, tree },
+    execArgv: [],
+  })
+  return new Promise((resolve, reject) => {
+    let verified = false
+    let failure: LinuxHostAssetError | undefined
+    worker.once('message', result => {
+      if (result?.ok === true) verified = true
+      else failure = new LinuxHostAssetError(result.code, result.message)
+    })
+    worker.once('error', reject)
+    worker.once('exit', code => {
+      if (failure) reject(failure)
+      else if (code === 0 && verified) resolve()
+      else reject(new Error('Rootfs verification worker exited without verifying the tree'))
+    })
+  })
+}
+
+// The host supplies ApplicationInfo.nativeLibraryDir. Older shells have only the worker.
+async function tryNativeRootfsVerification(tree: string, nativeLibDir?: string): Promise<boolean> {
+  if (process.platform !== 'android' || !nativeLibDir) return false
+  const directory = resolve(nativeLibDir)
+  const parts = relative('/data/app', directory).split(sep)
+  if (!directory.startsWith('/data/app/') || !parts.at(-3)?.startsWith('com.dsharnessmobile.shell-') ||
+      parts.at(-2) !== 'lib' || !['arm64', 'x86_64'].includes(parts.at(-1) ?? '')) {
+    return false
+  }
+  const binary = join(directory, 'libdsh_rootfs_verify.so')
+  let installed: string
+  try {
+    installed = await realpath(binary)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+  if (installed !== binary) throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, 'Unexpected native verifier path')
+  return new Promise<boolean>((accept, reject) => {
+    execFile('/system/bin/linker64', [installed, tree], { env: {}, maxBuffer: 16 * 1024 }, (error, stdout, stderr) => {
+      if (error?.code === 3) return accept(false)
+      if (error || stdout !== 'dsh-rootfs-verified-v1\n') {
+        return reject(new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, stderr.trim() || 'Native rootfs verification failed'))
+      }
+      accept(true)
+    })
+  })
 }
 
 /** bootstrap 需要的适配器面：只有这两个，且都是透传。 */
@@ -156,7 +232,34 @@ export interface HostAssetIO {
   /** 交回宿主已暂存的归档路径；宿主没准备好就抛错（**不下载**）。 */
   downloadAsset(asset: { sha256?: unknown }, options?: { destination?: string } | string): Promise<string>
   /** 把宿主已解包的树复制进 `destination`；宿主没准备好就抛错（**不解压**）。 */
-  extractArchive(archivePath: string, destination: string, options?: { kind?: string }): Promise<void>
+  extractArchive(archivePath: string, destination: string, options?: ExtractOptions): Promise<void>
+  claimRootfsCandidate(id: string, asset: RootfsAsset, destination: string, recordTiming?: RecordTiming): Promise<void>
+}
+
+type RecordTiming = (phase: string, elapsedMs: number) => void
+type RootfsAsset = { url: string; sha256: string; size: number }
+
+interface ExtractOptions {
+  kind?: string
+  recordTiming?: RecordTiming
+}
+
+function rejectCandidate(detail: string): never {
+  throw new LinuxHostAssetError('linux-rootfs-candidate-invalid', detail)
+}
+
+async function verifyCandidateReceipt(directory: string, id: string, asset: RootfsAsset): Promise<void> {
+  await assertPlainDirectory(directory, CODE_ASSET_NOT_PREPARED, 'Rootfs candidate')
+  const file = join(directory, 'receipt.json')
+  const info = await lstat(file)
+  if (!info.isFile() || info.size > 4096) rejectCandidate('Invalid rootfs receipt file')
+  const receipt = JSON.parse(await readFile(file, 'utf8'))
+  const now = Date.now()
+  if (receipt?.id !== id || receipt.kind !== 'rootfs' || receipt.url !== asset.url ||
+      receipt.sha256 !== asset.sha256 || receipt.size !== asset.size || !Number.isSafeInteger(receipt.createdAt) ||
+      receipt.createdAt > now || now - receipt.createdAt > CANDIDATE_MAX_AGE_MS) {
+    rejectCandidate('The rootfs receipt does not match the install asset')
+  }
 }
 
 /**
@@ -164,7 +267,7 @@ export interface HostAssetIO {
  *
  * @param filesDir 壳侧 `DSH_FILES_DIR`；暂存根 = `<filesDir>/linux-environment`。
  */
-export function createHostAssetIO(options: { filesDir: string }): HostAssetIO {
+export function createHostAssetIO(options: { filesDir: string, nativeLibDir?: string }): HostAssetIO {
   const { filesDir } = options
   if (typeof filesDir !== 'string' || filesDir === '') throw new TypeError('filesDir is required')
 
@@ -197,10 +300,13 @@ export function createHostAssetIO(options: { filesDir: string }): HostAssetIO {
       return archive
     },
 
-    async extractArchive(archivePath: string, destination: string, options?: { kind?: string }): Promise<void> {
+    async extractArchive(archivePath: string, destination: string, options?: ExtractOptions): Promise<void> {
       // 按**归档自身的摘要**定位宿主已解包的树：这样解包结果与 bootstrap 刚验过的字节绑定，
       // 而不是靠调用顺序或调用方给的任何路径。
-      const digest = await sha256OfFile(archivePath)
+      const hashStarted = performance.now()
+      const largeArchive = options?.kind === 'rootfs' || options?.kind === 'node'
+      const digest = await sha256OfFile(archivePath, largeArchive ? RUNTIME_HASH_CHUNK_BYTES : undefined)
+      options?.recordTiming?.('staged_archive_hash', performance.now() - hashStarted)
       const tree = unpackedTreeFor(filesDir, digest)
       if (tree === null) {
         throw new LinuxHostAssetError(CODE_ASSET_SPEC_INVALID, `归档摘要推导被拒：${digest}`)
@@ -214,7 +320,51 @@ export function createHostAssetIO(options: { filesDir: string }): HostAssetIO {
         }
       }
       await mkdir(destination, { recursive: true })
-      await copyStagedTree(tree, destination, options?.kind)
+      const copyStarted = performance.now()
+      await prepareStagedTree(tree, destination, options?.kind)
+      options?.recordTiming?.('staged_tree_copy', performance.now() - copyStarted)
+    },
+
+    async claimRootfsCandidate(id, asset, destination, recordTiming) {
+      if (!CANDIDATE_ID_PATTERN.test(id) || !SHA256_PATTERN.test(asset.sha256)) rejectCandidate('Invalid rootfs identity')
+      const root = linuxEnvironmentRoot(filesDir)
+      const staging = join(root, 'runtime', '.staging')
+      const target = resolve(destination)
+      const instance = dirname(target)
+      const attempt = dirname(instance)
+      if (dirname(attempt) !== staging || instance !== join(attempt, 'instance') ||
+          target !== join(instance, 'rootfs')) rejectCandidate('Invalid install transaction destination')
+      const candidates = join(root, 'rootfs-candidates')
+      for (const directory of [root, join(root, 'runtime'), staging, attempt, instance, candidates]) {
+        await assertPlainDirectory(directory, CODE_HOST_TREE_UNSAFE, 'Rootfs handoff parent')
+      }
+      const candidate = join(candidates, id)
+      await verifyCandidateReceipt(candidate, id, asset)
+      const owned = join(attempt, 'claimed-rootfs')
+      await rename(candidate, owned)
+      try {
+        await verifyCandidateReceipt(owned, id, asset)
+        const archive = join(owned, RETAINED_ARCHIVE)
+        const started = performance.now()
+        const info = await lstat(archive)
+        if (!info.isFile() || info.size !== asset.size || await sha256OfFile(archive, RUNTIME_HASH_CHUNK_BYTES) !== asset.sha256) {
+          rejectCandidate('The retained rootfs archive failed size or digest verification')
+        }
+        recordTiming?.('candidate_archive_verify', performance.now() - started)
+        const tree = join(owned, UNPACKED_DIR)
+        const treeStarted = performance.now()
+        await assertPlainDirectory(tree, CODE_HOST_TREE_UNSAFE, 'Candidate rootfs tree')
+        const native = await tryNativeRootfsVerification(tree, options.nativeLibDir)
+        if (!native) await verifyRootfsInWorker(tree)
+        const elapsed = performance.now() - treeStarted
+        recordTiming?.('candidate_tree_verify', elapsed)
+        recordTiming?.(native ? 'candidate_tree_verify_native' : 'candidate_tree_verify_worker', elapsed)
+        const moveStarted = performance.now()
+        await rename(tree, target)
+        recordTiming?.('candidate_tree_move', performance.now() - moveStarted)
+      } finally {
+        await rm(owned, { recursive: true, force: true })
+      }
     },
   }
 }
@@ -241,7 +391,7 @@ export function createLinuxBootstrapConfig(options: {
 }): Record<string, unknown> {
   const { filesDir, appVersion, releaseUrl = LINUX_RELEASE_URL, nativeLibDir } = options
   const dataDir = linuxEnvironmentRoot(filesDir)
-  const linuxAssetIO = createHostAssetIO({ filesDir })
+  const linuxAssetIO = createHostAssetIO({ filesDir, nativeLibDir })
   return {
     dataDir,
     releaseUrl,

@@ -16,14 +16,14 @@
 // itself evidence that this one is wrong (or right).
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, rmSync, copyFileSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, copyFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { assertBioniluxDebugApk, readBioniluxDebugNative } from './lib/bionilux-debug-native.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const apkDir = existsSync(join(root, 'dsh-mobile-apk')) ? join(root, 'dsh-mobile-apk') : root
 const snapshot = join(apkDir, 'app/src/main/assets/snapshot.tar.xz')
-const output = join(root, '.deploy-tmp', 'dev-fast', 'dsh-mobile-apk-dev-fast.apk')
 const localSdk = process.env.LOCALAPPDATA
   ? join(process.env.LOCALAPPDATA, 'Android', 'Sdk')
   : null
@@ -170,6 +170,14 @@ if (abiOnly) {
   console.log('DEV-FAST: --abi-only, stopping before Gradle')
   process.exit(0)
 }
+const nativeFlag = process.argv.indexOf('--bionilux-native-dir')
+const nativeDir = nativeFlag === -1 ? undefined : process.argv[nativeFlag + 1]
+if (nativeFlag !== -1 && (!nativeDir || nativeDir.startsWith('--'))) {
+  throw new Error('--bionilux-native-dir requires a path to the verified native build output')
+}
+const nativeAssets = nativeDir ? readBioniluxDebugNative(resolve(nativeDir), snapshotAbi) : null
+const artifact = nativeAssets ? 'dsh-mobile-apk-dev-fast-bionilux.apk' : 'dsh-mobile-apk-dev-fast.apk'
+const output = join(root, '.deploy-tmp', 'dev-fast', artifact)
 // The bundle fingerprint is the OTHER half of the same gate, and it was missing here.
 //
 // EngineManager.snapshotFingerprintProblem() runs BEFORE the Hard manifest check, so a package
@@ -229,9 +237,29 @@ rmSync(join(apkDir, 'app', 'build', 'outputs', 'apk', 'debug'), { recursive: tru
 const gradle = process.platform === 'win32' ? 'gradlew.bat' : './gradlew'
 const args = [':app:assembleDebug', '--no-daemon', '--console=plain', '-PversionNameSuffix=-DEV-FAST']
 console.log('DEV-FAST: all release gates skipped; artifact is for local verification only')
-execFileSync(gradle, args, { cwd: apkDir, stdio: 'inherit', shell: process.platform === 'win32' })
-const built = join(apkDir, 'app/build/outputs/apk/debug/app-debug.apk')
-if (!existsSync(built)) throw new Error('gradle finished without ' + built)
-copyFileSync(built, output)
+let nativeStage
+try {
+  if (nativeAssets) {
+    const build = join(apkDir, 'app', 'build')
+    mkdirSync(build, { recursive: true })
+    nativeStage = mkdtempSync(join(build, 'bionilux-debug-'))
+    const jni = join(nativeStage, 'x86_64')
+    mkdirSync(jni)
+    for (const { name, bytes } of nativeAssets) writeFileSync(join(jni, name), bytes)
+    args.push(`-PnativeLinuxCompatibilityDir=build/${basename(nativeStage)}`, '-PnativeControlAbis=x86_64')
+  }
+  execFileSync(gradle, args, { cwd: apkDir, stdio: 'inherit', shell: process.platform === 'win32' })
+  const built = join(apkDir, 'app/build/outputs/apk/debug/app-debug.apk')
+  if (!existsSync(built)) throw new Error('gradle finished without ' + built)
+  if (nativeAssets) {
+    assertBioniluxDebugApk(built, nativeAssets)
+    execFileSync(process.execPath, [join(apkDir, 'scripts/check-snapshot-fingerprint.mjs'),
+      '--apk', built, '--sha256', digest], { cwd: root, stdio: 'inherit' })
+    console.log('Bionilux debug APK contains the verified x86_64 loader and ldconfig')
+  }
+  copyFileSync(built, output)
+} finally {
+  if (nativeStage) rmSync(nativeStage, { recursive: true, force: true })
+}
 console.log('DEV-FAST artifact: ' + output)
 console.log('Install with adb install -r -t; do not attach this package to a release.')

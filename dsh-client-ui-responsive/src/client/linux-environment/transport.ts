@@ -52,7 +52,7 @@ export interface LinuxStatus {
   busy?: boolean
   operation?: string
   runtimeId?: string
-  runtime?: { id?: string; runtimeId?: string; healthy?: boolean; reason?: string } | null
+  runtime?: { id?: string; runtimeId?: string; healthy?: boolean; reason?: string; nodeAssetSha256?: string } | null
   runtimes?: Array<{ id: string; label?: string; architecture?: string }>
   defaultRuntimeId?: string
   architecture?: string
@@ -77,6 +77,8 @@ export interface ManifestRuntime {
   backendAsset?: ManifestAsset
   rootfsAsset?: ManifestAsset
   nodeAsset?: ManifestAsset
+  rootfsCandidateHandoff?: boolean
+  sharedNodeReuse?: boolean
 }
 
 /** Verified release manifest (only the fields this section consumes). */
@@ -92,11 +94,13 @@ export class RouteError extends Error {
   readonly status: number
   /** 宿主给出的真因（服务端的 detail 字段），没有时为空串。 */
   readonly detail: string
-  constructor(message: string, status = 0, detail = '') {
+  readonly reason: string
+  constructor(message: string, status = 0, detail = '', reason = '') {
     super(message)
     this.name = 'RouteError'
     this.status = status
     this.detail = detail
+    this.reason = reason
   }
 }
 
@@ -130,7 +134,8 @@ async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown):
     // detail 是宿主的真因（例如 Cordis 的 Invalid effect、runtime verify() 的断言）。
     // 没有它，用户和排查者都只能看到一句「请检查环境状态与日志」，而日志在不可调试包上取不到。
     const detail = typeof payload?.detail === 'string' ? payload.detail : ''
-    throw new RouteError(error !== '' ? error : 'HTTP ' + response.status, response.status, detail)
+    throw new RouteError(error !== '' ? error : 'HTTP ' + response.status, response.status, detail,
+      typeof payload?.reason === 'string' ? payload.reason : '')
   }
   if (payload === null) throw new RouteError('The host returned a non-JSON response', response.status)
   return payload as T
@@ -195,11 +200,12 @@ export function checkForUpdates(): Promise<LinuxStatus> {
 }
 
 /** Download, verify, stage and activate. Explicit user action only. */
-export function installEnvironment(runtimeId?: string): Promise<LinuxStatus> {
+export function installEnvironment(runtimeId?: string, rootfsCandidate?: string): Promise<LinuxStatus> {
   return request<LinuxStatus>('POST', LINUX_ROUTES.install, {
     confirmed: true,
     activate: true,
     ...(runtimeId ? { runtimeId } : {}),
+    ...(rootfsCandidate ? { rootfsCandidate } : {}),
   })
 }
 
@@ -276,6 +282,7 @@ export interface AssetSpec extends ManifestAsset {
   field: string
   /** Unpack rule for the shell: plugin / backend / rootfs / node. */
   kind: AssetKind
+  rootfsCandidate?: boolean
 }
 
 /** Pick the runtime for this device: explicit id, else first matching architecture. */
@@ -309,7 +316,9 @@ export function assetsFor(
     for (const field of ASSET_FIELDS) {
       const asset = runtime[field]
       if (isAsset(asset)) {
-        specs.push({ ...asset, id: runtime.id + ':' + field, field, kind: ASSET_KIND[field] })
+        specs.push({ ...asset, id: runtime.id + ':' + field, field, kind: ASSET_KIND[field],
+          ...(field === 'rootfsAsset' && runtime.rootfsCandidateHandoff === true ? { rootfsCandidate: true } : {}),
+        })
       }
     }
   }
@@ -341,11 +350,13 @@ export interface AssetPrepareAnswer {
   phase?: string
   code?: string
   detail?: string
+  rootfsCandidate?: string
 }
 export interface AssetPrepareSnapshot {
   phase?: string
   sha256?: string | null
   stagedPath?: string | null
+  rootfsCandidate?: string
   code?: string | null
   detail?: string | null
   bytes?: number
@@ -369,9 +380,12 @@ export function installJobStatus(): InstallJob | undefined {
   } catch { return undefined }
 }
 
-export function startInstallJob(version: string, runtimeId: string, specs: readonly AssetSpec[], source: string): void {
+export function startInstallJob(version: string, runtimeId: string, specs: readonly AssetSpec[], source: string, sharedNodeReuse = false): void {
   const response = window.androidBridge?.linuxInstallJob?.('start', JSON.stringify({
-    version, runtimeId, assets: specs.map(({ url, sha256, size, kind }) => ({ url, sha256, size, kind, source })),
+    version, runtimeId, sharedNodeReuse,
+    assets: specs.map(({ url, sha256, size, kind, rootfsCandidate }) => ({
+      url, sha256, size, kind, source, ...(rootfsCandidate ? { rootfsCandidate } : {}),
+    })),
   }))
   const verdict = response ? JSON.parse(response) as AssetPrepareAnswer : undefined
   if (!verdict?.ok) throw new AssetError(verdict?.code ?? 'The Android install queue is unavailable', verdict)
@@ -420,7 +434,7 @@ export async function prepareAssets(
   pollMs = 600,
   timeoutMs = 20 * 60 * 1000,
   source: string = 'official',
-): Promise<void> {
+): Promise<string | undefined> {
   if (bridge === undefined || typeof bridge.linuxAssetPrepare !== 'function' || typeof bridge.linuxAssetPrepareStatus !== 'function') {
     throw new AssetError('The Android asset bridge is unavailable', { code: 'linux-asset-bridge-missing' })
   }
@@ -428,6 +442,7 @@ export async function prepareAssets(
     throw new AssetError('The release manifest lists no installable assets', { code: 'linux-asset-spec-invalid' })
   }
 
+  let rootfsCandidate: string | undefined
   for (let index = 0; index < specs.length; index += 1) {
     const spec = specs[index]
     const total = specs.length
@@ -438,6 +453,7 @@ export async function prepareAssets(
     report('starting')
 
     let started = false
+    let candidateId: string | undefined
     for (let attempt = 0; attempt < 20 && !started; attempt += 1) {
       // `kind` is part of the contract: the shell picks the unpack rule from it
       // (a rootfs legitimately contains symlinks, a plugin tarball must not).
@@ -446,6 +462,7 @@ export async function prepareAssets(
         sha256: spec.sha256,
         size: spec.size,
         kind: spec.kind,
+        ...(spec.rootfsCandidate ? { rootfsCandidate: true } : {}),
         ...(source === 'official' ? {} : { source }),
       }))) as AssetPrepareAnswer | null
       if (answer === null) {
@@ -453,6 +470,7 @@ export async function prepareAssets(
       }
       if (answer.ok === true) {
         started = true
+        candidateId = answer.rootfsCandidate
         break
       }
       if (answer.code === 'linux-asset-busy') {
@@ -482,6 +500,10 @@ export async function prepareAssets(
             assetId: spec.id,
           })
         }
+        if (candidateId != null && snapshot.rootfsCandidate !== candidateId) {
+          throw new AssetError('The rootfs candidate changed during preparation', { code: 'linux-asset-lost', assetId: spec.id })
+        }
+        if (candidateId != null) rootfsCandidate = candidateId
         break
       }
       if (phase === 'failed') {
@@ -501,5 +523,36 @@ export async function prepareAssets(
       await sleep(pollMs)
     }
     report('staged')
+  }
+  return rootfsCandidate
+}
+
+/** Skip eager preparation only for the active manager's verified, content-addressed Node. */
+export async function installRuntimeAssets(
+  runtime: ManifestRuntime,
+  specs: AssetSpec[],
+  current: LinuxStatus | undefined,
+  prepare: (assets: AssetSpec[]) => Promise<string | undefined>,
+  activate: (candidate?: string) => Promise<LinuxStatus>,
+): Promise<LinuxStatus> {
+  const node = specs.find(spec => spec.field === 'nodeAsset')
+  if (!node || !runtime.sharedNodeReuse || !runtime.rootfsCandidateHandoff ||
+      current?.runtime?.healthy !== true || current.runtime.nodeAssetSha256 !== node.sha256) {
+    return activate(await prepare(specs))
+  }
+
+  const candidate = await prepare(specs.filter(spec => spec !== node))
+  if (!candidate) {
+    // Older Android bridges stage the rootfs using the shared directory.
+    await prepare([node])
+    return activate()
+  }
+  try {
+    return await activate(candidate)
+  } catch (error) {
+    if (!(error instanceof RouteError) || error.status !== 409 || error.reason !== 'linux-node-stage-required') throw error
+    // The manager requests Node before claiming the candidate. The same ID is valid for this retry.
+    await prepare([node])
+    return activate(candidate)
   }
 }

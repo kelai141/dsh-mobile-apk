@@ -32,6 +32,18 @@ bootstrap 通过宿主 `linuxAssetIO` 读取归档并复制解包树。bootstrap
 
 资产准备阶段为 `downloading`、`verifying`、`extracting`，安装队列随后进入 `installing`。暂停、失败、重试与完成状态写回任务文件。界面退出不会取消队列；EngineService 启动时恢复 `queued` 与 `installing` 任务。Android 通知展示当前下载/安装阶段。设备进程终止后的 `.part` 续传、任务恢复与通知展示列入设备验收。
 
+### Rootfs candidate handoff
+
+A runtime manifest may advertise `rootfsCandidateHandoff: true`. For that install, the Android shell creates a private, one-use candidate directory, downloads and verifies the original archive, safely extracts it, and atomically publishes a receipt with the generated candidate ID and asset identity. The page supplies the ID with the confirmed install request. The installer derives all paths within its private environment and accepts the candidate only for the selected manifest entry.
+
+The engine atomically claims the candidate within the install transaction, verifies the retained archive's size and SHA-256, and validates the tree's entry types and symlink boundaries before moving the tree to its destination. The shared staging cache keeps its normal ownership. The runtime still prepares the candidate, runs a real guest health probe, and writes the active record only after a healthy result. Failure discards the claimed candidate as part of transaction cleanup. Unclaimed receipts expire after one hour and are pruned during subsequent candidate preparation.
+
+### Shared Node preparation during a runtime update
+
+An opted-in runtime reports the archive digest of its healthy shared Node. When that digest matches the selected release, the Android settings page prepares the runtime plugin, backend and rootfs. The manager checks the Node installation under its install lock and runs the guest Node and npm health probe before activation. When Node needs materialization and its staged asset cannot be used, the manager reports `LINUX_NODE_STAGE_REQUIRED` before claiming the rootfs. A successful rollback allows the host to return HTTP 409 with reason `linux-node-stage-required`. The client stages Node and retries once with the same candidate. Other errors retain their normal failure behavior.
+
+## 7. 控制台与 Debian shell（验收入口）
+
 ## 4. Runtime 启停与启动策略
 
 bootstrap 状态文件为 `linux-bootstrap-state.json`，通过临时文件写入后 rename 更新。关键字段包括 `installedLinuxVersion`、`installedSystemMobileVersion`、`runtimeId`、`pluginDirectory`、`enabled`、`injectionActivated`、`autoStartEnabled`、`autoUpdateEnabled`、manifest 与检查时间。
@@ -87,3 +99,5 @@ bootstrap status 是版本、操作、更新与启用偏好的权威。运行时
 6. arm64 真机与 x86_64 模拟器验证 Linux runtime 命令可执行及升级后 loader、rootfs、包和工作区状态。
 
 当前代码与页面处于设备验证途中，尚无完整设备证据。验收结论记录实际命令、设备、阶段和证据路径后，再更新本节状态。
+
+The Android diagnostic runtime sends named-session commands to the existing Bash process as single-quoted assignments. It preserves literal input, trailing line-feed handling, working directory, exit status, and the existing command frame markers. Ordinary calls keep their independent shell.

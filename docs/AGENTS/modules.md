@@ -113,7 +113,7 @@
 | 文件 | 职责 | 关键点 |
 |---|---|---|
 | `app/src/main/java/com/dsharnessmobile/shell/LinuxAssetIO.kt` | Linux 环境资产下载、校验与安全解包判据（0.15.0） | 支持 official 与登记镜像节点；官方 manifest 提供 URL、SHA-256 和大小，镜像改写传输 URL，校验仍绑定原摘要和字节数。每跳校验主机与 Release 路径，落点限制在 `DSH_FILES_DIR/linux-environment`。解包由 `LinuxAssetExtractor` 按资产类型执行；`environmentVerdict` 要求环境根目录及 bootstrap 状态文件在场。 |
-| `app/src/main/java/com/dsharnessmobile/shell/LinuxAssetPrepare.kt` | 单资产后台下载、校验、解包与摘要目录发布 | `linuxAssetPrepare` 即时返回，`linuxAssetPrepareStatus` 回读阶段与速度；下载阶段支持暂停和 `.part` Range 续传，`linuxAssetResume` 使用原清单恢复；校验和解包后原子发布归档与解包树。 |
+| `app/src/main/java/com/dsharnessmobile/shell/LinuxAssetPrepare.kt` | 单资产后台下载、校验、解包与摘要目录发布 | `linuxAssetPrepare` 即时返回，`linuxAssetPrepareStatus` 回读阶段与速度；下载阶段支持暂停和 `.part` Range 续传，`linuxAssetResume` 使用原清单恢复；校验和解包后原子发布归档与解包树。 The rootfs candidate path uses a private directory, a one-use receipt and an atomic move. See [the runtime contract](LINUX-RUNTIME-CONTRACT.md#rootfs-candidate-handoff). |
 | `app/src/main/java/com/dsharnessmobile/shell/LinuxInstallJob.kt` | 跨设置页面与 EngineService 生命周期的安装/更新资产队列 | 原子持久化 `linux-environment/install-job.json`，记录 runtimeId/version/assets/index/state/error；按序准备 runtime 插件、backend、rootfs、Node，启动时恢复 queued/installing，失败或暂停后支持 retry。应用任务支持 official 及已登记镜像来源；自动更新沿用已有 runtimeId 与来源。 |
 | `app/src/main/java/com/dsharnessmobile/shell/LinuxDownloadNotification.kt` | Linux 下载与安装任务系统通知 | 下载/校验/解包/安装阶段更新同一低优先级通知，暂停时显示暂停状态，任务结束清除通知。 |
 | `app/src/main/java/com/dsharnessmobile/shell/LinuxAssetExtractor.kt` | Linux 资产专用 xz tar 安全解包器（0.15.0，此前未登记） | 与快照解包器分开的原因：rootfs 里的 `/bin -> usr/bin` 是 **guest** 语义，按宿主 `canonicalPath` 判定会误判并可能解引用宿主文件。所有 kind 共同拒绝绝对条目名、`..`、hardlink、字符/块设备、FIFO 与未知类型；父路径是符号链接时失败关闭。`ROOTFS` 允许绝对 guest 链接，`BACKEND` / `NODE` / `PLUGIN` 只允许解包根内的相对链接。上限按 kind 分档（plugin/backend 复用插件上限，rootfs、node 各自更大）。 |
@@ -349,3 +349,11 @@ Android API 面登记见 `docs/AGENTS/ANDROID-API-USAGE.md` §1/§3/§4/§8；�
   `ConsoleAnsiStripper` 仅用于非 PTY 降级。
 - `ConsoleShellOverride.kt`：控制台 shell 的**设备验收入口**（debug 构建专用）。读 `<filesDir>/console-shell-override.json`，让控制台从快照 bash 切到指定 argv（如 bionilux 的 Debian bash），唯一目的是把「现有 node-pty 中继能否驱动 Debian guest bash」变成设备事实而不是推断。**release 变体永不读取**（`BuildConfig.DEBUG` 门）；`parse` 严格拒绝相对 shell、非字符串 args、未知键与带 `=` 的 env 键，合法条目可带 `unset` 显式删除宿主环境键（先于 `env` 生效），非法输入一律落回默认 Termux bash；文件合规但 PTY 中继缺失时控制台**报错**而不是静默退回（否则验收会变成「验的还是快照」的假绿）。中继侧按 `DSH_CONSOLE_LAUNCH` 描述启动（旧 `DSH_CONSOLE_ARGS`/`DSH_CONSOLE_CWD` 仅作兼容回退），非法 JSON 当场退出。契约见 `docs/AGENTS/LINUX-RUNTIME-CONTRACT.md` §7。
 `ShellOps.isRuntimeCommandName`：壳侧执行前的屏幕范围复查，对 ANSI-C / 本地化命令名 fail-closed；与引擎侧共享 fixture，详见 `docs/contrib/Ni-ShuWu/2026-11-13-screen-scope-1610.md`。
+
+LinuxXzInputStream.java owns the Android Linux archive reader and its native decoder lifetime. The Rust library in native/linux-asset-codec supplies bounded XZ decoding through JNI. LinuxAssetExtractor retains responsibility for entry limits, paths, links, executable modes and file publication.
+
+LinuxRootfsArchiveCache keeps one compressed rootfs in Android cache storage. Each candidate receives a separately verified private copy.
+
+LinuxArchiveFileIO implements Android directory checks, exclusive file creation and descriptor-based permissions for LinuxAssetExtractor.
+
+LinuxRootfsBlocks.kt reconstructs changed multi-block XZ assets using the private cache and byte ranges from the verified release origin.

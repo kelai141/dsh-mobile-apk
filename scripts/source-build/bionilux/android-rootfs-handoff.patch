@@ -1,0 +1,84 @@
+diff --git a/modules/manager.js b/modules/manager.js
+--- a/modules/manager.js
++++ b/modules/manager.js
+@@ -808,0 +809 @@
++    this.claimRootfsCandidate = options.claimRootfsCandidate;
+@@ -1350 +1351 @@
+-  async _download(asset, destination) {
++  async _download(asset, destination, timing) {
+@@ -1353,2 +1354,2 @@
+-      await this.downloadAsset(asset, destination);
+-      await verifyFile(asset, destination);
++      await this._measureInstallPhase(timing, 'archive_copy', () => this.downloadAsset(asset, destination));
++      await this._measureInstallPhase(timing, 'archive_verify', () => verifyFile(asset, destination));
+@@ -1363 +1364 @@
+-  async _extract(archive, destination, kind) {
++  async _extract(archive, destination, kind, timing) {
+@@ -1368,6 +1369,16 @@
+-    await this.extractArchive(archive, destination, { kind });
+-  }
+-
+-  async _materialize(asset, archive, destination, kind) {
+-    await this._download(asset, archive);
+-    await this._extract(archive, destination, kind);
++    await this.extractArchive(archive, destination, {
++      kind,
++      ...(timing ? { recordTiming: (phase, elapsedMs) => { timing[phase] = elapsedMs; } } : {}),
++    });
++  }
++
++  async _measureInstallPhase(timing, phase, run) {
++    if (!timing) return run();
++    const started = performance.now();
++    try { return await run(); }
++    finally { timing[phase] = performance.now() - started; }
++  }
++
++  async _materialize(asset, archive, destination, kind, timing) {
++    await this._download(asset, archive, timing);
++    await this._extract(archive, destination, kind, timing);
+@@ -1836 +1847,8 @@
+-  async _installLocked(manifest, runtimeId) {
++  async installFromRootfsCandidate(manifest, runtimeId, candidateId) {
++    if (process.platform !== 'android' || typeof this.claimRootfsCandidate !== 'function') {
++      throw new Error('Android rootfs candidate handoff is unavailable');
++    }
++    return this._exclusive(() => this._installLocked(manifest, runtimeId, candidateId));
++  }
++
++  async _installLocked(manifest, runtimeId, rootfsCandidate) {
+@@ -1850,0 +1869,2 @@
++    const timing = process.env.DSH_DEBUG_BUILD === '1' && runtimeId === 'debian-workspace-lite-x64' ? {} : undefined;
++    const installStarted = timing && performance.now();
+@@ -1867,7 +1887,8 @@
+-      await this._materialize(
+-        selection.runtime.rootfsAsset,
+-        path.join(staging, 'rootfs.archive'),
+-        instance.rootfs,
+-        'rootfs',
+-      );
+-      await this._prepareRootfs(instance);
++      if (rootfsCandidate === undefined) {
++        await this._materialize(selection.runtime.rootfsAsset, path.join(staging, 'rootfs.archive'), instance.rootfs, 'rootfs', timing);
++      } else {
++        const recordTiming = timing && ((phase, elapsedMs) => { timing[phase] = elapsedMs; });
++        await this._measureInstallPhase(timing, 'candidate_handoff', () =>
++          this.claimRootfsCandidate(rootfsCandidate, selection.runtime.rootfsAsset, instance.rootfs, recordTiming));
++      }
++      await this._measureInstallPhase(timing, 'rootfs_prepare', () => this._prepareRootfs(instance));
+@@ -1893 +1914 @@
+-      await this._prepareAndroidRootfs(this._instancePaths(instanceId));
++      await this._measureInstallPhase(timing, 'android_adaptation', () => this._prepareAndroidRootfs(this._instancePaths(instanceId)));
+@@ -1899 +1920 @@
+-      const probe = await this._probeRuntime(health.paths);
++      const probe = await this._measureInstallPhase(timing, 'health_probe', () => this._probeRuntime(health.paths));
+@@ -1933,0 +1955,4 @@
++      if (timing) {
++        const evidence = { runtimeId, instanceId, activated, elapsedMs: performance.now() - installStarted, phases: timing };
++        await writeFileAtomic(path.join(this.dataDir, 'debug-install-profile.json'), `${JSON.stringify(evidence, null, 2)}\n`).catch(() => {});
++      }
+diff --git a/lib/index.js b/lib/index.js
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -335,0 +336 @@
++      claimRootfsCandidate: config.claimRootfsCandidate ?? config.linuxAssetIO?.claimRootfsCandidate,

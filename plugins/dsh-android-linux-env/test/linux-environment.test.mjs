@@ -547,3 +547,14 @@ test('normalizeLinuxStatus preserves checkError without marking a healthy runtim
   assert.equal(normalized.checkError, 'GitHub request failed (403)')
   assert.equal(normalized.error, undefined)
 })
+
+
+test('requests Node preparation only after an install failure with successful rollback', async () => {
+  for (const [extra, expected] of [[{}, 409], [{ rollbackError: 'failed' }, 500], [{ assetRollbackError: 'failed' }, 500]]) {
+    const error = Object.assign(new Error('Node missing'), { code: 'LINUX_NODE_STAGE_REQUIRED' }, extra)
+    const h = harness(makeBootstrap({ install: async () => { throw error } }))
+    const response = await h.call('install')
+    assert.equal(response.code, expected)
+    assert.equal(response.payload.reason, expected === 409 ? 'linux-node-stage-required' : 'linux-environment-op-failed')
+  }
+})

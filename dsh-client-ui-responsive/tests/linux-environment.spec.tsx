@@ -11,7 +11,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { readFileSync } from 'node:fs'
 import { LinuxEnvironmentSection } from '../src/client/linux-environment/LinuxEnvironmentSection.tsx'
-import { fetchManifest } from '../src/client/linux-environment/transport.ts'
+import { assetsFor, fetchManifest, installRuntimeAssets, RouteError, type AssetSpec } from '../src/client/linux-environment/transport.ts'
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -68,19 +68,21 @@ function makeFetch(routes: Record<string, { status?: number; body?: unknown }>) 
 }
 
 /** 假桥：linuxAssetPrepare 立即受理，status 在下一次轮询时 ok。 */
-function makeBridge() {
-  const prepared: Array<{ url: string; sha256: string; size: number }> = []
+function makeBridge(candidateId?: string) {
+  const prepared: Array<{ url: string; sha256: string; size: number; rootfsCandidate?: boolean }> = []
   let pending: string | null = null
+  let pendingCandidate: string | undefined
   return {
     prepared,
     bridge: {
       linuxAssetPrepare: (specJson: string) => {
-        const spec = JSON.parse(specJson) as { url: string; sha256: string; size: number }
+        const spec = JSON.parse(specJson) as typeof prepared[number]
         prepared.push(spec)
         pending = spec.sha256
-        return JSON.stringify({ ok: true, phase: 'running', sha256: spec.sha256 })
+        pendingCandidate = spec.rootfsCandidate ? candidateId : undefined
+        return JSON.stringify({ ok: true, phase: 'running', sha256: spec.sha256, rootfsCandidate: pendingCandidate })
       },
-      linuxAssetPrepareStatus: () => JSON.stringify({ phase: 'ok', sha256: pending, stagedPath: '/staging/' + pending }),
+      linuxAssetPrepareStatus: () => JSON.stringify({ phase: 'ok', sha256: pending, stagedPath: '/staging/' + pending, rootfsCandidate: pendingCandidate }),
     },
   }
 }
@@ -155,6 +157,49 @@ describe('LinuxEnvironmentSection', () => {
     await act(async () => { check.click() })
     expect(checks).toBe(2)
     expect(element.querySelector('[data-linux-auto-check="update-available"]')?.textContent).toContain('0.10.9')
+  })
+
+  it('queues candidate handoff and shared Node capabilities with the pinned release', async () => {
+    const runtime = { ...MANIFEST.runtimes[0], rootfsCandidateHandoff: true, sharedNodeReuse: true }
+    const { impl, calls } = makeFetch({
+      '/api/android/linux-environment/status': { body: { installed: false, architecture: 'arm64', defaultRuntimeId: runtime.id } },
+      '/api/android/linux-environment/check': { body: {} },
+      '/api/android/linux-environment/manifest': { body: { manifest: { ...MANIFEST, runtimes: [runtime] } } },
+    })
+    vi.stubGlobal('fetch', impl)
+    const queue = vi.fn((_action: string, _payload: string | null) => '{"ok":true}')
+    Object.defineProperty(window, 'androidBridge', { value: { linuxInstallJob: queue }, configurable: true })
+    const element = await render()
+    await act(async () => { (element.querySelector('[data-linux-action="install"]') as HTMLButtonElement).click() })
+    const starts = queue.mock.calls.filter(([action]) => action === 'start')
+    expect(starts).toHaveLength(1)
+    const job = JSON.parse(starts[0][1]!)
+    expect(job).toMatchObject({ version: MANIFEST.version, runtimeId: runtime.id, sharedNodeReuse: true })
+    expect(job.assets.filter((asset: AssetSpec) => asset.rootfsCandidate)).toMatchObject([{ sha256: SHA_C, kind: 'rootfs' }])
+    expect(job.assets.every((asset: { source?: string }) => Boolean(asset.source))).toBe(true)
+    expect(calls.some(call => call.url.endsWith('/install'))).toBe(false)
+  })
+
+  it('uses the prepared rootfs identity only for a handoff-capable runtime', async () => {
+    const runtime = { ...MANIFEST.runtimes[0], id: 'debian-workspace-lite-x64', architecture: 'x64', rootfsCandidateHandoff: true }
+    const { calls, impl } = makeFetch({
+      '/api/android/linux-environment/status': { body: { installed: false, architecture: 'x64', defaultRuntimeId: runtime.id } },
+      '/api/android/linux-environment/manifest': { body: { manifest: { ...MANIFEST, runtimes: [runtime] } } },
+      '/api/android/linux-environment/install': { body: STATUS_INSTALLED },
+    })
+    vi.stubGlobal('fetch', impl)
+    const candidateId = '12345678-1234-4123-8123-123456781234'
+    const { prepared, bridge } = makeBridge(candidateId)
+    Object.defineProperty(window, 'androidBridge', { value: bridge, configurable: true, writable: true })
+
+    const element = await render()
+    const install = element.querySelector('[data-linux-action="install"]') as HTMLButtonElement
+    await act(async () => { install.click() })
+
+    expect(prepared.filter(item => item.rootfsCandidate === true).map(item => item.sha256)).toEqual([SHA_C])
+    expect(calls.find(call => call.url.endsWith('/install'))?.body).toMatchObject({
+      confirmed: true, runtimeId: runtime.id, rootfsCandidate: candidateId,
+    })
   })
 
   it('stages the runtime plugin plus backend, rootfs and node before posting install', async () => {
@@ -550,3 +595,56 @@ describe('LinuxEnvironmentSection', () => {
   })
 })
 
+
+
+describe('verified shared Node updates', () => {
+  const runtime = { ...MANIFEST.runtimes[0], rootfsCandidateHandoff: true, sharedNodeReuse: true }
+  const { specs } = assetsFor({ ...MANIFEST, runtimes: [runtime] })
+  const healthy = { runtime: { healthy: true, nodeAssetSha256: SHA_D } }
+  const candidate = '12345678-1234-4123-8123-123456781234'
+
+  it('omits staging only while the active digest and target capabilities match', async () => {
+    const activate = vi.fn(async () => STATUS_INSTALLED)
+    for (const [current, stagesNode] of [
+      [healthy, false],
+      [{ runtime: { healthy: false, nodeAssetSha256: SHA_D } }, true],
+      [{ runtime: { healthy: true, nodeAssetSha256: SHA_C } }, true],
+      [undefined, true],
+    ] as const) {
+      const prepare = vi.fn(async (_assets: typeof specs) => candidate)
+      await installRuntimeAssets(runtime, specs, current, prepare, activate)
+      expect(prepare.mock.calls[0][0].some(asset => asset.field === 'nodeAsset')).toBe(stagesNode)
+    }
+    const prepare = vi.fn(async (_assets: typeof specs) => candidate)
+    await installRuntimeAssets({ ...runtime, sharedNodeReuse: false }, specs, healthy, prepare, activate)
+    expect(prepare).toHaveBeenCalledWith(specs)
+  })
+
+  it('prepares only Node and retries the same candidate once on a manager cache miss', async () => {
+    const prepare = vi.fn(async (_assets: typeof specs) => candidate)
+    const missing = new RouteError('Missing Node', 409, '', 'linux-node-stage-required')
+    const activate = vi.fn(async (_id?: string) => STATUS_INSTALLED).mockRejectedValueOnce(missing)
+    await installRuntimeAssets(runtime, specs, healthy, prepare, activate)
+    expect(prepare.mock.calls.map(([assets]) => assets.map(asset => asset.field))).toEqual([
+      ['runtime-plugin', 'backendAsset', 'rootfsAsset'], ['nodeAsset'],
+    ])
+    expect(activate.mock.calls).toEqual([[candidate], [candidate]])
+    activate.mockReset().mockRejectedValue(missing)
+    await expect(installRuntimeAssets(runtime, specs, healthy, prepare, activate)).rejects.toBe(missing)
+    expect(activate).toHaveBeenCalledTimes(2)
+  })
+
+  it('stages Node on a legacy bridge and leaves unrelated installation failures visible', async () => {
+    const prepare = vi.fn(async (_assets: typeof specs): Promise<string | undefined> => undefined)
+    const activate = vi.fn(async (_id?: string) => STATUS_INSTALLED)
+    await installRuntimeAssets(runtime, specs, healthy, prepare, activate)
+    expect(prepare.mock.calls[1][0].map(asset => asset.field)).toEqual(['nodeAsset'])
+    expect(activate.mock.calls).toEqual([[]])
+    prepare.mockClear().mockResolvedValue(candidate)
+    const busy = new RouteError('Busy', 409)
+    activate.mockClear().mockRejectedValue(busy)
+    await expect(installRuntimeAssets(runtime, specs, healthy, prepare, activate)).rejects.toBe(busy)
+    expect(activate).toHaveBeenCalledTimes(1)
+    expect(prepare).toHaveBeenCalledTimes(1)
+  })
+})

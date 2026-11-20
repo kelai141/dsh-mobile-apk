@@ -1,0 +1,20 @@
+--- a/modules/session.js
++++ b/modules/session.js
+@@ -360,4 +360,6 @@
+ function commandFrame(marker, command, cwd) {
+-  const heredoc = '__BIONILUX_CMD_' + marker + '__';
++  // Command substitution previously discarded the final line feeds.
++  let end = command.length;
++  while (end > 0 && command[end - 1] === '\n') end--;
+   const lines = ["printf '%s' '" + marker + ':BEGIN' + FRAME_END + "'", 'set +e'];
+   if (cwd) lines.push('cd -- ' + shellQuote(cwd));
+@@ -365,8 +367,5 @@
+     '__bionilux_cd_status=$?',
+     'if [ "$__bionilux_cd_status" -eq 0 ]; then',
+-    "__bionilux_command=$(cat <<'" + heredoc + "'",
+-    command,
+-    heredoc,
+-    ')',
++    '__bionilux_command=' + shellQuote(command.slice(0, end)),
+     'if [ -n "$__bionilux_command" ]; then',
+     '  eval "$__bionilux_command" </dev/null',

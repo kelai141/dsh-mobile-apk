@@ -1,6 +1,11 @@
 package com.dsharnessmobile.shell
 
 import java.io.File
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.util.UUID
 import org.json.JSONObject
 
 /**
@@ -20,6 +25,9 @@ internal object LinuxAssetPrepare {
 
   /** 宿主自己的暂存区（**不是** bootstrap 的最终插件目录；最终布局归引擎侧）。 */
   const val DIR_STAGING = "staging"
+  private const val ROOTFS_CANDIDATES = "rootfs-candidates"
+  private const val CANDIDATE_MAX_AGE_MS = 60L * 60L * 1000L
+  private val candidateName = Regex("[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 
   private val PART_DIR_PATTERN = Regex("^$DIR_STAGING-([a-f0-9]{64})\\.part$")
 
@@ -36,6 +44,7 @@ internal object LinuxAssetPrepare {
     val sha256: String? = null,
     val kind: String? = null,
     val stagedPath: String? = null,
+    val rootfsCandidate: String? = null,
     val bytes: Long = 0L,
     val size: Long = 0L,
     val stage: String? = null,
@@ -46,6 +55,7 @@ internal object LinuxAssetPrepare {
   private var snapshot = Snapshot()
   private var pauseRequested = false
   private var activeSpec: LinuxAssetIO.Spec? = null
+  private var activeCache: File? = null
   private var activeFiles: File? = null
 
   /**
@@ -65,6 +75,7 @@ internal object LinuxAssetPrepare {
     snapshot = Snapshot()
     pauseRequested = false
     activeSpec = null
+    activeCache = null
     activeFiles = null
   }
 
@@ -74,8 +85,12 @@ internal object LinuxAssetPrepare {
    * 请求体只有资产清单（`url`/`sha256`/`size`，可选 `kind`），**落点由宿主自己推导**（按 sha256 命名），
    * 客户端无法指定目标路径。
    */
-  fun start(filesDir: File?, specJson: String): String {
+  fun start(filesDir: File?, specJson: String, cacheDir: File? = null): String =
+    start(filesDir, specJson, cacheDir, null)
+
+  private fun start(filesDir: File?, specJson: String, cacheDir: File?, resumedCandidate: String?): String {
     val spec: LinuxAssetIO.Spec
+    val candidateId: String?
     try {
       val o = JSONObject(specJson)
       val kind = LinuxAssetIO.Kind.parse(if (o.has("kind") && !o.isNull("kind")) o.getString("kind") else null)
@@ -91,6 +106,9 @@ internal object LinuxAssetPrepare {
         kind = kind,
         source = o.optString("source", "official"),
       )
+      candidateId = if (kind == LinuxAssetIO.Kind.ROOTFS && o.opt("rootfsCandidate") == true) {
+        resumedCandidate ?: UUID.randomUUID().toString()
+      } else null
     } catch (e: Exception) {
       return JSONObject()
         .put("ok", false)
@@ -113,7 +131,8 @@ internal object LinuxAssetPrepare {
       pauseRequested = false
       activeFiles = filesDir
       activeSpec = spec
-      snapshot = Snapshot(phase = PHASE_RUNNING, sha256 = spec.sha256, kind = spec.kind.wire, size = spec.size)
+      activeCache = cacheDir
+      snapshot = Snapshot(phase = PHASE_RUNNING, sha256 = spec.sha256, kind = spec.kind.wire, size = spec.size, rootfsCandidate = candidateId)
     }
 
     // 门口就把「环境不在场」和「来源不合规」判掉：这两条不需要起线程，也不该留下任何状态。
@@ -133,7 +152,7 @@ internal object LinuxAssetPrepare {
       var lastUpdate = 0L
       var lastBytes = 0L
       val failure = try {
-        prepareInto(root, spec) { stage, bytes ->
+        val progress: (String, Long) -> Unit = { stage, bytes ->
           val now = System.nanoTime()
           synchronized(lock) {
             if (snapshot.stage != stage || now - lastUpdate >= 500_000_000L) {
@@ -147,10 +166,11 @@ internal object LinuxAssetPrepare {
             }
           }
         }
+        if (candidateId == null) prepareInto(root, spec, progress) else prepareCandidate(root, spec, candidateId, cacheDir, progress)
       } catch (e: Exception) {
         // 解包器已按失败关闭返回；这里兜住平台级异常（如无符号链接权限的 SecurityException），
         // 否则后台线程会死掉而状态永远停在 running。
-        workDir(root, spec.sha256)?.let { SnapshotFs.deletePath(it) }
+        if (candidateId == null) workDir(root, spec.sha256)?.let { SnapshotFs.deletePath(it) }
         LinuxAssetIO.Failure(
           LinuxAssetIO.CODE_UNSAFE_ARCHIVE,
           "准备异常（${e.javaClass.simpleName}）：${e.message}",
@@ -163,7 +183,7 @@ internal object LinuxAssetPrepare {
             code = null,
             detail = null,
             bytes = spec.size,
-            stagedPath = stagedDir(root, spec.sha256)?.absolutePath,
+            stagedPath = if (candidateId == null) stagedDir(root, spec.sha256)?.absolutePath else null,
           )
         }
       } else {
@@ -181,6 +201,7 @@ internal object LinuxAssetPrepare {
       .put("phase", PHASE_RUNNING)
       .put("sha256", spec.sha256)
       .put("kind", spec.kind.wire)
+      .put("rootfsCandidate", candidateId)
       .toString()
   }
 
@@ -191,6 +212,7 @@ internal object LinuxAssetPrepare {
       .put("sha256", snapshot.sha256 ?: JSONObject.NULL)
       .put("kind", snapshot.kind ?: JSONObject.NULL)
       .put("stagedPath", snapshot.stagedPath ?: JSONObject.NULL)
+      .put("rootfsCandidate", snapshot.rootfsCandidate)
       .put("bytes", snapshot.bytes)
       .put("size", snapshot.size)
       .put("stage", snapshot.stage ?: JSONObject.NULL)
@@ -210,7 +232,8 @@ internal object LinuxAssetPrepare {
     val spec = activeSpec
     if (snapshot.phase != "paused" || spec == null) return@synchronized JSONObject().put("ok", false).toString()
     start(activeFiles, JSONObject().put("url", spec.url).put("sha256", spec.sha256)
-      .put("size", spec.size).put("kind", spec.kind.wire).put("source", spec.source).toString())
+      .put("size", spec.size).put("kind", spec.kind.wire).put("source", spec.source)
+      .put("rootfsCandidate", snapshot.rootfsCandidate != null).toString(), activeCache, snapshot.rootfsCandidate)
   }
 
   /**
@@ -228,6 +251,64 @@ internal object LinuxAssetPrepare {
   private fun workDir(root: File, sha256: String): File? {
     if (!LinuxAssetIO.SHA256_PATTERN.matches(sha256)) return null
     return LinuxAssetIO.resolveInside(root, "$DIR_STAGING-$sha256.part")
+  }
+
+  fun hasCandidate(filesDir: File, id: String): Boolean {
+    if (!candidateName.matches(id)) return false
+    val parent = File(File(filesDir, LinuxAssetIO.ENV_DIR), ROOTFS_CANDIDATES)
+    val candidate = File(parent, id)
+    return Files.isDirectory(candidate.toPath(), NOFOLLOW_LINKS) &&
+      Files.isRegularFile(File(candidate, "receipt.json").toPath(), NOFOLLOW_LINKS)
+  }
+
+  private fun prepareCandidate(root: File, spec: LinuxAssetIO.Spec, id: String, cacheDir: File?,
+                               progress: (String, Long) -> Unit): LinuxAssetIO.Failure? {
+    val parent = File(root, ROOTFS_CANDIDATES)
+    parent.mkdir()
+    if (!Files.isDirectory(parent.toPath(), NOFOLLOW_LINKS) || parent.canonicalFile.parentFile != root.canonicalFile) {
+      return LinuxAssetIO.Failure(LinuxAssetIO.CODE_DESTINATION_ESCAPE, "Invalid rootfs candidate directory")
+    }
+    val now = System.currentTimeMillis()
+    parent.listFiles()?.forEach { child ->
+      if (candidateName.matches(child.name) && Files.isDirectory(child.toPath(), NOFOLLOW_LINKS) &&
+        now - child.lastModified() > CANDIDATE_MAX_AGE_MS) SnapshotFs.deletePath(child)
+    }
+    val candidate = Files.createDirectory(File(parent, id).toPath()).toFile()
+    var prepared = false
+    try {
+      val archive = File(candidate, "asset.tar.xz")
+      progress("verifying", 0)
+      val restored = LinuxRootfsArchiveCache.restore(cacheDir, archive, spec, root, debugBuild)
+      if (!restored) {
+        val network = opener
+        val reconstructed = network is LinuxAssetIO.RangeOpener &&
+          LinuxRootfsBlocks.restore(cacheDir, archive, spec, root, debugBuild, network)
+        if (!reconstructed) {
+          val partial = workDir(root, spec.sha256)
+            ?: return LinuxAssetIO.Failure(LinuxAssetIO.CODE_DESTINATION_ESCAPE, "Invalid partial download directory")
+          if (Files.isSymbolicLink(partial.toPath())) Files.delete(partial.toPath())
+          val downloaded = File(partial, "asset.tar.xz")
+          LinuxAssetIO.download(spec, downloaded, root, network, debugBuild, progress) {
+            synchronized(lock) { pauseRequested }
+          }?.let { return it }
+          Files.move(downloaded.toPath(), archive.toPath(), ATOMIC_MOVE)
+          partial.delete()
+        }
+      }
+      progress("extracting", spec.size)
+      val unpacked = Files.createDirectory(File(candidate, "unpacked").toPath()).toFile()
+      LinuxAssetIO.extract(archive, unpacked, root, spec.kind, LinuxAssetIO.limitsFor(spec.kind))?.let { return it }
+      if (!restored) LinuxRootfsArchiveCache.remember(cacheDir, archive)
+      val receipt = JSONObject().put("id", id).put("url", spec.url).put("sha256", spec.sha256)
+        .put("size", spec.size).put("kind", spec.kind.wire).put("createdAt", now)
+      val receiptPart = File(candidate, "receipt.part")
+      receiptPart.writeText(receipt.toString())
+      Files.move(receiptPart.toPath(), File(candidate, "receipt.json").toPath(), ATOMIC_MOVE)
+      prepared = true
+      return null
+    } finally {
+      if (!prepared) SnapshotFs.deletePath(candidate)
+    }
   }
 
   /**
@@ -273,13 +354,16 @@ internal object LinuxAssetPrepare {
       return failure
     }
     File(staging, "kind").writeText(spec.kind.wire)
-    // 发布目录的父级必须先存在：否则 renameTo 会因目标父目录缺席而失败（实测到的失败形态）。
+    // The destination parent must exist before the atomic move.
     staged.parentFile?.mkdirs()
-    if (staged.exists() || !staging.renameTo(staged)) {
+    try {
+      if (staged.exists()) throw IOException("The staging destination already exists")
+      Files.move(staging.toPath(), staged.toPath(), ATOMIC_MOVE)
+    } catch (failure: IOException) {
       SnapshotFs.deletePath(staging)
       return LinuxAssetIO.Failure(
         LinuxAssetIO.CODE_DESTINATION_ESCAPE,
-        "暂存发布失败（目标已存在或跨卷）：${staged.absolutePath}",
+        "Could not publish the verified asset staging directory: ${failure.message}",
       )
     }
     return null

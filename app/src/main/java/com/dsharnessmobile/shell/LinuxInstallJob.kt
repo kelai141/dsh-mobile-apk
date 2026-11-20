@@ -11,6 +11,8 @@ import java.util.concurrent.Executors
 
 /** Persists the manifest asset queue before downloading and resumes it when the engine service returns. */
 internal object LinuxInstallJob {
+  private class NodeStageRequired : Exception("The shared Node asset needs preparation")
+
   private const val NAME = "install-job.json"
   private val lock = Any()
   private val worker = Executors.newSingleThreadExecutor()
@@ -48,6 +50,7 @@ internal object LinuxInstallJob {
       require(LinuxAssetIO.specVerdict(spec) == null && LinuxAssetIO.urlVerdict(spec.url) == null)
     }
     return JSONObject().put("runtimeId", runtimeId).put("version", version).put("assets", assets)
+      .put("sharedNodeReuse", input.optBoolean("sharedNodeReuse"))
       .put("index", 0).put("state", "queued")
   }
 
@@ -77,9 +80,13 @@ internal object LinuxInstallJob {
             "rootfs" to runtime.getJSONObject("rootfsAsset"),
             "node" to runtime.getJSONObject("nodeAsset"),
           )
-          for ((kind, asset) in entries) assets.put(asset.put("kind", kind).put("source", source))
+          for ((kind, asset) in entries) {
+            if (kind == "rootfs" && runtime.optBoolean("rootfsCandidateHandoff")) asset.put("rootfsCandidate", true)
+            assets.put(asset.put("kind", kind).put("source", source))
+          }
           enqueue(app, JSONObject().put("version", manifest.getString("version"))
-            .put("runtimeId", runtimeId).put("assets", assets).toString())
+            .put("runtimeId", runtimeId).put("sharedNodeReuse", runtime.optBoolean("sharedNodeReuse"))
+            .put("assets", assets).toString())
           return@runCatching
         }
       }.onFailure { android.util.Log.w("dsh-linux-install", "Automatic Linux update check failed", it) }
@@ -143,11 +150,37 @@ internal object LinuxInstallJob {
 
   private fun perform(app: Context, path: File, job: JSONObject) {
     val assets = job.getJSONArray("assets")
-    for (index in job.getInt("index") until assets.length()) {
-      val asset = assets.getJSONObject(index)
+    val version = job.getString("version")
+    val runtimeId = job.getString("runtimeId")
+    fun installed(status: JSONObject): Boolean =
+      status.optBoolean("installed") && status.optString("version") == version && status.optString("runtimeId") == runtimeId
+
+    val rootfsIndex = (0 until assets.length()).firstOrNull { assets.getJSONObject(it).optBoolean("rootfsCandidate") }
+    var index = job.getInt("index")
+    if (rootfsIndex != null && index > rootfsIndex) {
+      // Activation may have committed or consumed the one-use directory before the last checkpoint.
+      if (installed(statusFromEngine(app, "status"))) {
+        synchronized(lock) { save(path, job, "done") }
+        return
+      }
+      val id = job.optString("rootfsCandidate")
+      if (!LinuxAssetPrepare.hasCandidate(app.filesDir, id)) {
+        index = rootfsIndex
+        job.remove("rootfsCandidate")
+      }
+    }
+    var deferredNode: Int? = null
+    for (i in index until assets.length()) {
+      val asset = assets.getJSONObject(i)
+      val canReuse = i == assets.length() - 1 && asset.optString("kind") == "node" && job.optBoolean("sharedNodeReuse") && job.has("rootfsCandidate")
+      val node = if (canReuse) statusFromEngine(app, "status").optJSONObject("runtime") else null
+      if (node?.optBoolean("healthy") == true && node.optString("nodeAssetSha256") == asset.getString("sha256")) {
+        deferredNode = i
+        break
+      }
       while (true) {
         if (synchronized(lock) { read(path)?.optString("state") == "paused" }) return
-        val response = JSONObject(LinuxAssetPrepare.start(app.filesDir, asset.toString()))
+        val response = JSONObject(LinuxAssetPrepare.start(app.filesDir, asset.toString(), app.cacheDir))
         if (!response.optBoolean("ok")) error(response.optString("detail", response.optString("code")))
         var result: JSONObject
         do {
@@ -155,25 +188,39 @@ internal object LinuxInstallJob {
           result = JSONObject(LinuxAssetPrepare.status())
         } while (result.optString("phase") == "running")
         when (result.optString("phase")) {
-          "ok" -> break
+          "ok" -> {
+            check(result.optString("sha256") == asset.getString("sha256")) { "Prepared asset changed" }
+            if (asset.optBoolean("rootfsCandidate")) {
+              val candidate = response.getString("rootfsCandidate")
+              check(result.getString("rootfsCandidate") == candidate) { "Prepared rootfs candidate changed" }
+              job.put("rootfsCandidate", candidate)
+            }
+            break
+          }
           "paused" -> continue
           else -> error(result.optString("detail", "Linux download failed"))
         }
       }
       synchronized(lock) {
-        job.put("index", index + 1)
+        job.put("index", i + 1)
         save(path, job, "queued")
       }
     }
     synchronized(lock) { save(path, job, "installing") }
     LinuxDownloadNotification.show("installing", 0, 0)
-    val version = job.getString("version")
-    var response = statusFromEngine(app, "status")
-    if (response.optString("version") != version) {
-      val install = JSONObject().put("confirmed", true).put("runtimeId", job.getString("runtimeId"))
-        .put("expectedVersion", version)
-      response = statusFromEngine(app, "install", install)
-      check(response.optString("version") == version) { "Linux did not install the selected release" }
+    if (!installed(statusFromEngine(app, "status"))) {
+      val install = JSONObject().put("confirmed", true).put("runtimeId", runtimeId).put("expectedVersion", version)
+      if (job.has("rootfsCandidate")) install.put("rootfsCandidate", job.getString("rootfsCandidate"))
+      try {
+        check(installed(statusFromEngine(app, "install", install))) { "Linux did not install the selected runtime and release" }
+      } catch (miss: NodeStageRequired) {
+        if (deferredNode == null) throw miss
+        synchronized(lock) {
+          job.put("sharedNodeReuse", false).put("index", deferredNode)
+          save(path, job, "queued")
+        }
+        return
+      }
     }
     synchronized(lock) { save(path, job, "done") }
   }
@@ -200,6 +247,9 @@ internal object LinuxInstallJob {
         val code = connection.responseCode
         if (code in 200..299) return JSONObject(connection.inputStream.bufferedReader().use { input -> input.readText() })
         val detail = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        if (code == 409 && runCatching { JSONObject(detail).optString("reason") }.getOrNull() == "linux-node-stage-required") {
+          throw NodeStageRequired()
+        }
         if (code != 503 && code != 401) error(detail.ifEmpty { "Linux installation returned HTTP $code" })
       } finally {
         connection.disconnect()

@@ -139,6 +139,48 @@ Harness按固定0.2.0-rc.2源码完成全仓构建；prepare-harness-vendor-over
 - 远程 RPC（测试面）：POST `/api/<method>`，body 必须全信封 `{"type":"client-request","rpcId":"r1","method":"session.list","payload":{}}`；`session.prompt` 拒绝 live 会话（被 UI 打开的）——直接 API 测代理需先用 session.create 建全新会话。
 - **构建前核对 ABI（见坑 18）**：无真机环境用模拟器（MuMu x86_64 竖屏 `127.0.0.1:16416` / 横屏 `127.0.0.1:16384`），有真机则安装 ABI 匹配的 APK——debug 包默认带 x86_64 快照，覆盖装到 arm64 真机会引擎崩溃。
 
+### Android x86-64 guest glibc source
+
+Use Linux with `gpgv`, `dpkg-source`, and `patch` to prepare Debian glibc `2.41-12+deb13u4` for the Android x86-64 Bionilux guest. Supply the `.dsc`, the original source archive, and the Debian patch archive together. The source preparer checks the pinned digests and Debian developer signature before extracting them and applying the compatibility profile.
+
+```sh
+python3 scripts/source-build/bionilux/prepare-glibc-source.py inputs keyrings/debian-keyring.gpg out/guest-glibc
+```
+
+Build glibc from the resulting source tree. The profile selects available Linux calls for descriptor duplication and filesystem operations, retains kernel permission decisions, and uses glibc's existing thread fallbacks. The guest launcher sets `GLIBC_TUNABLES=glibc.pthread.rseq=0` before starting glibc. Keep the loader, guest libc, and static `ldconfig` source provenance together.
+
+For local verification with an x86-64 snapshot, pass the native build output to the debug assembler. The directory supplies `libbionilux-loader.so`, `libbionilux-ldconfig.so`, and their `SHA256SUMS` records. The assembler checks the input hashes and ELF architecture, then checks both embedded executables and the snapshot fingerprint before copying the APK.
+
+```sh
+node dsh-mobile-apk/scripts/build-apk-dev-fast.mjs --abi x86_64 --bionilux-native-dir out/guest-native
+```
+
+Prepare the Android x86-64 Linux guest's Node.js 24.22.0 source using the upstream archive, checksum list, detached signature, and trusted release keyring. The profile uses libuv's existing Android I/O implementation. In an x86-64 Debian trixie build environment with the C++ toolchain, Python 3 and Ninja, run `./configure --ninja --dest-os=linux --dest-cpu=x64 --without-npm` followed by `ninja -C out/Release node`. The Node executable and npm distribution are independent inputs to the runtime asset.
+
+```sh
+python3 scripts/source-build/bionilux/prepare-node-source.py inputs keyrings/node-release.gpg out/guest-node
+```
+
+`assemble-debug-workspace-assets.py` uses Python 3.11 or later, GNU `patch` and `mv` on Linux. It verifies the pinned Bionilux v0.10.7 manifest and x86-64 assets, then packages the lightweight rootfs, compatible libc, and guest Node with the Android adapters. The output directory is new and contains a local debug-fixture manifest for both Debian runtime IDs. The lightweight entry advertises the one-use rootfs handoff. On a debug host its manager records phase timings in `linux-environment/runtime/debug-install-profile.json`. The assets use the official AVD's debug-only loopback fixture transport. Keep binaries and fixture archives outside Git.
+
+```sh
+python3 scripts/source-build/bionilux/assemble-debug-workspace-assets.py \
+  inputs/bionilux-v0.10.7 out/workspace-rootfs.tar.xz out/guest-native/libc.so.6 \
+  out/guest-node/out/Release/node out/android-linux-fixture
+```
+
+For differential updates, build the optional planner with `cargo build --locked --release --manifest-path scripts/source-build/bionilux/rootfs-blocks/Cargo.toml` and pass its executable to the assembler with `--rootfs-block-planner`. It partitions the original tar with FastCDC (1 MiB minimum, 4 MiB target, 8 MiB maximum) and writes independent CRC64 XZ blocks. The assembler decodes the result and checks the original tar digest before publishing the fixture. Omitting the planner preserves the pinned solid archive.
+
+With the planner enabled, `--compact-rootfs-blocks` groups nearby chunks using a content-based cut and a 16 MiB cap. It applies the x86 instruction filter and an 8 MiB LZMA2 dictionary. This reduces the full x86-64 download while increasing some differential transfers.
+
+`--tar-aligned-rootfs-blocks` selects XZ boundaries from the verified tar itself. It separates installation namespaces and end padding, splits long runs at member names, and caps blocks at 16 MiB. The decoded tar bytes remain identical. This option works without an external planner.
+
+For a smaller x86-64 guest Node asset, pass `--split-node-debug` with GNU binutils installed. The assembler verifies the pinned executable, preserves its build ID and adds a GNU debug link. Archive `symbols/node.debug` alongside the build for offline symbolization. Only the runtime executable belongs in the guest package.
+
+For an experimental Bionilux launcher build, run `python3 scripts/source-build/bionilux/prepare-launcher-source.py <bionilux-checkout> <goblin-0.10.7.crate> <new-source-dir>`. The profile extracts the pinned Bionilux revision and verifies Goblin against its Cargo lockfile. Large ordinary ELF symbol-name tables are UTF-8 validated together and read on demand. Dynamic string tables keep their usual index. Build from the prepared directory with `cargo build --locked --release --target x86_64-linux-android` and the Android NDK linker.
+
+Gradle packages the Linux rootfs verifier under the Android native library directory as `libdsh_rootfs_verify.so`. The builder's `--component linux-rootfs` mode verifies the pinned Rust/NDK toolchain, ELF architecture, page alignment and source-input manifest for each ABI before staging this executable.
+
 ### Harness 上游候选巡检
 
 `巡检 Harness 上游候选` 每周、巡检或基线文件变更的 PR，以及手动触发时，将官方默认分支与
@@ -347,3 +389,9 @@ Windows 优先用 rustc 1.99.0 的 GNU host toolchain（默认 MSVC 常缺 `link
 **快照指纹门禁**：干净工作树缺少归档时，默认档打印具名 SKIP 和计数，严格档返回失败。有归档且三份指纹一致时，打印通过和 SKIP=0。覆盖了两档输出后，SKIP 审计不再为本门禁保留缺口登记。
 
 Gradle 组装后，`build-apk-engine.mjs` 调用 `check-snapshot-fingerprint.mjs --apk` 流式读取 APK 内的快照。ZIP 的 CRC、快照字节的 SHA-256、内嵌指纹和 Hard 插件清单必须与本次构建输入一致。校验失败时终止交付。
+
+### Offline Debian workspace candidate
+
+Run `node scripts/build-linux-workspace-rootfs.mjs <trusted-seed.tar.xz> <seed-sha256> <output.tar.xz>` with Node.js and a local Linux Docker engine. The seed is a trusted, flattened Debian trixie amd64 filesystem export containing Bash, Git, OpenSSH, CA certificates, APT, tar, and xz and the Debian deb822 source file. Pin its digest in the build inputs; the builder does not provision the initial seed from a mutable repository. Keep seed and output archives outside Git. Docker retains the imported untagged image and the command reports its ID.
+
+The builder verifies the seed before importing, runs without network access, and keeps the APT database and signed HTTPS sources. It excludes host-generated networking files and serializes hardlinks as regular files without dereferencing symlinks; the Android asset extractor rejects hardlink entries. The output is a rootfs asset only, not an APK or a runtime release. Node and the Bionilux backend are independent assets. Android activation must be verified separately before adoption.

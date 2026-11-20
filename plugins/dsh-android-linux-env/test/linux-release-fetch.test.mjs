@@ -48,13 +48,15 @@ test('runtime downloader writes the requested file and guest links are copied wi
     const archive = join(filesDir, 'downloaded.archive')
     await io.downloadAsset({ sha256: digest }, archive)
     assert.deepEqual(await readFile(archive), bytes)
-    try { await symlink('/usr/bin', join(tree, 'bin')) }
+    // Windows resolves POSIX absolute targets against the current drive before readlink.
+    const guestLink = process.platform === 'win32' ? join('usr', 'bin') : '/usr/bin'
+    try { await symlink(guestLink, join(tree, 'bin'), 'dir') }
     catch (error) { if (error.code === 'EPERM') { t.diagnostic('Windows denied symlink creation; destination-write assertion passed'); return } throw error }
     const destination = join(filesDir, 'instance')
     await io.extractArchive(archive, destination, { kind: 'rootfs' })
     assert.equal((await lstat(join(destination, 'bin'))).isSymbolicLink(), true)
     assert.equal(await readlink(join(destination, 'bin')), join('usr', 'bin'))
-    assert.equal(await readFile(join(destination, 'usr/bin/bash'), 'utf8'), 'guest-bash')
+    assert.equal(await readFile(join(destination, 'bin/bash'), 'utf8'), 'guest-bash')
     await assert.rejects(io.extractArchive(archive, join(filesDir, 'plugin'), { kind: 'plugin' }), /符号链接/)
     await symlink('../../../outside', join(tree, 'usr/bin/escape'))
     await assert.rejects(io.extractArchive(archive, join(filesDir, 'escape'), { kind: 'rootfs' }), /越界/)

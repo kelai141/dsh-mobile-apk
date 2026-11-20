@@ -3,6 +3,7 @@ package com.dsharnessmobile.shell
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.Paths
 import java.security.MessageDigest
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
@@ -245,6 +246,86 @@ class LinuxAssetPrepareTest {
     assertFalse(File(envRoot, "${LinuxAssetPrepare.DIR_STAGING}-${sha256(bytes)}.part").exists())
   }
 
+  @Test
+  fun rootfsCandidateOwnsItsDirectoryAndLeavesTheSharedTreeIntact() {
+    val bytes = archive { tar -> writeEntry(tar, "etc/os-release", "ID=debian\n".toByteArray()) }
+    val shared = File(stagedDir(bytes), "unpacked").apply { mkdirs() }
+    File(shared, "shared-sentinel").writeText("keep")
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    val spec = JSONObject(specJson(bytes, url = goodUrl.replace("linux-runtime-plugin", "debian-lite")))
+      .put("kind", "rootfs").put("rootfsCandidate", true)
+    val result = JSONObject(LinuxAssetPrepare.start(root, spec.toString()))
+
+    val id = result.getString("rootfsCandidate")
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+    assertEquals(id, status().getString("rootfsCandidate"))
+    val candidate = File(envRoot, "rootfs-candidates/$id")
+    val receipt = JSONObject(File(candidate, "receipt.json").readText())
+    assertEquals(id, receipt.getString("id"))
+    assertEquals(sha256(bytes), receipt.getString("sha256"))
+    assertEquals(sha256(bytes), sha256(File(candidate, "asset.tar.xz").readBytes()))
+    assertEquals("ID=debian\n", File(candidate, "unpacked/etc/os-release").readText())
+    assertEquals("keep", File(shared, "shared-sentinel").readText())
+  }
+
+  @Test
+  fun rootfsCandidateDoesNotPublishAfterDigestMismatch() {
+    val bytes = goodArchive()
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    val spec = JSONObject(specJson(bytes, sha = "a".repeat(64)))
+      .put("kind", "rootfs").put("rootfsCandidate", true)
+    val result = JSONObject(LinuxAssetPrepare.start(root, spec.toString()))
+
+    assertEquals(LinuxAssetPrepare.PHASE_FAILED, status().getString("phase"))
+    assertFalse(File(envRoot, "rootfs-candidates/${result.getString("rootfsCandidate")}").exists())
+  }
+
+  @Test
+  fun identicalRootfsAtAnotherReleaseUrlUsesVerifiedPrivateCopy() {
+    val bytes = goodArchive()
+    val cache = Files.createDirectory(File(root, "archive-cache").toPath()).toFile()
+    val spec = JSONObject(specJson(bytes)).put("kind", "rootfs").put("rootfsCandidate", true)
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    LinuxAssetPrepare.start(root, spec.toString(), cache)
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+    val cached = File(cache, LinuxRootfsArchiveCache.NAME)
+    assertEquals(sha256(bytes), sha256(cached.readBytes()))
+
+    LinuxAssetPrepare.opener = LinuxAssetIO.Opener { _, _, _ -> throw AssertionError("Unexpected network request") }
+    spec.put("url", goodUrl.replace("v1.2.0", "v1.2.1"))
+    val result = JSONObject(LinuxAssetPrepare.start(root, spec.toString(), cache))
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+    val candidate = File(envRoot, "rootfs-candidates/${result.getString("rootfsCandidate")}")
+    val archive = File(candidate, "asset.tar.xz")
+    assertFalse(Files.isSameFile(archive.toPath(), cached.toPath()))
+    assertEquals(sha256(bytes), sha256(archive.readBytes()))
+    assertEquals(spec.getString("url"), JSONObject(File(candidate, "receipt.json").readText()).getString("url"))
+  }
+
+  @Test
+  fun badCachedBytesAreReplacedOnlyAfterVerifiedDownloadAndExtraction() {
+    val bytes = goodArchive()
+    val cache = Files.createDirectory(File(root, "archive-cache").toPath()).toFile()
+    val cached = File(cache, LinuxRootfsArchiveCache.NAME)
+    val damaged = bytes.clone().apply { this[0] = (this[0].toInt() xor 1).toByte() }
+    cached.writeBytes(damaged)
+    val spec = JSONObject(specJson(bytes)).put("kind", "rootfs").put("rootfsCandidate", true)
+    LinuxAssetPrepare.opener = installOpener(damaged)
+    val failed = JSONObject(LinuxAssetPrepare.start(root, spec.toString(), cache))
+    assertEquals(LinuxAssetIO.CODE_DIGEST_MISMATCH, status().getString("code"))
+    assertFalse(File(envRoot, "rootfs-candidates/${failed.getString("rootfsCandidate")}").exists())
+    assertEquals(sha256(damaged), sha256(cached.readBytes()))
+    var requests = 0
+    LinuxAssetPrepare.opener = LinuxAssetIO.Opener { url, target, limit ->
+      requests++
+      installOpener(bytes).fetch(url, target, limit)
+    }
+    LinuxAssetPrepare.start(root, spec.toString(), cache)
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+    assertEquals(1, requests)
+    assertEquals(sha256(bytes), sha256(cached.readBytes()))
+  }
+
   // ── 五个负控：摘要、字节数、穿越、符号链接逃逸、炸弹 ────────────────────────
 
   @Test
@@ -390,7 +471,7 @@ class LinuxAssetPrepareTest {
     if (!symlinksUnavailable) {
       assertEquals("准备失败原因：$rootfsState", LinuxAssetPrepare.PHASE_OK, rootfsState.getString("phase"))
       val staged = stagedDir(bytes)
-      assertEquals("/usr/bin", java.nio.file.Files.readSymbolicLink(File(staged, "unpacked/bin").toPath()).toString())
+      assertEquals(Paths.get("/usr/bin"), Files.readSymbolicLink(File(staged, "unpacked/bin").toPath()))
       assertTrue(File(staged, "unpacked/usr/bin/bash").isFile)
     }
 
@@ -435,7 +516,8 @@ class LinuxAssetPrepareTest {
     val activeStaged = File(File(envRoot, LinuxAssetPrepare.DIR_STAGING), "b".repeat(64)).apply { mkdirs() }
 
     assertTrue(JSONObject(LinuxAssetPrepare.start(root, specJson(bytes))).getBoolean("ok"))
-    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+    val state = status()
+    assertEquals(state.toString(), LinuxAssetPrepare.PHASE_OK, state.getString("phase"))
 
     assertFalse("此前中断遗留的 staging-<sha>.part 必须被清理", stalePart.exists())
     assertTrue("非 sha 命名的目录不得误删", nonPart.isDirectory)

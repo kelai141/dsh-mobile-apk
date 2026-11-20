@@ -73,7 +73,7 @@ function fixture(t) {
   return { root, apkDir, crateDir, config, ndk: { root: join(root, 'ndk'), bin: ndkBin, hostTag: 'windows-x86_64', version: config.ndkVersion } }
 }
 
-function fakeRunner(f, { output = () => elf(), calls = [] } = {}) {
+function fakeRunner(f, { output = () => elf(), calls = [], artifact = `lib${f.config.library}.so` } = {}) {
   return async (command, args, options = {}) => {
     calls.push({ command, args, options })
     if (command === 'rustup' && args[0] === 'toolchain') {
@@ -84,7 +84,7 @@ function fakeRunner(f, { output = () => elf(), calls = [] } = {}) {
     }
     if (command === 'rustup' && args[0] === 'run' && args.includes('cargo')) {
       const target = args[args.indexOf('--target') + 1]
-      const path = join(f.crateDir, 'target-android', target, 'release', 'libdsh_phone_control_core.so')
+      const path = join(f.crateDir, 'target-android', target, 'release', artifact)
       mkdirSync(dirname(path), { recursive: true })
       writeFileSync(path, output(target))
       return { stdout: '', stderr: '' }
@@ -136,6 +136,61 @@ test('builds selected ABIs through rustup, verifies ELF, and records a safe mani
 
   const verified = verifyExistingOutputs({ outDir, abis: ['arm64-v8a', 'x86_64'], config: f.config })
   assert.equal(verified.length, 2)
+})
+
+test('Linux XZ builds and verifies its own crate against the shared Android toolchain config', async (t) => {
+  const f = fixture(t)
+  const sharedConfig = join(f.crateDir, 'build-config.json')
+  const config = loadBuildConfig(f.apkDir, 'linux-xz')
+  const crateDir = join(f.apkDir, config.crate)
+  mkdirSync(join(crateDir, 'src'), { recursive: true })
+  writeFileSync(join(crateDir, 'src', 'lib.rs'), 'pub fn read() {}\n')
+  writeFileSync(join(crateDir, 'Cargo.toml'), '[package]\nname = "dsh-linux-xz"\nversion = "0.1.0"\n')
+  writeFileSync(join(crateDir, 'Cargo.lock'), 'version = 4\n')
+
+  const options = { apkDir: f.apkDir, component: 'linux-xz', abis: ['x86_64'], out: join(f.root, 'linux-xz') }
+  await buildPhoneControlNative(options, {
+    ndk: f.ndk, env: {}, installedTargets: ['x86_64-linux-android'],
+    run: fakeRunner({ ...f, config, crateDir }, { output: () => elf({ machine: 62 }) }),
+  })
+  const jniOut = join(f.root, 'jni')
+  const verify = () => buildPhoneControlNative({ ...options, verify: true, jniOut })
+  await verify()
+  assert.deepEqual(readdirSync(join(jniOut, 'x86_64')), ['libdsh_linux_xz.so'])
+  const manifest = JSON.parse(readFileSync(abiManifestPath(options.out, 'x86_64', config), 'utf8'))
+  const inputs = manifest.inputs.files.map(entry => entry.path)
+  assert.ok(inputs.includes('native/linux-asset-codec/src/lib.rs'))
+  assert.ok(inputs.includes('native/phone-control-core/build-config.json'))
+  assert.ok(!inputs.includes('native/phone-control-core/src/lib.rs'))
+  writeFileSync(sharedConfig, readFileSync(sharedConfig, 'utf8') + '\n')
+  await assert.rejects(verify(), /source inputs changed/)
+  assert.throws(() => parseArgs(['--component', 'typo']), /Unsupported native component/)
+})
+
+test('stages the verified rootfs executable under its Android native library name', async (t) => {
+  const f = fixture(t)
+  const component = 'linux-rootfs'
+  const config = loadBuildConfig(f.apkDir, component)
+  const crateDir = join(f.apkDir, config.crate)
+  mkdirSync(join(crateDir, 'src'), { recursive: true })
+  writeFileSync(join(crateDir, 'src', 'main.rs'), 'fn main() {}\n')
+  writeFileSync(join(crateDir, 'Cargo.toml'), '[package]\nname = "dsh-rootfs-verify"\nversion = "0.1.0"\n')
+  writeFileSync(join(crateDir, 'Cargo.lock'), 'version = 4\n')
+  const options = { apkDir: f.apkDir, component, abis: ['x86_64'], out: join(f.root, 'verify-out') }
+  const deps = { ndk: f.ndk, env: {}, installedTargets: ['x86_64-linux-android'] }
+  const run = (machine) => fakeRunner({ ...f, config, crateDir }, {
+    artifact: 'dsh-rootfs-verify', output: () => elf({ machine }),
+  })
+  await assert.rejects(buildPhoneControlNative(options, { ...deps, run: run(183) }), /ELF machine/)
+  assert.equal(existsSync(abiLibraryPath(options.out, 'x86_64', config)), false)
+  await buildPhoneControlNative(options, { ...deps, run: run(62) })
+  const jniOut = join(f.root, 'jni')
+  await buildPhoneControlNative({ ...options, verify: true, jniOut })
+  assert.deepEqual(readdirSync(join(jniOut, 'x86_64')), ['libdsh_rootfs_verify.so'])
+  const metadata = JSON.parse(readFileSync(abiManifestPath(options.out, 'x86_64', config)))
+  assert.ok(metadata.inputs.files.some(entry => entry.path === 'native/linux-rootfs-verifier/src/main.rs'))
+  writeFileSync(join(crateDir, 'src', 'main.rs'), 'fn main() { std::process::exit(1) }\n')
+  await assert.rejects(buildPhoneControlNative({ ...options, verify: true }), /source inputs changed/)
 })
 
 test('rejects a wrong-architecture cargo output before copying it', async (t) => {

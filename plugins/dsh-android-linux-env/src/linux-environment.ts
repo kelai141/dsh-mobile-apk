@@ -1,4 +1,5 @@
 import { readdir, realpath, stat } from 'node:fs/promises'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { FiberState } from '@deepseek-ai/cordis'
@@ -8,6 +9,13 @@ import {
   authorizeMobileRoute, sendMobileRouteRejection,
   type MobileRouteRequest, type MobileRouteResponse, type MobileRouteAuthOptions,
 } from '@dsh-android/dsh-android-bridge'
+
+const rootfsInstallScope = new AsyncLocalStorage<{ candidateId: string; active: boolean }>()
+
+function requestedRootfsCandidate(): string | undefined {
+  const scope = rootfsInstallScope.getStore()
+  return scope?.active ? scope.candidateId : undefined
+}
 
 export interface BootstrapStatus {
   /** Finalized Bionilux shape. */
@@ -129,8 +137,29 @@ export function effectSafeApply(
 /** The runtime side's handle: exactly the shape the bootstrap's own `isManager` check accepts. */
 export interface RuntimeManager {
   install(...args: unknown[]): unknown
+  installFromRootfsCandidate?(manifest: unknown, runtimeId: unknown, candidateId: string): unknown
   uninstall(...args: unknown[]): unknown
   reinstall?(...args: unknown[]): unknown
+}
+
+function managerForInstall(manager: RuntimeManager): RuntimeManager {
+  if (requestedRootfsCandidate() === undefined) return manager
+  return new Proxy(manager, {
+    get(target, key) {
+      if (key === 'install') {
+        return (...args: unknown[]) => {
+          const candidateId = requestedRootfsCandidate()
+          if (candidateId === undefined) return target.install(...args)
+          if (typeof target.installFromRootfsCandidate !== 'function') {
+            throw new Error('The selected Linux runtime cannot accept a rootfs candidate')
+          }
+          return target.installFromRootfsCandidate(args[0], args[1], candidateId)
+        }
+      }
+      const value = Reflect.get(target, key, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
 }
 export interface PluginInstall { directory: string; entry?: string; config?: Record<string, unknown>; enable?: boolean }
 export interface PluginUninstall { runtimeId?: string; directory?: string; rollback?: unknown }
@@ -271,8 +300,13 @@ export function createLinuxPluginHost(options: {
       }
       const entry = await realpath(resolve(directory, defaultEntry(input.entry)))
       if (!inside(directory, entry)) throw new Error('Runtime plugin entry must be inside its verified directory')
+      if (requestedRootfsCandidate() !== undefined) {
+        const manifest = input.config?.manifest as { runtimes?: Array<{ id: string; rootfsCandidateHandoff?: boolean }> } | undefined
+        const selected = manifest?.runtimes?.find(item => item.id === input.config?.runtimeId)
+        if (selected?.rootfsCandidateHandoff !== true) throw new Error('The selected manifest does not allow rootfs candidate handoff')
+      }
       if (isActive() && activeDirectory === directory && manager !== undefined) {
-        return { directory, active: true, manager, rollback: release }
+        return { directory, active: true, manager: managerForInstall(manager), rollback: release }
       }
       const plugin = await (options.importModule ?? (url => import(url)))(pathToFileURL(entry).href)
       if (closed) throw stopping()
@@ -302,7 +336,7 @@ export function createLinuxPluginHost(options: {
         scope = activated
         manager = resolved
         activeDirectory = directory
-        return { directory, active: true, manager: resolved, rollback: release }
+        return { directory, active: true, manager: managerForInstall(resolved), rollback: release }
       } catch (error) {
         const failed = activated ?? ('dispose' in activation ? activation : undefined)
         await failed?.dispose()
@@ -428,16 +462,22 @@ async function readJsonBody(req: Request, limit: number): Promise<unknown> {
   return text === '' ? {} : JSON.parse(text)
 }
 
-async function readConfirmation(req: Request): Promise<{ confirmed: boolean; runtimeId?: string; expectedVersion?: string; enabled?: boolean; autoStart?: boolean }> {
+async function readConfirmation(req: Request): Promise<{ confirmed: boolean; runtimeId?: string; rootfsCandidate?: string; expectedVersion?: string; enabled?: boolean; autoStart?: boolean }> {
   const value = await readJsonBody(req, 1024)
   if (typeof value !== 'object' || value === null) return { confirmed: false }
-  const body = value as { confirmed?: unknown; runtimeId?: unknown; expectedVersion?: unknown; enabled?: unknown; autoStart?: unknown }
+  const body = value as { confirmed?: unknown; runtimeId?: unknown; rootfsCandidate?: unknown; expectedVersion?: unknown; enabled?: unknown; autoStart?: unknown }
   const runtimeId = typeof body.runtimeId === 'string' && /^[a-z0-9][a-z0-9-]*$/.test(body.runtimeId) ? body.runtimeId : undefined
+  const rootfsCandidate = body.rootfsCandidate
+  if (rootfsCandidate !== undefined && (typeof rootfsCandidate !== 'string' ||
+      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(rootfsCandidate))) {
+    throw new Error('Invalid rootfs candidate identifier')
+  }
   const version = body.expectedVersion
   if (version !== undefined && (typeof version !== 'string' || !/^[0-9][a-zA-Z0-9.+-]{0,79}$/.test(version))) {
     throw new Error('Invalid release version')
   }
   return { confirmed: body.confirmed === true, ...(runtimeId === undefined ? {} : { runtimeId }),
+    ...(rootfsCandidate === undefined ? {} : { rootfsCandidate }),
     ...(version === undefined ? {} : { expectedVersion: version }),
     ...(typeof body.enabled === 'boolean' ? { enabled: body.enabled } : {}),
     ...(typeof body.autoStart === 'boolean' ? { autoStart: body.autoStart } : {}) }
@@ -523,15 +563,24 @@ export function registerLinuxEnvironmentRoutes(options: {
           if (action !== 'check') {
             try { confirmation = await readConfirmation(req) } catch { send(res, 400, { error: '请求确认信息无效。' }); return }
             if (!confirmation.confirmed) { send(res, 400, { error: '操作需要用户明确确认。' }); return }
+            if (confirmation.rootfsCandidate !== undefined && action !== 'install') {
+              send(res, 400, { error: 'Rootfs candidates are accepted only when installing.' }); return
+            }
           }
           switch (action) {
             case 'check': await bootstrap.checkForUpdates({ source: 'manual' }); break
             // confirmed/activate 必须逐次显式下发：bootstrap 的 install/reinstall 要求两者皆为 true，
             // uninstall 要求 confirmed:true。runtimeId 由 UI 按 process.arch 选，缺席交给 bootstrap。
             case 'install': {
-              const { runtimeId, expectedVersion } = confirmation ?? {}
-              await bootstrap.install({ ...(runtimeId === undefined ? {} : { runtimeId }),
+              const { runtimeId, expectedVersion, rootfsCandidate } = confirmation ?? {}
+              const install = () => bootstrap.install({ ...(runtimeId === undefined ? {} : { runtimeId }),
                 ...(expectedVersion === undefined ? {} : { expectedVersion }), confirmed: true, activate: true })
+              if (rootfsCandidate === undefined) await install()
+              else {
+                const scope = { candidateId: rootfsCandidate, active: true }
+                try { await rootfsInstallScope.run(scope, install) }
+                finally { scope.active = false }
+              }
               break
             }
             case 'reinstall': await bootstrap.reinstall({ confirmed: true, activate: true } as never); break
@@ -556,6 +605,12 @@ export function registerLinuxEnvironmentRoutes(options: {
           // 「请检查环境状态与日志」，而日志在不可调试包上根本拿不到 —— 现场等于无证据。
           // 这里沿用本插件 env 路由的既有形态（error 给稳定标识，detail 给真因）。
           const detail = failure instanceof Error ? failure.message : String(failure)
+          const error = failure as { code?: string; rollbackError?: unknown; assetRollbackError?: unknown } | null
+          if (action === 'install' && error?.code === 'LINUX_NODE_STAGE_REQUIRED' &&
+              !error.rollbackError && !error.assetRollbackError) {
+            send(res, 409, { error: 'The shared Node asset needs preparation.', detail, reason: 'linux-node-stage-required' })
+            return
+          }
           send(res, 500, { error: 'Linux 环境操作失败，请检查环境状态与日志后重试。', detail, reason: 'linux-environment-op-failed' })
         }
         finally { busy = false }
