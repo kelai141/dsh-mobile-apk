@@ -177,6 +177,7 @@ const OBSERVED_ATTRIBUTES = [
   'data-dsh-android-model-menu',
   'data-plugin-panel',
   'data-dsh-main-panel-back',
+  'data-dsh-linux-panel-back',
   'data-dsh-sidebar-bubbles',
   'data-dsh-topbar-fold',
 ]
@@ -282,6 +283,11 @@ function closeRightFullscreen(panel: Element): boolean {
  * @returns whether a level was left (the press is consumed either way).
  */
 function closeMainPanel(leave: () => void): boolean {
+  const linuxBack = document.querySelector('button[data-dsh-linux-panel-back]')
+  if (linuxBack !== null) {
+    dispatchMouse(linuxBack, 'click')
+    return true
+  }
   // One detail level at a time, through the crumb the page itself draws.
   const details = PANEL_DETAIL_SELECTORS.flatMap(selector => [...document.querySelectorAll(selector)])
   const detail = details[details.length - 1]

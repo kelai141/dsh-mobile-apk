@@ -338,6 +338,26 @@ describe('二级页之间跳转与逐页返回', () => {
   })
 })
 
+it('沿多次分区跳转的完整历史逐页返回', async () => {
+  const names = ['通用设置', '关于', 'Linux环境']
+  const handle = buildPanel(names, names[0])
+  nav = new MobileSettingsNav()
+  nav.attach()
+  for (const name of names) {
+    handle.rows.get(name)!.click()
+    await settle()
+  }
+  for (const name of names.slice(0, -1).reverse()) {
+    back(handle.panel).click()
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
+    expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')?.textContent).toBe(name)
+  }
+  back(handle.panel).click()
+  await settle()
+  expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('home')
+})
+
 describe('打开设置时不把默认选中画成高亮', () => {
   it('刚打开时面板带 fresh 标记，aria-current 原样保留', async () => {
     const handle = buildPanel(['通用设置', '开发者选项'], '通用设置')

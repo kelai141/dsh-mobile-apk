@@ -336,8 +336,30 @@ describe('LinuxEnvironmentSection', () => {
     await act(async () => { back.click() })
     expect(header.querySelector('h1')?.textContent).toBe('Linux 环境')
     expect(close).not.toHaveBeenCalled()
+    expect(back.hasAttribute('data-dsh-linux-panel-back')).toBe(true)
+    await act(async () => { back.click() })
+    expect(element.querySelector('[data-linux-action="settings"]')?.getAttribute('aria-expanded')).toBe('false')
+    expect(close).not.toHaveBeenCalled()
     await act(async () => { back.click() })
     expect(close).toHaveBeenCalledOnce()
+  })
+
+  it('collapses the advanced Linux settings through the settings back event', async () => {
+    const { impl } = makeFetch({
+      '/api/android/linux-environment/status': { body: STATUS_INSTALLED },
+    })
+    vi.stubGlobal('fetch', impl)
+    const close = vi.fn()
+    const element = await render(close)
+    const trigger = element.querySelector<HTMLButtonElement>('[data-linux-action="settings"]')!
+    await act(async () => { trigger.click() })
+    const layer = element.querySelector('[data-dsh-settings-sublayer]')!
+    expect(layer).toBeTruthy()
+    const pop = new CustomEvent('dsh-settings-sublayer-pop', { bubbles: true, cancelable: true })
+    await act(async () => { layer.dispatchEvent(pop) })
+    expect(pop.defaultPrevented).toBe(true)
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+    expect(close).not.toHaveBeenCalled()
   })
 
   it('stays usable after a failed attempt on an installed environment (retry and back both enabled)', async () => {

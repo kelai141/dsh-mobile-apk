@@ -190,18 +190,23 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
   const sectionRef = useRef<HTMLElement>(null)
   const autoCheckStartedRef = useRef(false)
 
+  const collapseLinuxLayer = useCallback((): boolean => {
+    if (terminalOpen) setTerminalOpen(false)
+    else if (toolsOpen) setToolsOpen(false)
+    else if (advanced) setAdvanced(false)
+    else return false
+    return true
+  }, [terminalOpen, toolsOpen, advanced])
+
   useEffect(() => {
     const section = sectionRef.current
-    if (!section || (!terminalOpen && !toolsOpen)) return
+    if (!section) return
     const pop = (event: Event) => {
-      event.preventDefault()
-      setTerminalOpen(false)
-      setToolsOpen(false)
+      if (collapseLinuxLayer()) event.preventDefault()
     }
-    const terminal = section.querySelector('[data-dsh-settings-sublayer]')
-    terminal?.addEventListener('dsh-settings-sublayer-pop', pop)
-    return () => terminal?.removeEventListener('dsh-settings-sublayer-pop', pop)
-  }, [terminalOpen, toolsOpen])
+    section.addEventListener('dsh-settings-sublayer-pop', pop)
+    return () => section.removeEventListener('dsh-settings-sublayer-pop', pop)
+  }, [collapseLinuxLayer])
 
   const refresh = useCallback(async (): Promise<LinuxStatus | undefined> => {
     try {
@@ -428,16 +433,16 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
       className="dsh-linux-env"
       data-plugin="linux-environment"
       data-linux-environment="true"
+      data-dsh-settings-sublayer={advanced && !terminalOpen && !toolsOpen ? '' : undefined}
+      data-dsh-settings-sublayer-title={advanced && !terminalOpen && !toolsOpen ? tr('Linux环境', 'Linux environment') : undefined}
       data-phase={phase}
       data-installed={installed ? 'true' : 'false'}
       aria-label={tr('Linux环境', 'Linux environment')}
     >
       {sidebar && <header className="dsh-linux-panel-header">
-        <Button size="sm" variant="outline" onClick={() => {
-          if (terminalOpen) setTerminalOpen(false)
-          else if (toolsOpen) setToolsOpen(false)
-          else close()
-        }}>{tr('返回', 'Back')}</Button>
+        <Button size="sm" variant="outline"
+          data-dsh-linux-panel-back={terminalOpen || toolsOpen || advanced ? '' : undefined}
+          onClick={() => { if (!collapseLinuxLayer()) close() }}>{tr('返回', 'Back')}</Button>
         <h1>{terminalOpen ? tr('终端', 'Terminal') : toolsOpen
           ? tr('工具链', 'Toolchains') : tr('Linux 环境', 'Linux environment')}</h1>
       </header>}

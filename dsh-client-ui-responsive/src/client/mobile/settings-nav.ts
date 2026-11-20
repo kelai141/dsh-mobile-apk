@@ -345,8 +345,8 @@ export class MobileSettingsNav {
   private inSublayer = false
   /** 当前二级页对应的分区名（上游 aria-current 的事实）。 */
   private currentLabel: string | null = null
-  /** 上一个二级页分区名：返回键据此回到「上一页」而不是一路退回列表。 */
-  private previousLabel: string | null = null
+  /** 二级分区的访问历史，从最后一次跳转逐级回退。 */
+  private readonly sectionHistory: string[] = []
   /**
    * 当前详情页是否已经「落定」：`aria-current` 追上了用户点的那一行。
    *
@@ -376,7 +376,7 @@ export class MobileSettingsNav {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: [MOBILE_FORM_ATTR, 'aria-current'],
+        attributeFilter: [MOBILE_FORM_ATTR, 'aria-current', SUBLAYER_ATTR, SUBLAYER_TITLE_ATTR],
       })
       this.sync()
     } catch (error) {
@@ -490,19 +490,18 @@ export class MobileSettingsNav {
   private goBack(panel: HTMLElement): void {
     // 三级页的判据是 [inSublayer]（由分区登记的 DOM 事实推出），不是 [level]：
     // level 只表达首页/二级页两级，第三层是**二级页内部**再往下的一层。
-    if (this.inSublayer) {
+    if (this.level === LEVEL_DETAIL && resolveSublayer(panel) !== null) {
       this.popSublayer(panel)
       return
     }
     if (this.level === LEVEL_DETAIL) {
       // 分区之间也能跳（如「通用 → 关于」），返回应回到跳转前那一页而不是直接回列表。
-      const previous = this.previousLabel
-      if (previous !== null) {
+      let previous: string | undefined
+      while ((previous = this.sectionHistory.pop()) !== undefined) {
         const row = [...panel.querySelectorAll('nav button')].find(button => rowLabel(button) === previous)
         if (row !== undefined) {
           // 先把记账改成目标分区再点：否则这次「从 B 切回 A」会被记成新的历史，导致
           // 再按一次返回又跳回 B（往返循环，永远回不到列表）。
-          this.previousLabel = null
           this.currentLabel = previous
           this.settled = true
           this.pendingTitle = previous
@@ -560,7 +559,7 @@ export class MobileSettingsNav {
     // 不这么做的话，关闭设置再打开时会带着上一次的分区名，第一次切换就记出假历史，
     // 返回键会跳到用户根本没去过的分区。
     this.currentLabel = label
-    this.previousLabel = null
+    this.sectionHistory.length = 0
     this.settled = false
     this.level = LEVEL_DETAIL
     this.focusTarget = 'back'
@@ -570,7 +569,7 @@ export class MobileSettingsNav {
   private backToHome(panel: HTMLElement): void {
     this.level = LEVEL_HOME
     this.pendingTitle = null
-    this.previousLabel = null
+    this.sectionHistory.length = 0
     this.settled = false
     this.focusTarget = 'row'
     this.sync()
@@ -879,7 +878,7 @@ export class MobileSettingsNav {
       if (!this.settled) {
         if (activeLabel === this.currentLabel) this.settled = true
       } else if (activeLabel !== this.currentLabel) {
-        this.previousLabel = this.currentLabel
+        if (this.currentLabel !== null) this.sectionHistory.push(this.currentLabel)
         this.currentLabel = activeLabel
       }
     }
