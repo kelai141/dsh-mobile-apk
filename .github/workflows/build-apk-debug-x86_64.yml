@@ -170,6 +170,21 @@ jobs:
           test "$(git -C "$UPSTREAM" rev-parse HEAD)" = "$COMMIT"
           node scripts/check-dead-tokens.mjs --require
 
+      - name: 下载并校验 Bionilux loader
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BIONILUX_TAG: v0.10.10
+          BIONILUX_LOADER_SHA256: c8438e4fde1934e61c88311633f00949ff645d5c04cdb8671fa3d78164d2f307
+        run: |
+          set -euo pipefail
+          loader_dir=$(mktemp -d "$RUNNER_TEMP/dsh-bionilux-loader.XXXXXX")
+          asset=bionilux-loader-x86_64.so
+          gh release download "$BIONILUX_TAG" --repo kelai141/dsh-bionilux --dir "$loader_dir" --pattern "$asset"
+          printf '%s  %s\n' "$BIONILUX_LOADER_SHA256" "$asset" | (cd "$loader_dir" && sha256sum --check --strict -)
+          node scripts/check-native-linux-loader.mjs --source "$loader_dir" --abi x86_64
+          echo "DSH_NATIVE_LINUX_LOADER_DIR=$loader_dir" >> "$GITHUB_ENV"
+
       - name: 生成本次构建的 Kotlin 单测结果
         shell: bash
         run: |
@@ -246,6 +261,7 @@ jobs:
           # 摘要与脚本自报值对账：上传的字节必须就是被验过的那份字节。
           actual="$(sha256sum "$APK" | cut -d' ' -f1)"
           test "$actual" = "$APK_SHA256" || { echo "::error::APK 摘要与构建期声明不一致：$actual vs $APK_SHA256"; exit 1; }
+          node scripts/check-native-linux-loader.mjs --apk "$APK" --abi x86_64 --require
           node scripts/check-apk-signatures.mjs --self-test
           # keystore 凭据必须显式声明（issue #1031：门禁不再回落到 androiddebugkey/android）。
           node scripts/check-apk-signatures.mjs --apk "$APK" --keystore keystore/debug.keystore \

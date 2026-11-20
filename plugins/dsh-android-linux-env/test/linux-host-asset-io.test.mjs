@@ -185,6 +185,11 @@ test('a genuine host-staged bundle activates', async () => {
     assert.equal(status.installed, true, '真实暂存的包必须能装上')
     assert.equal(status.version, '1.2.0')
     assert.equal(pluginHost.activations.length, 1, '必须恰好激活一次')
+    const runtime = pluginHost.activations[0].config
+    assert.equal(typeof runtime.linuxAssetIO?.claimRootfsCandidate, 'function')
+    assert.equal(runtime.linuxAssetIO.claimRootfsCandidate, runtime.claimRootfsCandidate)
+    assert.equal(runtime.linuxAssetIO.downloadAsset, runtime.downloadAsset)
+    assert.equal(runtime.linuxAssetIO.extractArchive, runtime.extractArchive)
     assert.equal(status.enabled, true)
   } finally {
     await rm(filesDir, { recursive: true, force: true })
@@ -423,7 +428,7 @@ async function stageRootfsCandidate(filesDir) {
   return { root, id, candidate, tree, asset, destination: join(attempt, 'rootfs') }
 }
 
-test('rootfs handoff moves the owned tree once and preserves shared staging', async () => {
+test('the runtime config claims the owned rootfs once and preserves shared staging', async () => {
   const filesDir = await tempFilesDir()
   try {
     const prepared = await stageRootfsCandidate(filesDir)
@@ -431,7 +436,8 @@ test('rootfs handoff moves the owned tree once and preserves shared staging', as
     await mkdir(shared, { recursive: true })
     await writeFile(join(shared, 'sentinel'), 'shared')
     const oldInode = (await lstat(join(prepared.tree, 'rootfs-marker'))).ino
-    const io = createHostAssetIO({ filesDir })
+    const { runtimePluginConfig } = createLinuxBootstrapConfig({ filesDir, appVersion: '0.15.0' })
+    const io = runtimePluginConfig.linuxAssetIO
     await io.claimRootfsCandidate(prepared.id, prepared.asset, prepared.destination)
     assert.equal((await lstat(join(prepared.destination, 'rootfs-marker'))).ino, oldInode)
     assert.equal(await readFile(join(shared, 'sentinel'), 'utf8'), 'shared')

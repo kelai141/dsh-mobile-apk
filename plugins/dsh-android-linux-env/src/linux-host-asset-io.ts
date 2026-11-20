@@ -403,6 +403,8 @@ export function createLinuxBootstrapConfig(options: {
     // loader ships there instead of in the rootfs.
     runtimePluginConfig: {
       ...linuxAssetIO,
+      // Bionilux 0.10.10 reads the claim handler from its nested IO adapter.
+      linuxAssetIO,
       ...(nativeLibDir === undefined || nativeLibDir === '' ? {} : { nativeLibDir }),
     },
     appVersionProvider: () => appVersion,

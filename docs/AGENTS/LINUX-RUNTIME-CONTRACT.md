@@ -34,7 +34,7 @@ bootstrap 通过宿主 `linuxAssetIO` 读取归档并复制解包树。bootstrap
 
 ### Rootfs candidate handoff
 
-A runtime manifest may advertise `rootfsCandidateHandoff: true`. For that install, the Android shell creates a private, one-use candidate directory, downloads and verifies the original archive, safely extracts it, and atomically publishes a receipt with the generated candidate ID and asset identity. The page supplies the ID with the confirmed install request. The installer derives all paths within its private environment and accepts the candidate only for the selected manifest entry.
+运行时清单声明 `rootfsCandidateHandoff: true` 时，APK 校验归档并安全解包至私有候选目录，原子写入包含候选 ID 和资产身份的回执。后台队列或旧桥兼容路径随确认安装请求提交候选 ID。后台队列恢复或重试时会重新准备候选。宿主通过运行时配置中的 `linuxAssetIO.claimRootfsCandidate` 向 Bionilux 提供认领回调，既有顶层资产接口继续服务旧版运行时。
 
 The engine atomically claims the candidate within the install transaction, verifies the retained archive's size and SHA-256, and validates the tree's entry types and symlink boundaries before moving the tree to its destination. The shared staging cache keeps its normal ownership. The runtime still prepares the candidate, runs a real guest health probe, and writes the active record only after a healthy result. Failure discards the claimed candidate as part of transaction cleanup. Unclaimed receipts expire after one hour and are pruned during subsequent candidate preparation.
 
