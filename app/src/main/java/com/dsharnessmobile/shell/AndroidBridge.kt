@@ -266,6 +266,24 @@ class AndroidBridge(
   fun linuxAssetPrepareStatus(): String = trusted { LinuxAssetPrepare.status() }
 
   @JavascriptInterface
+  fun linuxAssetPause(): Boolean = trusted { LinuxAssetPrepare.pause() }
+
+  @JavascriptInterface
+  fun linuxAssetResume(): String = trusted { LinuxAssetPrepare.resume() }
+
+  @JavascriptInterface
+  fun linuxInstallJob(action: String, payload: String?): String = trusted {
+    val app = ShellAppContext.get() ?: return@trusted "{}"
+    when (action) {
+      "start" -> LinuxInstallJob.enqueue(app, payload ?: "")
+      "status" -> LinuxInstallJob.status(app)
+      "pause" -> JSONObject().put("ok", LinuxInstallJob.pause(app)).toString()
+      "retry" -> JSONObject().put("ok", LinuxInstallJob.retry(app)).toString()
+      else -> "{}"
+    }
+  }
+
+  @JavascriptInterface
   fun keepScreenOn(enable: Boolean) {
     checkTrustedFrame()
     onKeepScreen(enable)

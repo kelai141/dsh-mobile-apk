@@ -3,6 +3,8 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { FiberState } from '@deepseek-ai/cordis'
+import { parseTerminalRequest, TerminalError, type createLinuxTerminal } from './linux-terminal.js'
+import { linuxTools } from './linux-tools.js'
 import {
   authorizeMobileRoute, sendMobileRouteRejection,
   type MobileRouteRequest, type MobileRouteResponse, type MobileRouteAuthOptions,
@@ -30,6 +32,7 @@ export interface BootstrapStatus {
   runtime?: { id?: string; label?: string; state?: string } | string | null
   injectionActivated?: boolean
   enabled?: boolean
+  autoStart?: boolean
   pluginReleaseUrls?: { bootstrap?: string; runtime?: string }
   lastCheckAt?: string | null
   checkError?: string | null
@@ -51,12 +54,14 @@ export interface BootstrapStatus {
 export interface LinuxBootstrap {
   subscribe?(listener: (status: BootstrapStatus) => void): () => void
   status(): BootstrapStatus | Promise<BootstrapStatus>
-  checkForUpdates(options: { source: 'manual' | 'automatic' }): unknown | Promise<unknown>
+  checkForUpdates(options: { source: 'manual' | 'automatic' | 'startup' }): unknown | Promise<unknown>
   /** bootstrap 要求 confirmed:true 且 activate:true；runtimeId 缺席时按宿主 arch 取默认。 */
-  install(options: { runtimeId?: string; confirmed?: boolean; activate?: boolean }): unknown | Promise<unknown>
+  install(options: { runtimeId?: string; expectedVersion?: string; confirmed?: boolean; activate?: boolean }): unknown | Promise<unknown>
   reinstall(options?: { confirmed?: boolean; activate?: boolean }): unknown | Promise<unknown>
   uninstall(options?: { confirmed?: boolean }): unknown | Promise<unknown>
   setAutoUpdateEnabled(enabled: boolean): unknown | Promise<unknown>
+  setAutoStartEnabled?(enabled: boolean): unknown | Promise<unknown>
+  setRuntimeRunning?(enabled: boolean): unknown | Promise<unknown>
   /** 可选：只读刷新宿主在场视图（部分 bootstrap 版本提供）。 */
   syncInjectionState?(): unknown | Promise<unknown>
 }
@@ -175,6 +180,7 @@ export interface PluginInstallResult {
 }
 export interface LinuxPluginHost {
   shutdown(): Promise<void>
+  activeRuntime(): RuntimeManager | undefined
   install(options: PluginInstall): Promise<PluginInstallResult>
   uninstall(options?: PluginUninstall): Promise<void>
   isInjected(query: PluginInjectionQuery): Promise<PluginInjectionState>
@@ -340,6 +346,7 @@ export function createLinuxPluginHost(options: {
     // `rollback` belongs to the bootstrap's transaction; the host only releases the scope.
     uninstall: (_options?: PluginUninstall) => serialize(release),
     shutdown: () => { closed = true; return serialize(release) },
+    activeRuntime: () => isActive() ? manager : undefined,
     isInjected: async query => {
       const root = await rootReal()
       if (root === undefined) return { injected: false, active: false }
@@ -385,6 +392,7 @@ export function normalizeLinuxStatus(status: BootstrapStatus) {
     // A removed injection means automatic updates are off: surface it instead of a silent stop.
     injectionActivated: status.injectionActivated,
     enabled: status.enabled,
+    ...(status.autoStart === undefined ? {} : { autoStart: status.autoStart }),
     lastCheckAt: status.lastCheckAt ?? undefined,
     // 设置页按这些字段渲染架构、可选运行时与更新状态。此前归一化把它们丢掉，UI 只能看到
     // undefined——这里按 bootstrap 的 status 形状原样透传，缺省保持 undefined 而不是伪造默认值。
@@ -409,10 +417,13 @@ export function normalizeLinuxStatus(status: BootstrapStatus) {
 export async function checkLinuxEnvironmentOnStartup(bootstrap: LinuxBootstrap): Promise<void> {
   const status = await bootstrap.status()
   const installed = status.installed ?? Boolean(status.installedLinuxVersion)
-  if ((status.autoUpdate ?? status.autoUpdateEnabled) !== true || !installed) return
-  if (status.injectionActivated === false || status.enabled === false) return
+  if (!installed) return
   if (status.operation && status.operation !== 'idle') return
-  await bootstrap.checkForUpdates({ source: 'automatic' })
+  if (status.autoStart !== undefined) {
+    await bootstrap.checkForUpdates({ source: 'startup' })
+  } else if ((status.autoUpdate ?? status.autoUpdateEnabled) === true && status.injectionActivated !== false && status.enabled !== false) {
+    await bootstrap.checkForUpdates({ source: 'automatic' })
+  }
 }
 
 const ROUTES = [
@@ -424,6 +435,9 @@ const ROUTES = [
   ['uninstall', '/api/android/linux-environment/uninstall'],
   ['auto-update-on', '/api/android/linux-environment/auto-update-on'],
   ['auto-update-off', '/api/android/linux-environment/auto-update-off'],
+  ['terminal', '/api/android/linux-environment/terminal'],
+  ['runtime', '/api/android/linux-environment/runtime'],
+  ['tools', '/api/android/linux-environment/tools'],
 ] as const
 interface Request extends MobileRouteRequest { [Symbol.asyncIterator](): AsyncIterator<Buffer | string> }
 interface WebServer { register(route: { kind: 'exact'; path: string; handler(req: Request, res: MobileRouteResponse): Promise<void> }): () => void }
@@ -434,27 +448,39 @@ interface WebServer { register(route: { kind: 'exact'; path: string; handler(req
  * runtimeId 由设置页按 manifest 的 `runtimes[]` 选（arm64/x64 各一份），**不在宿主写死**；
  * 缺席时交给 bootstrap 按 `process.arch` 取默认 id。
  */
-async function readConfirmation(req: Request): Promise<{ confirmed: boolean; runtimeId?: string; rootfsCandidate?: string }> {
+async function readJsonBody(req: Request, limit: number): Promise<unknown> {
   let size = 0
   const chunks: Buffer[] = []
   for await (const chunk of req) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     size += bytes.length
-    if (size > 1024) throw new Error('Request body is too large')
+    if (size > limit) throw new Error('Request body is too large')
     chunks.push(bytes)
   }
   const text = Buffer.concat(chunks).toString('utf8').trim()
   // 空体 = 没有确认，直接判否（不把 EOF 当 JSON 解析错误之外的语义）。
-  const value: unknown = text === '' ? {} : JSON.parse(text)
+  return text === '' ? {} : JSON.parse(text)
+}
+
+async function readConfirmation(req: Request): Promise<{ confirmed: boolean; runtimeId?: string; rootfsCandidate?: string; expectedVersion?: string; enabled?: boolean; autoStart?: boolean }> {
+  const value = await readJsonBody(req, 1024)
   if (typeof value !== 'object' || value === null) return { confirmed: false }
-  const body = value as { confirmed?: unknown; runtimeId?: unknown; rootfsCandidate?: unknown }
+  const body = value as { confirmed?: unknown; runtimeId?: unknown; rootfsCandidate?: unknown; expectedVersion?: unknown; enabled?: unknown; autoStart?: unknown }
   const runtimeId = typeof body.runtimeId === 'string' && /^[a-z0-9][a-z0-9-]*$/.test(body.runtimeId) ? body.runtimeId : undefined
   const rootfsCandidate = body.rootfsCandidate
   if (rootfsCandidate !== undefined && (typeof rootfsCandidate !== 'string' ||
       !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(rootfsCandidate))) {
     throw new Error('Invalid rootfs candidate identifier')
   }
-  return { confirmed: body.confirmed === true, runtimeId, rootfsCandidate }
+  const version = body.expectedVersion
+  if (version !== undefined && (typeof version !== 'string' || !/^[0-9][a-zA-Z0-9.+-]{0,79}$/.test(version))) {
+    throw new Error('Invalid release version')
+  }
+  return { confirmed: body.confirmed === true, ...(runtimeId === undefined ? {} : { runtimeId }),
+    ...(rootfsCandidate === undefined ? {} : { rootfsCandidate }),
+    ...(version === undefined ? {} : { expectedVersion: version }),
+    ...(typeof body.enabled === 'boolean' ? { enabled: body.enabled } : {}),
+    ...(typeof body.autoStart === 'boolean' ? { autoStart: body.autoStart } : {}) }
 }
 
 export function registerLinuxEnvironmentRoutes(options: {
@@ -462,6 +488,8 @@ export function registerLinuxEnvironmentRoutes(options: {
   effect(register: () => () => void): unknown
   auth(): MobileRouteAuthOptions
   bootstrap(): LinuxBootstrap | undefined
+  terminal?: ReturnType<typeof createLinuxTerminal>
+  runtime?(): RuntimeManager | undefined
   /** 已 check/pinned 的 manifest 只读读取（不触网）；缺省时该路由返回 null。 */
   manifest?(): Record<string, unknown> | null
 }) {
@@ -471,6 +499,8 @@ export function registerLinuxEnvironmentRoutes(options: {
     res.end(JSON.stringify(body))
   }
   for (const [action, path] of ROUTES) {
+    if (action === 'terminal' && !options.terminal) continue
+    if (action === 'tools' && !options.runtime) continue
     options.effect(() => options.webServer.register({
       kind: 'exact',
       path,
@@ -481,6 +511,27 @@ export function registerLinuxEnvironmentRoutes(options: {
         if (req.method !== method) {
           res.writeHead(405, { allow: method, 'cache-control': 'no-store' })
           res.end()
+          return
+        }
+        if (action === 'terminal' && options.terminal) {
+          try {
+            const payload = await readJsonBody(req, 32 * 1024).catch(() => {
+              throw new TerminalError(400, 'linux-terminal-request-invalid')
+            })
+            send(res, 200, await options.terminal.request(parseTerminalRequest(payload)))
+          } catch (failure) {
+            if (failure instanceof TerminalError) send(res, failure.status, { error: failure.message, detail: failure.detail })
+            else send(res, 500, { error: 'linux-terminal-failed', detail: failure instanceof Error ? failure.message : String(failure) })
+          }
+          return
+        }
+        if (action === 'tools') {
+          try {
+            const body = await readJsonBody(req, 1024)
+            send(res, 200, await linuxTools(options.runtime?.(), body))
+          } catch (failure) {
+            send(res, 409, { error: 'linux-tools-failed', detail: failure instanceof Error ? failure.message : String(failure) })
+          }
           return
         }
         const bootstrap = options.bootstrap()
@@ -508,15 +559,11 @@ export function registerLinuxEnvironmentRoutes(options: {
         if (busy) { send(res, 409, { error: '另一项 Linux 环境操作正在进行，请稍后重试。' }); return }
         busy = true
         try {
-          let runtimeId: string | undefined
-          let rootfsCandidate: string | undefined
+          let confirmation: Awaited<ReturnType<typeof readConfirmation>> | undefined
           if (action !== 'check') {
-            let confirmation: Awaited<ReturnType<typeof readConfirmation>>
             try { confirmation = await readConfirmation(req) } catch { send(res, 400, { error: '请求确认信息无效。' }); return }
             if (!confirmation.confirmed) { send(res, 400, { error: '操作需要用户明确确认。' }); return }
-            runtimeId = confirmation.runtimeId
-            rootfsCandidate = confirmation.rootfsCandidate
-            if (rootfsCandidate !== undefined && action !== 'install') {
+            if (confirmation.rootfsCandidate !== undefined && action !== 'install') {
               send(res, 400, { error: 'Rootfs candidates are accepted only when installing.' }); return
             }
           }
@@ -525,7 +572,9 @@ export function registerLinuxEnvironmentRoutes(options: {
             // confirmed/activate 必须逐次显式下发：bootstrap 的 install/reinstall 要求两者皆为 true，
             // uninstall 要求 confirmed:true。runtimeId 由 UI 按 process.arch 选，缺席交给 bootstrap。
             case 'install': {
-              const install = () => bootstrap.install({ ...(runtimeId === undefined ? {} : { runtimeId }), confirmed: true, activate: true })
+              const { runtimeId, expectedVersion, rootfsCandidate } = confirmation ?? {}
+              const install = () => bootstrap.install({ ...(runtimeId === undefined ? {} : { runtimeId }),
+                ...(expectedVersion === undefined ? {} : { expectedVersion }), confirmed: true, activate: true })
               if (rootfsCandidate === undefined) await install()
               else {
                 const scope = { candidateId: rootfsCandidate, active: true }
@@ -538,6 +587,16 @@ export function registerLinuxEnvironmentRoutes(options: {
             case 'uninstall': await bootstrap.uninstall({ confirmed: true } as never); break
             case 'auto-update-on': await bootstrap.setAutoUpdateEnabled(true); break
             case 'auto-update-off': await bootstrap.setAutoUpdateEnabled(false); break
+            case 'runtime':
+              if (confirmation?.enabled !== undefined && bootstrap.setRuntimeRunning) {
+                await bootstrap.setRuntimeRunning(confirmation.enabled)
+              } else if (confirmation?.autoStart !== undefined && bootstrap.setAutoStartEnabled) {
+                await bootstrap.setAutoStartEnabled(confirmation.autoStart)
+              } else {
+                send(res, 400, { error: 'linux-runtime-action-unavailable' })
+                return
+              }
+              break
           }
           send(res, 200, normalizeLinuxStatus(await bootstrap.status()))
         } catch (failure) {

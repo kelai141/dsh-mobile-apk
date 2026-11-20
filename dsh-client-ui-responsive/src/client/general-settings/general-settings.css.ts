@@ -22,6 +22,14 @@
  * 手绘圆角控件，照上游 Switch 写两处 `corner-shape: round`。
  */
 export const GENERAL_SETTINGS_CSS: string = `
+[data-plugin='android-general'] .dsh-gs-control button {
+  min-height: 40px;
+  padding: 8px 14px;
+}
+
+@media (pointer: coarse) {
+  [data-plugin='android-general'] .dsh-gs-control button { min-height: 44px; }
+}
 [data-plugin='android-general'] {
   display: flex;
   flex-direction: column;

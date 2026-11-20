@@ -59,6 +59,8 @@ import { PhoneControlSection } from './dev-section/phone-control.tsx'
 import { NotifySettingsSection } from './dev-section/notify-settings.tsx'
 import { ApkUpdateSection } from './dev-section/apk-update.tsx'
 import { LinuxEnvironmentSection } from './linux-environment/LinuxEnvironmentSection.tsx'
+import { LinuxEnvironmentPanel, LinuxPanelIcon } from './linux-environment/LinuxEnvironmentPanel.tsx'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { LINUX_ENVIRONMENT_CSS } from './linux-environment/linux-environment.css.ts'
 import { DEV_SECTION_CSS } from './dev-section/dev-section.css.ts'
 import { MARKETPLACE_CSS } from './marketplace/marketplace.css.ts'
@@ -427,6 +429,13 @@ export function apply(ctx: ClientContext): void {
     order: 95,
     label: () => tr('Linux环境', 'Linux environment'),
   }, LinuxEnvironmentSection))
+  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+    name: 'sidebar.panellist', id: 'android-linux-environment', order: 30,
+    label: () => tr('Linux环境', 'Linux environment'),
+  }, LinuxPanelIcon))
+  ctx.slots.inject('main', () => ctx.slots.register({
+    name: 'main', key: 'android-linux-environment', inject: () => ({ close: () => ctx.layout.selectPanel(null) }),
+  }, LinuxEnvironmentPanel))
 
   // Android general-settings rows (issue #59): immersive status-bar toggle.
   // 0.13.3 (D6): the font-size slider retired — upstream ui-theme fontSize

@@ -152,7 +152,8 @@ internal object LinuxRootfsBlocks {
     if (cacheDir == null || spec.size <= HEADER + TAIL || !Files.isDirectory(cacheDir.toPath(), NOFOLLOW_LINKS)) return false
     val cached = File(cacheDir, LinuxRootfsArchiveCache.NAME).toPath()
     if (!Files.isRegularFile(cached, NOFOLLOW_LINKS)) return false
-    val rebuild = LinuxAssetIO.Opener { url, temp, _ ->
+    val rebuild = LinuxAssetIO.Opener { fetchUrl, temp, _ ->
+      val url = if (http === LinuxAssetIO.HttpOpener) LinuxAssetIO.downloadSources(spec, fetchUrl).first() else fetchUrl
       FileChannel.open(cached, READ, NOFOLLOW_LINKS).use { source ->
         val size = source.size()
         if (size !in (HEADER + TAIL + 1).toLong()..LinuxAssetIO.MAX_DOWNLOAD_BYTES) return@Opener -1L

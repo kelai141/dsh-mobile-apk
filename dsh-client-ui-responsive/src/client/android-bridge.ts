@@ -27,6 +27,9 @@ export interface AndroidShellBridge {
   linuxAssetPrepare?: (specJson: string) => string
   /** 读取上一次准备的阶段与失败原因（`phase`/`code`/`detail`/`stagedPath`）。 */
   linuxAssetPrepareStatus?: () => string
+  linuxAssetPause?: () => boolean
+  linuxAssetResume?: () => string
+  linuxInstallJob?: (action: 'start' | 'status' | 'pause' | 'retry', payload: string | null) => string
   /** Restart the engine service process (kill + watchdog relaunch). */
   /**
    * 重启引擎；返回是否**真的发起了**（false = 已在重启中或上下文缺失）。

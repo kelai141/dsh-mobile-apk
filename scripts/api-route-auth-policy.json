@@ -47,10 +47,13 @@
         "/api/android/linux-environment/reinstall",
         "/api/android/linux-environment/uninstall",
         "/api/android/linux-environment/auto-update-on",
-        "/api/android/linux-environment/auto-update-off"
+        "/api/android/linux-environment/auto-update-off",
+        "/api/android/linux-environment/terminal",
+        "/api/android/linux-environment/runtime",
+        "/api/android/linux-environment/tools"
       ],
       "literalEvidence": "for (const [action, path] of ROUTES)",
-      "reason": "Linux 环境路由由 ROUTES 的动作/路径成对常量注册；八条鉴权与方法判据共用同一 handler，不能另起无鉴权入口。"
+        "reason": "Linux 环境路由统一由 ROUTES 注册，使用同一鉴权和方法校验。"
     },
     {
       "source": "plugins/dsh-android-browser/src/index.ts",
@@ -180,6 +183,39 @@
       "authCallMarker": "authorizeMobileRoute(req, options.auth())"
     },
     {
+        "id": "linux-environment-terminal",
+        "path": "/api/android/linux-environment/terminal",
+        "kind": "exact",
+        "registrationSource": "plugins/dsh-android-linux-env/src/linux-environment.ts",
+        "registration": "path,",
+        "endpointSource": "plugins/dsh-android-linux-env/src/linux-environment.ts",
+        "access": "protected",
+        "authMarker": "authorizeMobileRoute(req, options.auth())",
+        "authCallMarker": "authorizeMobileRoute(req, options.auth())"
+      },
+      {
+        "id": "linux-environment-runtime",
+        "path": "/api/android/linux-environment/runtime",
+        "kind": "exact",
+        "registrationSource": "plugins/dsh-android-linux-env/src/linux-environment.ts",
+        "registration": "path,",
+        "endpointSource": "plugins/dsh-android-linux-env/src/linux-environment.ts",
+        "access": "protected",
+        "authMarker": "authorizeMobileRoute(req, options.auth())",
+        "authCallMarker": "authorizeMobileRoute(req, options.auth())"
+      },
+      {
+        "id": "linux-environment-tools",
+        "path": "/api/android/linux-environment/tools",
+        "kind": "exact",
+        "registrationSource": "plugins/dsh-android-linux-env/src/linux-environment.ts",
+        "registration": "path,",
+        "endpointSource": "plugins/dsh-android-linux-env/src/linux-environment.ts",
+        "access": "protected",
+        "authMarker": "authorizeMobileRoute(req, options.auth())",
+        "authCallMarker": "authorizeMobileRoute(req, options.auth())"
+      },
+      {
       "id": "undo-api",
       "path": "/api/undo",
       "kind": "prefix",
