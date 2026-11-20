@@ -6,8 +6,36 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 [data-plugin='linux-environment'] {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 0;
   padding: 4px 0 12px;
+}
+
+.dsh-linux-panel {
+  box-sizing: border-box;
+  height: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: var(--dsh-mobile-top-inset, 0px) 16px max(12px, env(safe-area-inset-bottom));
+}
+
+.dsh-linux-panel > [data-linux-environment] {
+  max-width: 680px;
+  margin-inline: auto;
+  padding-top: 0;
+}
+
+.dsh-linux-panel-header {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.dsh-linux-panel-header > h1 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
 }
 
 .dsh-linux-env-header > span {
@@ -33,8 +61,41 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 12px;
+  min-height: 48px;
+  justify-content: space-between;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+}
+
+.dsh-linux-env-status { padding-block: 12px 8px; }
+.dsh-linux-env-hint { padding-block: 6px; }
+.dsh-linux-env-progress { padding-block: 12px 4px; font-variant-numeric: tabular-nums; }
+.dsh-linux-env-progress p { margin: 0 0 6px; }
+.dsh-linux-env-progress progress { width: 100%; accent-color: var(--dsw-alias-link); }
+.dsh-linux-env-actions { padding-block: 16px; }
+
+.dsh-linux-env button.dsh-dev-btn,
+.dsh-linux-panel-header > button,
+.dsh-linux-terminal-tools > button:not(.dsh-linux-back),
+.dsh-linux-tools button:not(.dsh-linux-env-link),
+.dsh-linux-env-progress button,
+.dsh-linux-env-error button {
+  min-height: 44px;
+  padding: 8px 14px;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.dsh-linux-env .dsh-linux-env-primary:not(:disabled) {
+  background: var(--dsw-alias-button-primary-fill, #162035);
+  border-color: transparent;
+  color: var(--dsw-alias-label-primary-foreground, #fff);
+  font-weight: 600;
+}
+
+.dsh-linux-env .dsh-linux-env-primary:not(:disabled):hover {
+  background: var(--dsw-alias-button-primary-hover, #303b50);
 }
 
 .dsh-linux-env-row select {
@@ -46,6 +107,123 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   color: var(--dsw-alias-label-primary);
   font: inherit;
 }
+
+.dsh-linux-env-link {
+  justify-content: space-between;
+  min-height: 48px;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  text-align: start;
+  touch-action: manipulation;
+}
+
+.dsh-linux-env-link:not(:disabled):hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-linux-env-link:disabled { color: var(--dsw-alias-label-tertiary); }
+.dsh-linux-env-link:focus-visible, .dsh-linux-env-row select:focus-visible {
+  outline: 2px solid var(--dsw-alias-link);
+  outline-offset: -2px;
+}
+
+.dsh-linux-diagnostics summary { cursor: pointer; }
+.dsh-linux-diagnostics summary > :last-child { color: var(--dsw-alias-label-secondary); }
+.dsh-linux-diagnostics summary > :last-child::after {
+  content: '›';
+  display: inline-block;
+  margin-inline-start: 8px;
+}
+.dsh-linux-diagnostics[open] summary > :last-child::after { transform: rotate(90deg); }
+.dsh-linux-diagnostics dl { margin: 0; padding: 8px 0; }
+.dsh-linux-diagnostics dl > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+.dsh-linux-diagnostics dd { margin: 0; overflow-wrap: anywhere; text-align: end; }
+
+.dsh-linux-terminal {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dsh-linux-terminal-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+}
+
+.dsh-linux-terminal-tools > [role='status'] {
+  flex: 1;
+}
+
+.dsh-linux-back {
+  align-self: flex-start;
+  flex: none;
+  min-height: 40px;
+  padding-inline: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.dsh-linux-back:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-linux-back:focus-visible { outline: 2px solid var(--dsw-alias-link); }
+
+[data-dsh-settings-depth='1'] .dsh-linux-back,
+html[data-dsh-mobile-form] [data-dsh-settings-dialog] [data-linux-action='back'] {
+  display: none;
+}
+
+.dsh-linux-terminal-screen {
+  box-sizing: border-box;
+  height: clamp(156px, 58vh, 640px);
+  height: clamp(112px, 58dvh, 640px);
+  min-width: 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2, #f6f7f9);
+  color: var(--dsw-alias-label-primary, #ecedf1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  overflow: hidden;
+}
+
+.dsh-linux-terminal-keys {
+  display: flex;
+  gap: 6px;
+  padding-block: 2px 4px;
+  overflow-x: auto;
+}
+
+.dsh-linux-terminal-keys > button {
+  flex: 1 0 auto;
+  min-width: 38px;
+  min-height: 44px;
+  padding-inline: 9px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  touch-action: manipulation;
+}
+
+.dsh-linux-tools > button[data-dsh-settings-sublayer-back] { margin-bottom: 8px; }
+.dsh-linux-tool-packages { margin: 0; padding: 0; list-style: none; max-height: 320px; overflow: auto; }
 
 .dsh-linux-env-check {
   display: flex;
@@ -59,8 +237,13 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 .dsh-linux-env-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
+}
+
+.dsh-linux-env-actions > button.dsh-dev-btn {
+  flex: 0 1 auto;
+  width: auto;
 }
 
 .dsh-linux-env-error {

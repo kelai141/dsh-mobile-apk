@@ -457,11 +457,17 @@ test('rootfs handoff rejects mismatched receipts and rehashes the retained archi
   }
 })
 
-test('candidate verification rejects an out-of-tree link before publishing the tree', async () => {
+test('candidate verification rejects an out-of-tree link before publishing the tree', async t => {
   const filesDir = await tempFilesDir()
   try {
     const prepared = await stageRootfsCandidate(filesDir)
-    await symlink('../../external', join(prepared.tree, 'external-link'), 'file')
+    try {
+      await symlink('../../external', join(prepared.tree, 'external-link'), 'file')
+    } catch (error) {
+      if (process.platform !== 'win32' || error?.code !== 'EPERM') throw error
+      t.skip('Windows has no privilege to create file symlinks')
+      return
+    }
     await assert.rejects(
       createHostAssetIO({ filesDir }).claimRootfsCandidate(prepared.id, prepared.asset, prepared.destination),
       { code: 'linux-host-tree-unsafe' },

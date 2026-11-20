@@ -260,20 +260,27 @@ bootstrap 调用 `linuxPluginHost.install({directory,entry='lib/index.js',config
 
 `status` 归一映射同时接受 Bionilux 定稿字段（`installed/version/mobileVersion/autoUpdate/availableVersion/updateAvailable/updateBlocked/busy/operation/runtime/injectionActivated/enabled/pluginReleaseUrls/lastCheckAt/error`）与此前提案字段（`installedLinuxVersion/currentMobileVersion/autoUpdateEnabled/latestReleaseVersion/runtimeId/plugins.*.releaseUrl/lastError`）；`updateBlocked` 时不下发候选版本但保留不兼容原因，缺版本号显示 `unknown` 而不留空。自动检查门为「已安装 + `injectionActivated !== false` + `enabled !== false` + 开关开启 + 应用版本与安装时记录不同」，每个应用版本一次，由服务侧持久化去重。
 
-### 资产准备（0.15.0，(iii) 形态：客户端触发）
+### Linux 资产准备与安装任务
 
 **为什么由宿主准备字节、而不是 bootstrap 自取**：`.tar.xz` 的解码在引擎侧没有实现（Node 的 zlib 不含 xz，本仓 node_modules 无任何 xz/tar 包），而宿主已有生产级的解包能力可复用；更要紧的是**引擎侧没有反向通道**调用宿主——壳侧是客户端，旧的长轮询设备控制队列（`ControlPoller` 与 `control-policy.ts`）已随原生切换删除；当前手机控制走私有 socket，其会话门同样要求 `danger-full-access`。把下载挂上去等于「装 Linux 必须先开设备控制档」，与「Linux 不是沙箱、不要只靠 danger-full-access」相悖。客户端触发走 `@JavascriptInterface` 直连，不经过那条队列，也不需要新增任何引擎→壳能力。
 
 | JS 桥方法（`androidBridge`） | 语义 |
 |---|---|
-| `linuxAssetPrepare(specJson)` | Accepts `{url, sha256, size, kind}` and an optional `rootfsCandidate: true` for rootfs. The shell derives the staging location and returns `{ok, phase}`. Candidate preparation also returns a shell-generated `rootfsCandidate` ID. |
-| `linuxAssetPrepareStatus()` | Returns `phase`, `code`, `detail`, `stagedPath`, and `bytes`. A candidate reports its `rootfsCandidate` ID and exposes no staging path. |
+| `linuxAssetPrepare(specJson)` | 入参为资产清单 `{url, sha256, size, kind?, source?, rootfsCandidate?}`；普通资产暂存至 `staging/<sha256>/`。候选 rootfs 使用壳生成的独占目录和候选 ID。立即返回准备结果及适用的候选 ID。来源或清单不合规时拒绝。 |
+| `linuxAssetPrepareStatus()` | 读取当前资产阶段、失败码与详情、暂存路径、字节数、总大小及速度。候选 rootfs 返回候选 ID。 |
+| `linuxAssetPause()` | 请求暂停当前资产下载；只在下载阶段接受，校验与解包期间返回 `false`。 |
+| `linuxAssetResume()` | 使用当前资产原清单、摘要、大小及来源恢复下载，并复用 `.part` 文件中的已接收字节。 |
+| `linuxInstallJob(action, payload)` | `start` 校验并原子持久化安装任务后排队；`status` 返回任务与当前资产进度；`pause` 请求暂停；`retry` 恢复暂停或失败任务。任务文件为 `linux-environment/install-job.json`。 |
 
-壳侧判据（实现见 `app/src/main/java/com/dsharnessmobile/shell/LinuxAssetIO.kt` 与 `LinuxAssetPrepare.kt`）：只接受 https + 主机白名单（`github.com` / GitHub 资产 CDN）且路径必须是**本仓** Releases 的 `<tag>/<asset>`；重定向**逐跳**复核（不用 `instanceFollowRedirects` 的自动跟随）；`SHA-256` 与**字节数**都要与清单一致；解包复用既有 `SnapshotExtractor`（绝对路径/`..`/符号链接逃逸/解压炸弹上限都在那里）；解包目标与下载目标都由壳侧强制落在 `DSH_FILES_DIR/linux-environment` 内。**除非 Linux 环境在场**（根目录 + bootstrap 状态文件 `linux-bootstrap-state.json`）一律拒绝，故它不是通用下载器。只有全部通过才原子发布成 `staging/<sha256>/`，并把**归档字节留在原地**供引擎侧复验。
+设置页从固定版本的发布 manifest 取得 runtime 插件、backend、rootfs 与 Node 资产，按序调用 `linuxInstallJob('start', payload)`。APK 将 `{version, runtimeId, assets, index, state}` 通过原子替换写入 `linux-environment/install-job.json`。任务由单线程 worker 执行，随后的状态查询读取任务阶段及 `linuxAssetPrepareStatus()` 进度。EngineService 恢复时调用 `resumePending()`，继续 `queued` 或 `installing` 状态任务；下载进度通过系统通知展示。暂停状态和资产索引持久化，重试后继续当前资产并复用 `.part` 文件。完成全部暂存后，安装任务向引擎 POST `/install`，携带固定 `runtimeId` 与 `expectedVersion`。启用候选交接时，队列同时提交当前 rootfs 的候选 ID。失败重试会重新准备候选。
 
-**职责边界（0.15.0 的所有权变化，必须如实读）**：bootstrap **不再取字节** —— `linuxAssetIO.downloadAsset` / `extractArchive` 从「bootstrap 自己下载并解包」变成宿主侧准备之后的**透传/占位**，因为引擎侧既解不了 xz 也调不动宿主。bootstrap 仍然拥有版本、状态、**最终落位**与激活的权威；`reused: true` 必须来自它自己的复验结果（保留归档的摘要，或解包树上的 `unpackedSize` + 入口 + 包名），**不得**只信宿主写下的标记。引擎侧在「什么都没准备」时必须**失败关闭**，不得半装。
+壳侧判据（实现见 `app/src/main/java/com/dsharnessmobile/shell/LinuxAssetIO.kt`、`LinuxAssetExtractor.kt`、`LinuxAssetPrepare.kt` 与 `LinuxInstallJob.kt`）：只接受 https + 主机白名单（`github.com` / GitHub 资产 CDN）且路径必须是本仓 Releases 的 `<tag>/<asset>`；重定向逐跳复核；SHA-256 与字节数都要符合清单；解包由 Linux 专用 `LinuxAssetExtractor` 执行，下载、工作与发布路径均约束在 `DSH_FILES_DIR/linux-environment` 内。环境根目录与 `linux-bootstrap-state.json` 在场时才接受准备请求。全部通过后原子发布至 `staging/<sha256>/`，归档字节与解包目录均保留，供引擎侧复验与重建。
 
-The client supplies the candidate ID to the authenticated `install` route when the selected runtime advertises candidate handoff. The engine re-verifies the candidate inside that transaction. See [the rootfs candidate handoff contract](LINUX-RUNTIME-CONTRACT.md#rootfs-candidate-handoff).
+**职责边界**：APK 负责资产下载、哈希/大小校验与安全解包；`linuxAssetIO.downloadAsset` 返回宿主暂存归档，`extractArchive` 将对应解包树复制到 bootstrap 暂存槽。bootstrap 按 manifest 自行复算归档摘要与大小，校验解包体量、包名和入口，再决定复用或重建，最终负责版本状态、安装事务、落位和 runtime 激活。任一暂存资产缺失或不符合清单时安装失败，不会激活不完整 runtime。
+
+自动更新准备由 APK 任务队列执行，bootstrap 管理偏好与更新判定。EngineService 启动时恢复待处理任务并检查自动更新条件；更新沿用已安装 runtimeId、manifest 清单和任务记录的下载来源。任务阶段、资产进度和失败原因通过 `linuxInstallJob('status', null)` 回读。bootstrap 依据持久化冷却时间执行启动检查；APK 或 Release 更新不会自动启用 Linux 插件。
+
+引擎在安装事务内复验候选。见 [rootfs 候选交接契约](LINUX-RUNTIME-CONTRACT.md#rootfs-candidate-handoff)。
 
 页面状态由 `normalizeLinuxStatus` 映射，同时接受 Bionilux 定稿字段与此前提案字段；其中两条插件 `releaseUrl` 来自 bootstrap 状态（`pluginReleaseUrls` 或 `plugins.*.releaseUrl`），不拼接默认最新版本。Linux rootfs 是 glibc 运行支持，不是安全沙箱；guest root 不等于 Android root；Termux/Bionic Bash 与 Debian/glibc Linux Bash 分开展示，共享 glibc Node 不替换原有 Termux Node。已安装但 runtime 被手工移除时，页面显式显示「自动更新已停用」并要求重新放回并启用，而不是静默停更。内部 bootstrap 成品接线及真实安装验收状态见 `known-gaps.md`。
 

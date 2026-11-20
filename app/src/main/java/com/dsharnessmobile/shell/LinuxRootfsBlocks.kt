@@ -157,8 +157,10 @@ internal object LinuxRootfsBlocks {
         val size = source.size()
         if (size !in (HEADER + TAIL + 1).toLong()..LinuxAssetIO.MAX_DOWNLOAD_BYTES) return@Opener -1L
         val old = Edges(size, source.bytesAt(0, HEADER), source.bytesAt(size - TAIL, TAIL)).blocks()
+        val mirror = LinuxAssetIO.MIRRORS[spec.source]
+        val rangeUrl = if (url == spec.url && mirror != null) mirror + url else url
         fun fetch(start: Long, count: Long, out: OutputStream) {
-          if (!http.fetchRange(url, spec.size, start, count, out)) throw IOException("Asset range unavailable")
+          if (!http.fetchRange(rangeUrl, spec.size, start, count, out)) throw IOException("Asset range unavailable")
         }
         fun edge(start: Long, count: Int) = ByteArrayOutputStream(count).apply {
           fetch(start, count.toLong(), this)

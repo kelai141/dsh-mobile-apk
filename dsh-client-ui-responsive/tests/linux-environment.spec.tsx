@@ -90,11 +90,11 @@ function makeBridge(candidateId?: string) {
 let root: Root | undefined
 let host: HTMLElement | undefined
 
-async function render(close = vi.fn()): Promise<HTMLElement> {
+async function render(close = vi.fn(), sidebar = false): Promise<HTMLElement> {
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
-  await act(async () => { root!.render(<LinuxEnvironmentSection close={close} />) })
+  await act(async () => { root!.render(<LinuxEnvironmentSection close={close} sidebar={sidebar} />) })
   // The mount fetch resolves in a microtask; flush it so assertions see real state.
   await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 0) }) })
   return host
@@ -179,6 +179,31 @@ describe('LinuxEnvironmentSection', () => {
     expect(calls.find(call => call.url.endsWith('/install'))?.body).toMatchObject({
       confirmed: true, runtimeId: runtime.id, rootfsCandidate: candidateId,
     })
+  })
+
+  it('passes the pinned release and rootfs candidate flag to the Android install queue', async () => {
+    const runtime = { ...MANIFEST.runtimes[0], rootfsCandidateHandoff: true }
+    const { calls, impl } = makeFetch({
+      '/api/android/linux-environment/status': { body: { installed: false, architecture: 'arm64', defaultRuntimeId: runtime.id } },
+      '/api/android/linux-environment/manifest': { body: { manifest: { ...MANIFEST, runtimes: [runtime] } } },
+    })
+    vi.stubGlobal('fetch', impl)
+    const queued: Array<{ version: string; runtimeId: string; assets: Array<{ kind: string; rootfsCandidate?: boolean }> }> = []
+    const linuxInstallJob = vi.fn((action: string, payload: string | null) => {
+      if (action === 'start' && payload !== null) queued.push(JSON.parse(payload))
+      return action === 'start' ? '{"ok":true}' : '{}'
+    })
+    window.androidBridge = { linuxInstallJob } as unknown as Window['androidBridge']
+
+    const element = await render()
+    await act(async () => { (element.querySelector('[data-linux-action="install"]') as HTMLButtonElement).click() })
+
+    expect(queued).toHaveLength(1)
+    expect(queued[0]).toMatchObject({ version: MANIFEST.version, runtimeId: runtime.id })
+    expect(queued[0].assets.map(asset => [asset.kind, asset.rootfsCandidate])).toEqual([
+      ['plugin', undefined], ['backend', undefined], ['rootfs', true], ['node', undefined],
+    ])
+    expect(calls.some(call => call.url.endsWith('/install'))).toBe(false)
   })
 
   it('stages the runtime plugin plus backend, rootfs and node before posting install', async () => {
@@ -288,6 +313,33 @@ describe('LinuxEnvironmentSection', () => {
     expect(close).toHaveBeenCalledTimes(1)
   })
 
+  it('uses the sidebar header to return from toolchains and close Linux', async () => {
+    const { impl } = makeFetch({
+      '/api/android/linux-environment/status': { body: STATUS_INSTALLED },
+      '/api/android/linux-environment/tools': { body: { packages: [], source: 'official' } },
+    })
+    vi.stubGlobal('fetch', impl)
+    const close = vi.fn()
+    const element = await render(close, true)
+    const header = element.querySelector('.dsh-linux-panel-header')!
+    const back = header.querySelector('button')!
+    const tools = element.querySelector<HTMLButtonElement>('[data-linux-action="toolchains"]')!
+    expect(header.querySelector('h1')?.textContent).toBe('Linux 环境')
+    expect(element.querySelector('[data-linux-action="back"]')).toBeNull()
+    await act(async () => { element.querySelector<HTMLButtonElement>('[data-linux-action="settings"]')!.click() })
+    const diagnostics = element.querySelector('.dsh-linux-diagnostics')!
+    expect(diagnostics.textContent).toContain('运行诊断')
+    expect(diagnostics.textContent).toContain('arm64')
+    await act(async () => { tools.click() })
+    expect(header.querySelector('h1')?.textContent).toBe('工具链')
+    expect(element.querySelector('[data-dsh-settings-sublayer-back]')).toBeNull()
+    await act(async () => { back.click() })
+    expect(header.querySelector('h1')?.textContent).toBe('Linux 环境')
+    expect(close).not.toHaveBeenCalled()
+    await act(async () => { back.click() })
+    expect(close).toHaveBeenCalledOnce()
+  })
+
   it('stays usable after a failed attempt on an installed environment (retry and back both enabled)', async () => {
     const { impl } = makeFetch({
       '/api/android/linux-environment/status': { body: STATUS_INSTALLED },
@@ -366,7 +418,7 @@ describe('LinuxEnvironmentSection', () => {
     expect((element.querySelector('[data-linux-action="back"]') as HTMLButtonElement).disabled).toBe(false)
   }, 20000)
 
-  it('disables the primary action when the installed version is current and keeps reinstall available', async () => {
+  it('shows release status when current and keeps reinstall available under Linux settings', async () => {
     // 宿主状态可变：首轮自动 check 时已是最新（updateAvailable=false），之后上游才发 1.3.0。
     let upstreamReleased = false
     let checkCount = 0
@@ -387,12 +439,9 @@ describe('LinuxEnvironmentSection', () => {
     }))
 
     const element = await render()
-    const primary = element.querySelector('[data-linux-action="update"]') as HTMLButtonElement
-    expect(primary.disabled).toBe(true)
-    expect(primary.getAttribute('data-linux-primary')).toBe('current')
-    expect(primary.textContent).toContain('已是最新版本')
+    expect(element.querySelector('[data-linux-action="update"]')).toBeNull()
     expect(element.querySelector('[data-linux-auto-check="up-to-date"]')).not.toBeNull()
-    // 重新安装与检查更新不受影响。
+    await act(async () => { (element.querySelector('[data-linux-action="settings"]') as HTMLButtonElement).click() })
     expect((element.querySelector('[data-linux-action="reinstall"]') as HTMLButtonElement).disabled).toBe(false)
     const check = element.querySelector('[data-linux-action="check"]') as HTMLButtonElement
     expect(check.disabled).toBe(false)
@@ -401,7 +450,7 @@ describe('LinuxEnvironmentSection', () => {
       check.click()
       await new Promise((resolve) => { setTimeout(resolve, 50) })
     })
-    // 手动 check 报出新版本后主按钮解禁。
+    const primary = element.querySelector('[data-linux-action="update"]') as HTMLButtonElement
     expect(primary.disabled).toBe(false)
     expect(primary.getAttribute('data-linux-primary')).toBe('update')
     expect(primary.textContent).toContain('1.3.0')
@@ -516,6 +565,7 @@ describe('LinuxEnvironmentSection', () => {
       const autoHint = element.querySelector('[data-linux-auto-check="failed"]')
       expect(autoHint?.textContent).toContain(expectedHint)
       expect(autoHint?.textContent).toContain('GitHub request failed (403)')
+      await act(async () => { (element.querySelector('[data-linux-action="settings"]') as HTMLButtonElement).click() })
       expect((element.querySelector('[data-linux-action="reinstall"]') as HTMLButtonElement).disabled).toBe(false)
       expect((element.querySelector('[data-linux-action="uninstall"]') as HTMLButtonElement).disabled).toBe(false)
       expect((element.querySelector('[data-linux-action="back"]') as HTMLButtonElement).disabled).toBe(false)

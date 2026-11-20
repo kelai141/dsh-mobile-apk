@@ -47,6 +47,7 @@ function initialState(autoUpdate) {
   return {
     schemaVersion: 1,
     autoUpdateEnabled: autoUpdate === true,
+    autoStartEnabled: true,
     installedSystemMobileVersion: null,
     lastAutomaticCheckAt: null,
     installedLinuxVersion: null,
@@ -100,6 +101,7 @@ function statusShape(state, mobileVersion, operation, packageVersion, arch) {
     installedSystemMobileVersion: state.installedSystemMobileVersion,
     autoUpdate: state.autoUpdateEnabled,
     autoUpdateEnabled: state.autoUpdateEnabled,
+    autoStart: state.autoStartEnabled,
     availableVersion: state.latestReleaseVersion,
     latestReleaseVersion: state.latestReleaseVersion,
     updateAvailable: state.updateAvailable,
@@ -152,6 +154,7 @@ function validateStoredState(value) {
   value.lastAutomaticCheckAt = Number.isFinite(Date.parse(value.lastAutomaticCheckAt)) ? value.lastAutomaticCheckAt : null
   delete value.lastAutomaticCheckMobileVersion
   value.enabled = value.enabled === true
+  value.autoStartEnabled = typeof value.autoStartEnabled === 'boolean' ? value.autoStartEnabled : value.enabled
   value.injectionActivated = value.injectionActivated === true
   return value
 }
@@ -353,8 +356,8 @@ export function createMobileBootstrap(options = {}) {
    *   3. only from a directory inside our plugin root with its entry present;
    *      a missing file disables the record instead of re-fetching it.
    */
-  async function restoreActivation() {
-    if (!state.installedLinuxVersion || !state.enabled || !state.injectionActivated) return
+  async function restoreActivation(explicit = false) {
+    if (!state.installedLinuxVersion || (!explicit && state.autoStartEnabled === false)) return
     if (!state.pluginDirectory) return
     const host = await hostInjection()
     if (!host || !host.injected) return
@@ -378,6 +381,8 @@ export function createMobileBootstrap(options = {}) {
       const restored = await resolveManager({ hostResult, directory: state.pluginDirectory, config })
       state.runtime = typeof restored.status === 'function' ? await restored.status() : state.runtime
       restoredThisLoad = true
+      state.enabled = true
+      state.injectionActivated = true
       // `status()` reads active.json; the runtime plugin registers its tools during
       // activation only while that record is healthy, so surface an unhealthy
       // restore instead of reporting a working environment.
@@ -469,8 +474,13 @@ export function createMobileBootstrap(options = {}) {
       hostInstalled = true
       installedPlugin = true
       resolvedManager = await resolveManager({ hostResult, directory: result.path, config })
-      if (reinstall && typeof resolvedManager.reinstall === 'function') await resolvedManager.reinstall(publicManifest(manifest), runtimeId)
-      else await resolvedManager.install(publicManifest(manifest), runtimeId)
+      const finishPreparation = options.prepareRuntimeInstallation?.(resolvedManager, publicManifest(manifest), runtimeId)
+      try {
+        if (reinstall && typeof resolvedManager.reinstall === 'function') await resolvedManager.reinstall(publicManifest(manifest), runtimeId, { preserveGuestHome: true })
+        else await resolvedManager.install(publicManifest(manifest), runtimeId)
+      } finally {
+        finishPreparation?.()
+      }
       state.installedLinuxVersion = manifest.version
       state.runtimeId = runtimeId
       state.pluginDirectory = result.path
@@ -596,6 +606,7 @@ export function createMobileBootstrap(options = {}) {
     }
     await updateMobileVersion()
     // Restore before the host view is reconciled (see restoreActivation).
+    state.injectionActivated = false
     await restoreActivation()
     await synchronizeInjectionState()
   }
@@ -619,16 +630,21 @@ export function createMobileBootstrap(options = {}) {
      * Android hosts requiring staged assets use the panel to prepare and install them.
      */
     checkForUpdates: ({ source = 'manual' } = {}) => {
-      if (source !== 'manual' && source !== 'automatic' && source !== 'mobile-version-change') {
+      if (source !== 'manual' && source !== 'automatic' && source !== 'mobile-version-change' && source !== 'startup') {
         return Promise.reject(new TypeError('source must be manual or automatic'))
       }
-      return ready.then(() => serial(() => checkForUpdatesInternal({ automatic: source !== 'manual' })))
+      return ready.then(() => serial(() => checkForUpdatesInternal({
+        automatic: source !== 'manual' && source !== 'startup',
+      })))
     },
     /** Re-read the host's injection view (used after the user changes the injection directory). */
     syncInjectionState: () => ready.then(() => serial(async () => { await synchronizeInjectionState(); return emit() })),
-    install: ({ runtimeId, confirmed = false, activate = false } = {}) => ready.then(() => serial(async () => {
+    install: ({ runtimeId, expectedVersion, confirmed = false, activate = false } = {}) => ready.then(() => serial(async () => {
       if (confirmed !== true || activate !== true) throw new Error('install requires confirmed:true and activate:true')
       const preparedManifest = state.availableManifest ?? state.pinnedManifest
+      if (expectedVersion !== undefined && preparedManifest?.version !== expectedVersion) {
+        throw new Error('The prepared Linux release changed. Check for updates and download again')
+      }
       if (requireStagedBundle && preparedManifest) {
         // The APK prepared this manifest's digests. The upstream "latest"
         // pointer can advance before the download finishes.
@@ -670,10 +686,8 @@ export function createMobileBootstrap(options = {}) {
       operation = 'uninstalling'
       emit()
       try {
-        if (!manager) {
-          const hostResult = { service: pluginHost.service }
-          manager = await resolveManager({ hostResult, directory: state.pluginDirectory, config: pluginConfig(state.pinnedManifest, state.runtimeId) })
-        }
+        if (!manager) await restoreActivation(true)
+        if (!manager) throw new Error(state.lastError ?? 'The Linux runtime could not open for removal')
         await manager.uninstall()
         await pluginHost.uninstall({ runtimeId: state.runtimeId, directory: state.pluginDirectory })
         installedPlugin = false
@@ -711,6 +725,33 @@ export function createMobileBootstrap(options = {}) {
         return emit()
       }))
     },
+    setAutoStartEnabled: (enabled) => ready.then(() => serial(async () => {
+      state.autoStartEnabled = enabled === true
+      await save()
+      return emit()
+    })),
+    setRuntimeRunning: (enabled) => ready.then(() => serial(async () => {
+      if (!state.installedLinuxVersion) throw new Error('Install Linux first')
+      operation = enabled ? 'starting' : 'stopping'
+      emit()
+      try {
+        if (enabled && !state.injectionActivated) {
+          await restoreActivation(true)
+          if (!state.injectionActivated) throw new Error(state.lastError ?? 'Linux runtime files are unavailable')
+        } else if (!enabled && state.injectionActivated) {
+          await pluginHost.uninstall({ directory: state.pluginDirectory, runtimeId: state.runtimeId })
+          manager = null
+          state.enabled = false
+          state.injectionActivated = false
+          state.runtime = null
+          await save()
+        }
+      } finally {
+        operation = 'idle'
+        emit()
+      }
+      return lastStatus
+    })),
     subscribe(listener) {
       if (typeof listener !== 'function') throw new TypeError('listener must be a function')
       listeners.add(listener)

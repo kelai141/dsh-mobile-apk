@@ -157,7 +157,8 @@ describe('PhoneControlSection（手机控制设置页）', () => {
     const segment = el.querySelector('.dsh-pc-segment')!
     const options = [...segment.querySelectorAll('button')].map((node) => node.textContent)
     expect(options).toEqual(['仅虚拟屏幕', '仅真实屏幕', '全部开放'])
-    expect(el.querySelector('.dsh-screen-control-card')!.querySelector('.dsh-pc-screen')).toBeTruthy()
+    expect(el.querySelector('[data-plugin="dev-phone-control"] > .dsh-pc-screen')).toBeTruthy()
+    expect(el.querySelector('.dsh-screen-control-card')).toBeNull()
   })
 
   it('首屏是平背景细分隔行，不再把动作铺成按钮墙或嵌套大卡片', async () => {

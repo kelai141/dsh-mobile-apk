@@ -1724,7 +1724,6 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
 
   return (
     <section
-      className="dsh-screen-control-card dsh-pc-plain"
       data-plugin="dev-phone-control"
       data-native-control-protected=""
       aria-labelledby="dsh-phone-control-title"

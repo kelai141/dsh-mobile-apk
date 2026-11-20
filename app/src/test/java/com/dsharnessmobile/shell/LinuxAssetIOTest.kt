@@ -4,6 +4,8 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.security.MessageDigest
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
@@ -23,6 +25,38 @@ import org.junit.Test
  * 摘要不符、字节数不符。下载路径用注入的 [LinuxAssetIO.Opener] 真跑一遍，不碰网络。
  */
 class LinuxAssetIOTest {
+  @Test
+  fun resumesPartialDownloadWithExactRangeAndReportsTotalBytes() {
+    val root = tempRoot()
+    val bytes = "abcdefghij".toByteArray()
+    val target = File(root, "asset.part").apply { writeBytes(bytes.copyOf(4)) }
+    ServerSocket().use { server ->
+      server.bind(InetSocketAddress("127.0.0.1", 0))
+      val request = java.util.concurrent.FutureTask<String?> {
+        server.accept().use { socket ->
+          val headers = socket.getInputStream().bufferedReader().lineSequence().takeWhile(String::isNotEmpty).toList()
+          val response = socket.getOutputStream()
+          response.write("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-9/10\r\nContent-Length: 6\r\nConnection: close\r\n\r\n".toByteArray())
+          response.write(bytes, 4, 6)
+          headers.firstOrNull { it.startsWith("Range: ", ignoreCase = true) }?.substringAfter(": ")
+        }
+      }
+      Thread(request, "linux-range-test").apply { isDaemon = true; start() }
+      try {
+        val progress = mutableListOf<Long>()
+        val count = LinuxAssetIO.HttpOpener.fetchResumable(
+          "http://127.0.0.1:${server.localPort}/asset", target, 10, { false }, progress::add,
+        )
+        assertEquals("bytes=4-", request.get(5, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals(10L, count)
+        assertEquals(listOf(4L, 10L), progress)
+        assertTrue(bytes.contentEquals(target.readBytes()))
+      } finally {
+        root.deleteRecursively()
+      }
+    }
+  }
+
 
   private val goodUrl =
     "https://github.com/kelai141/dsh-bionilux/releases/download/v1.2.0/linux-runtime-plugin.tar.xz"

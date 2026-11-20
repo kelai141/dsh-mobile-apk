@@ -1,208 +1,65 @@
-# AGENTS.md — dsh-mobile-apk 项目地图
+# dsh-mobile-apk 项目地图
 
-> **本文件是你进入壳侧的入口**：仓库地图 + 去哪查 + 更新协议。不堆历史记录。
-> 一切以源码为准；发现文档与源码不一致，**当场改文档**。
+本文件是壳仓入口。按任务读取相关详档，发现文档与源码不一致时修正文档。
 
----
+## 项目边界
 
-## 1. 这是什么仓
+本仓是包名 `com.dsharnessmobile.shell` 的安卓壳，负责 Android 平台能力与桥接，包括前台服务、看门狗、WebView、SAF、快照解压、UndoGate、Shizuku、虚拟屏、无障碍、ADB 授权、通知、返回网关、审计、控制台与日志。AI 可见能力由插件注册，壳侧不直接注册工具。
 
-DeepSeek Harness 的**安卓壳应用**（包名 `com.dsharnessmobile.shell`）。
+运行时从 `assets/snapshot.tar.xz` 解压至 `files/usr` 与 `files/home`。引擎版本以快照 `package.json` 和 `scripts/snapshot-config/engine-overlay.json` 为准，监听实际端口以 `files/.engine-endpoint.json` 为准。上游 `deepseek-ai/deepseek-harness` 的 checkout 为只读，适配使用补丁、插件或壳侧实现。
 
-**职责边界**：只保留安卓平台权能与桥——前台服务 / 看门狗 / WebView（主 + 隔离 BrowserHost）/ SAF 桥 / 快照解压 / UndoGate / Shizuku 特权 transport 与虚拟屏 / 无障碍与 ADB 授权 / 通知中心与通知内应答 / 返回网关 / 审计 / 控制台 / 日志。
+## 构建与设备验收
 
-**关键约束：AI 可见的能力全部来自插件**，壳侧不直接注册工具。
-
-**运行时**：内嵌 Termux 快照（`assets/snapshot.tar.xz` → `files/usr` + `files/home`）；构建目标 `@deepseek-ai/dsh` 为 **0.2.2-rc.3**（以快照内 `package.json` 与 `scripts/snapshot-config/engine-overlay.json` 为准），监听回环**动态端点**（默认 `127.0.0.1:4145`，被占用时 Node 侧原子回退，实际端口以 `files/.engine-endpoint.json` 为准）；WebView 加载引擎 Web UI。
-
-**构建链**：minSdk 26 / targetSdk 34 / compileSdk 36；Kotlin 2.0.21；AGP 8.8.2；Java 17。
-
-**兄弟子仓**（本仓内含自包含副本，见 §4 同步铁律）：
-`dsh-shell-termux` 0.2.0 · `dsh-client-ui-responsive` 0.3.3 · `dsh-host-web-compat` 0.1.16 · `plugins/`（bridge 0.2.4 / manage 0.3.0 / file-open 0.1.0 / browser 0.1.0 / linux-env 0.1.2 / vdisplay 0.1.0；模型能力插件已退役）· `vendor/`（marketplace / undo-savepoint）
-
-**上游** `deepseek-ai/deepseek-harness`（协调仓 `dsh/` 只读 checkout）：**零改动**，一切适配走补丁/插件/壳侧。
-
-**当前状态：以 `docs/AGENTS/changelog-archive.md` 最新一行为准**（本文件不维护版本号，避免双份漂移）。
-
----
-
-## 2. 怎么建、怎么装、怎么验
+构建命令从协调仓根执行，模式说明见协调仓 `AGENTS.md`。
 
 ```powershell
-# 在【协调仓根】执行（壳侧不单独构建）。三种模式见协调仓 AGENTS.md「三种打包模式」：
-#   release：双 ABI 全链，门禁失败即拒打包
-#   Fast   ：单 ABI x86_64 + preset 1，**门禁全跑**，开发迭代加速（禁发布）
-#   dev    ：node dsh-mobile-apk\scripts\build-apk-dev-fast.mjs，不跑发布全链；仍查快照包覆盖、ABI 与指纹，仅本地测试（禁发布；
-#            不重建/不注入快照，复用 app/src/main/assets/snapshot.tar.xz）
-pwsh -File scripts\build-apk-013.ps1 -Suffix ""   # release 档：双 ABI 全链，门禁失败即拒打包
-pwsh -File scripts\build-apk-013.ps1 -Fast         # Fast 档：单 ABI x86_64 + preset 1（禁发布）
-# 发布包不经本地：由 GitHub Action 一键链产出（workflow_dispatch 传 version + notes）——
-# gh workflow run release -R kelai141/dsh-mobile-apk -F version=<版本> -F notes=@release/v<版本>/notes.md
-
-# 装机（<serial> 用 adb devices 查；arm64 真机必须用 arm64 产物）
+pwsh -File scripts\build-apk-013.ps1 -Suffix ""   # release，双 ABI 全链
+pwsh -File scripts\build-apk-013.ps1 -Fast         # Fast，单 ABI x86_64，全门禁
+node dsh-mobile-apk\scripts\build-apk-dev-fast.mjs # dev，本地测试包
 adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 ```
 
-**设备**：
-- MuMu 模拟器 `127.0.0.1:16416`（竖屏）、`127.0.0.1:16384`（横屏，真 1600x900）——开发循环主用。
-- 真机 V2425A `10AF2B0GN0001F2`（arm64，1260x2800，SDK 36）——**发布前**补充门禁。
+MuMu 竖屏设备为 `127.0.0.1:16416`，横屏设备为 `127.0.0.1:16384`。发布前在 arm64 真机补验。开发 ABI 前检查连接设备和 `ro.product.cpu.abilist`；目标 ABI 与快照 ABI 必须匹配。
 
-**验证脚本**（`scripts/`，必须**逐个单独跑**，每个都重建 WebView target）：
+### 验收标准
 
-| 脚本 | 用途 | 参数约定 |
-|---|---|---|
-| `verify-webview-015.mjs` | WebView / polyfill / 内联脚本 / 面板 | ws **positional**；`--wide` 横屏 |
-| `verify-state-sync.mjs` | 跨层状态同步真源用例集 | **不要传 `--ws`**（会禁用 target 重解析） |
-| `verify-browser-host.mjs` | 隔离浏览器视口/PC 身份 | ws **positional** |
-| `verify-vdisplay-viewer.mjs` | 虚拟屏 viewer 两阶段契约 | `--ws` |
-| `verify-browser-panel.mjs` / `verify-vdisplay-float.mjs` / `verify-engine-log-copy.mjs` | 面板/浮窗/日志 | 见脚本头注释 |
-| `verify-linux-environment.mjs` | Linux 环境：安装/健康/摘要不符负控（CDP 层） | `--serial`（必填）、`--port`（默认 29225）、`--json`；退出 0 全 PASS / 1 有 FAIL / 2 前置缺失 |
+发版候选、高风险面 L2（快照事务、签名、门禁判据、桥协议）及 L3（界面与壳行为）变更按三层验收：代码层、CDP 层、ADB 用户实际操作层。任务提供目标、约束和成功标准，由模型自行规划操作并处理失败。截图、命令和各层结论落在 `.deploy-tmp/<round>/`。UI 与几何改动覆盖竖屏和横屏。任一层失败即修复后重验。其他改动按风险档携带相应证据；PR 明示未做设备验证，发布候选前补验。
 
-**CDP 调试**：`adb shell "cat /proc/net/unix | grep webview_devtools"` → `adb forward tcp:29225 localabstract:<socket>` → `ws://127.0.0.1:29225/devtools/page/<id>`。
+快照刷新时不运行设备验收。刷新完成以 `.snapshot-fingerprint` 变化且 `.snapshot-transaction` 消失为准。uid-mode appop 残留、prefs 中的无障碍标记、应用转后台都可能影响结果，处理方式见验收详档。
 
-**热推（仅 JS 插件，不含 Kotlin）**：`node scripts/hot-push.mjs --serial <s> --plugin <dir> [--pkg ...] [--restart]`。
+### CDP 与验证入口
 
-**什么时候可以用热推 —— 它是免打包通道，不是绕过验收的通道**：
+调试 WebView：读取 `/proc/net/unix` 中的 `webview_devtools` socket，执行 `adb forward tcp:29225 localabstract:<socket>`，连接 `ws://127.0.0.1:29225/devtools/page/<id>`。
 
-- **适用**：改动**完全落在快照内 runtime**（`@dsh-android` 插件的 `lib/**`、`client.js`、引擎树 JS）。这类改动的生效链是
-  「本地 `npm run build` → 推进设备快照树 → 引擎重读」，与 APK 打包无关；三层结果只覆盖热推后的设备树。最终 APK 须核对同一源码/构建产物并重新装机验收。
-- **不适用（必须走 `build-apk-013.ps1` 全链）**：壳侧 Kotlin（`.kt` 要编译进 dex）、签名/权限/清单、assets 与 `snapshot.tar.xz` 本身，
-  以及任何**面向发布的最终产物**。改了这些还热推 = 验的是旧壳，属假绿。
-- **仍须三层验收**：热推只省掉「打包 + 装机 + 快照重解压」这段等待，**不省任何一层判据**（§2.1）。代码层、CDP 层、ADB 用户层一个不能少。
-- **发布前必须回全链**：热推产物**不进 APK**。任何要随版本发出去的东西，最后都必须由 `build-apk-013.ps1` 重出一遍并重验。
-- **实修（0.14.2 rc.2）**：此前脚本每个落点恒失败（`cp: …/lib/.: Permission denied`）——`adb push` 在 `/data/local/tmp` 建的目录是
-  `0771`（others 可穿越、**不可列目录**），而 `cp -r <stage>/lib/.` 必须列目录；已修为推送后 `chmod -R 755`。
-  根因与复现见 `docs/AGENTS/gotchas.md`，遇到 Permission denied 先查那里，不要手工 `cp` 绕。
+`scripts/verify-*.mjs` 覆盖 WebView、状态同步、BrowserHost、虚拟屏、面板与日志。Linux 环境使用 `verify-linux-environment.mjs --serial <serial> [--port 29225] [--json]`，退出码 0 为 PASS、1 为 FAIL、2 为前置条件缺失。屏幕范围、Shizuku、虚拟屏与通道改动运行 `verify-screen-scope-matrix.mjs --serial <serial>`。
 
-### 2.1 模拟器测试规范（强制；详档 `docs/AGENTS/emulator-test-protocol.md`）
+纯 runtime JS 可使用 `node scripts/hot-push.mjs --serial <serial> --plugin <dir> [--pkg <package>] [--restart]`。Kotlin、签名、权限、Manifest、APK 资源和发布产物通过 APK 全链验证。发布前用最终源码构建双 ABI 并重新验收。
 
-1. **三层验收，缺一层即未验收**：**代码层**（Kotlin 单测 + 静态门禁 + 本改动自带的反证用例）、**CDP 层**（跑对应 `verify-*.mjs`，断言状态语义与跨层数据）、**ADB 用户实际体验层**（adb 真操作真截图：`input tap/swipe/text/keyevent` + `exec-out screencap -p`，证明一个真人能用这块屏幕完成同一件事）。
-2. **任一层红 = 这个系统有问题**，且必落在下列至少一类——**不许当噪声，不许只修那一层**：
-   1. 不符合人体交互逻辑（点不到、看不见、层级/遮挡/焦点/键盘错）；
-   2. 在用户视角里就是坏的（界面显示正常，用起来不对）；
-   3. 根本就是代码有问题；
-   4. 内部没打通（跨层 / 跨仓 / 跨进程的数据断了，界面照样显示正常）。
-   对照读法：CDP 全绿而 ADB 层失败 = 内部没打通；代码层绿而 CDP 红 = 接口与实现脱钩；两层绿而真人做不到 = 交互逻辑错。
-3. **任务必须真实，且必须由模型自己编排**：验收给的是**目标 + 约束 + 成功标准**，不给操作序列；步骤由模型自己规划、自己纠错、最后汇报（例：让它自己去打开某个应用、在虚拟屏上玩一个小游戏、在网页应用里截图并发消息，然后汇报结果）。**禁止**把步骤一条条喂给它，**禁止**只做单步或两三步的简单操作——那证明不了编排、纠错与跨层串联，而缺陷恰恰藏在那些地方。过程按工具调用序列、失败重试与最终汇报留证。
-   - **B 轨的现成驱动**：`node scripts/verify-screen-scope-matrix.mjs --serial <s>`（屏幕范围/通道/落点；它自己会向模型发起真实任务并只断言设备事实）。屏幕范围、Shizuku、虚拟屏、通道状态相关的改动**先跑它**，再按下方原语补人眼判读。
-4. **只跑 CDP 不算验收**：几何/层级/遮挡/焦点/键盘这类缺陷 DOM 断言看不见（坑 50/61 是实锤）；反过来只贴截图也不算——状态语义只有 A 轨能证。两轨互补，缺一不可。
-5. **证据落盘**：命令清单 + 每步截图（`.deploy-tmp/<round>/ui-NN-*.png`）+ 三层各自的结论行；PR 描述贴结论行与截图路径。**缺任一层 = 未验收**，不得写「功能完好」。
-6. **覆盖两个方向**：竖屏 16416 与横屏 16384 各至少一次 tap 级操作 + 截图；几何/布局类改动两个方向都必跑。发布前 arm64 真机补一次。
-7. **前置与假失败**：快照刷新期间禁跑设备验收；uid-mode appop 残留、prefs 僵尸 a11y 标记、应用被切后台都会制造假失败——清理方式与判据见详档 §3、§8。
+## 文档索引
 
----
-
-### 2.2 开发期选择与最终收口
-
-- 开始版本任务时建立 `release/v<版本>/notes.md` 草稿，随实现和证据更新；计划/待验收明确标注。最终对照上一 Release、目标 Commit/Tag、已合并 PR、Issue、CI/设备证据和资产核对，仅保留该版本实际交付内容。发布说明面向用户，先写问题改善，再写安装/升级、限制与验证范围。
-- **上传前整篇复核**：`-F notes=@release/v<版本>/notes.md` 之前，从头读一遍，确认没有留给自己的小字、TODO、待补/待填写/占位句；没有与正文矛盾的状态描述（已补上候选资产与三层结论，就不能还写着「候选确定后补记」「此处不写未发生的结论」）；章节标题与实际状态一致，已填完的内容不能挂在「待补」标题下；资产表的文件名、字节与 SHA-256 与本次发布一致。发现异常先改 notes 再上传。历史 notes 不回溯修改。
-- 根据变更输入选择自检；结果记录源码/门禁版本、输入哈希、环境和命令。相关输入、依赖、门禁或环境改变即失效；相关输入不变可复用已有有效证据。成组修正后集中重验；权限、数据事务、签名、桥协议及门禁自身的即时反证不可省。
-- 纯 runtime JS 改动开发期优先热推；壳侧、签名、Manifest、APK assets 改动需要 APK。选择开发 ABI 前实际查询 ADB 设备和 `ro.product.cpu.abilist`；仅在设备非空且均明确 x86/x86_64 时可缩为 x86_64。设备为空或未知不能推断。最终候选从最终源码构建双 ABI，重新安装并完成 §2.1 三层验收及覆盖升级；热推证据不能代替最终 APK。
-- 来源审计入口 `scripts/source-build/run-local-source-chain.mjs` 仅构建已提交 HEAD，在原工作树外的独立检出执行；未提交内容不进入来源链。产物留在隔离目录，续跑显式传 `--build-workspace <同 HEAD 目录>`。不要把来源链的 LFS pointer 当成本地底座归档。
-- 权限、用户数据、运行时生效、ABI、签名、快照/APK 产物门禁保持阻断。仅维护说明的生成块漂移由 PR Gate 的提示 job 呈现（`check-maintenance-docs.mjs`，更新用 `--write`），不加入 APK 发布阻断链；branch protection 的远端设置不由本地文档改变。
-
-## 3. 去哪查（按需 grep，别通读）
-
-| 要查什么 | 去哪 |
+| 内容 | 文档 |
 |---|---|
-| fx2 阶段计划 / 开发候选与验收交接 | `docs/HANDOFF-0.14.5-FX-2-PLAN-2026-10-09.md` / `docs/HANDOFF-0.14.5-FX-2-DEVELOPMENT-2026-10-09.md` |
-| **坑位（历史实锤，权威）** | `docs/AGENTS/gotchas.md`（递增编号，允许空缺；grep 关键词） |
-| 模块职责 / 函数位置 | `docs/AGENTS/modules.md` |
-| 架构 / 依赖方向 | `docs/AGENTS/ARCHITECTURE.md` |
-| 桥方法签名 / 通道语义 | `docs/AGENTS/BRIDGE-API.md` |
-| 无障碍 API 与权限面 | `docs/AGENTS/ACCESSIBILITY-API.md` |
-| 构建失败 / 门禁 / WSL 环境 | `docs/AGENTS/build-and-env.md` |
-| 运行时补丁（`assets/patched`） | `docs/AGENTS/RUNTIME-PATCHES.md` |
-| gradle 依赖与升级 | `docs/AGENTS/DEPENDENCIES.md` |
-| GPL 合规三形态 | `docs/AGENTS/gpl-compliance.md` |
-| 已知缺口 / 待办 | `docs/AGENTS/known-gaps.md` |
-| 运行顺序 / 嵌套 / 耦合 / 流程图（排查入口） | `docs/AGENTS/EXECUTION-MAP.md` |
-| 模拟器验收规范（代码/CDP/adb 三层 + 真实任务） | `docs/AGENTS/emulator-test-protocol.md` |
-| **版本历史（全量）** | `docs/AGENTS/changelog-archive.md` |
-| Hard / Soft / Data 持久化路径、SharedPreferences keys、恢复来源 | `docs/AGENTS/PERSISTENT-DATA.md` |
+| 历史坑位 | `docs/AGENTS/gotchas.md`，按关键词检索 |
+| 模块位置与架构 | `docs/AGENTS/modules.md`、`docs/AGENTS/ARCHITECTURE.md` |
+| 桥方法与无障碍 API | `docs/AGENTS/BRIDGE-API.md`、`docs/AGENTS/ACCESSIBILITY-API.md` |
+| 构建、门禁与 WSL | `docs/AGENTS/build-and-env.md` |
+| 补丁与依赖 | `docs/AGENTS/RUNTIME-PATCHES.md`、`docs/AGENTS/DEPENDENCIES.md` |
+| 已知缺口、执行路径、持久化 | `docs/AGENTS/known-gaps.md`、`docs/AGENTS/EXECUTION-MAP.md`、`docs/AGENTS/PERSISTENT-DATA.md` |
+| 设备验收、完整版本记录 | `docs/AGENTS/emulator-test-protocol.md`、`docs/AGENTS/changelog-archive.md` |
+| 当前模块改造计划 | `docs/` 中对应专题与交接文档 |
 
----
+## 工程约束
 
-## 4. 铁律（违反即返工）
+1. 一个 PR 对应一个可独立回退的逻辑改动。禁止直接推送 `main`。发布计划确定时完成双 ABI 全链、冷启动矩阵和真机补充验收。
+2. 插件镜像变更按协调仓镜像清单同步 `src`、`package.json` 与 `lib/`。禁止对 `scripts/` 等目录整体执行 `/MIR`。
+3. `scripts/patches/**` 双仓逐字节同步，先合 APK 仓镜像 PR，再合协调仓权威源 PR。其他构建、门禁与校验脚本以 APK 仓为准。
+4. 新增或改写的界面提供中英文文案。PR、issue 与发布文本使用中文或中英双语。禁止 emoji。
+5. issue/PR 评论只在结论确定、答复或关单、或必须向维护者请求解阻时发送。过程记录留在内部汇报。误发内容修改原评论或补一条更正后停止。
+6. 每轮交付后按协调仓脚本规则清理 `.deploy-tmp`，保留已注册 worktree 与近期活动目录。
+7. 代码职责或执行路径变化时更新对应 `docs/AGENTS/` 详档。个人经验先记录到 `docs/contrib/<github-account>/`，稳定后再汇总。
 
-1. **需求不延期**：有明确需求且未获准延后，本轮必须完成。技术阻塞只能给替代实现 + 记真因，不得以「实验特性 / 下版本」降级。
-2. **设备验证按风险触发，不是每次改动的必经关卡**（0.14.8 放宽）。**必须**做打包后三层验收的情形只有两类：
-   - **发版候选**：凡进入 `release/v<版本>/` 的候选产物，必须过三层验收（代码层 + CDP 层 + ADB 用户实际体验层，缺一层即未验收）且验收任务是**真实任务、由模型自己编排**（禁止喂步骤），见 §2.1；
-   - **高风险面即时验**：L2 安全敏感面（快照事务 / 签名 / 门禁自身判据 / 桥协议）与 L3 UI/UX 及壳侧行为改动，**当轮即时**跑三层，不得延后。
-   其余改动（L0 文档、L1 门禁与构建链内部逻辑）**不强制**打包后设备验证，但必须携带该档的替代证据（L1 = `--self-test` + 一条受控负控）。
-   **不可省的两条**：① 未做设备验证的改动必须在 PR 描述里**显式标注「未做设备验证」**；② 该改动进入发版候选前必须补验，未补验不得随版本发布。禁止以「等真机」推迟高风险面的验证；真机仍是发布前补充门禁。
-3. **原子化交付 + 分档验证**：一个 PR = 一个逻辑改动，可独立 revert；禁止把「修 bug + 重构 + 顺手优化」混在一个 PR 里。**但「原子 PR」不等于「不验」**——每个 PR 必须携带与其风险类相符的**最廉价充分证据**：L0 文档/注释 → CI 绿即可；L1 门禁/脚本逻辑 → `--self-test` + **一条受控负控**；L2 安全敏感面（快照事务 / 签名 / 门禁自身判据 / 桥协议）→ **即时三层**；L3 UI/UX 与壳侧行为 → **即时模拟器三层**。
-   统一全量测试（双 ABI 全链 + 冷启动矩阵 + 真机补充门禁）前移到**发布计划确定时**执行，且它**只做集成验证、替代不了上面每档的证据**。细则见协调仓 `docs/0.14.8-DELIVERY-PLAN-2026-10-14.md` §3。
-4. **一切改动走 PR**：建分支 → 提交（`<type>: <描述>`）→ 推分支 → 开 PR（1-3 标签）→ CI 绿 → 合并 → 删分支。**禁止直接 push `main`**。例外仅限不改仓库内容的外部动作（Release 资产、issue 评论与开关、标签）。
-5. **子仓镜像（幽灵缺陷防线）**：`dsh-client-ui-responsive` / `dsh-host-web-compat` / `dsh-shell-termux` 与协调仓根级目录同源（协调仓那边是符号链接指向本仓），直接在本仓修改即可，没有镜像动作。协调仓独有的源码只有 `plugins/dsh-android-*`：那边改动或 bump 版本后，**必须 robocopy 镜像到本仓 `plugins/<同名目录>`**（src + package.json + **`lib/` 产物**）。漏了 → 云端自包含构建注入旧副本，**编译通过但功能缺失**。
-   - 只同步**镜像清单内的文件**，切勿对 `scripts/` 等目录整体 `/MIR`——会删掉本仓独有的设备脚本（真实事故）。
-6. **补丁镜像面**：`scripts/patches/**` 仍逐字节镜像，补丁改动**先合本仓镜像 PR，再合协调仓权威源 PR**。构建、门禁与校验脚本以本仓为准，协调仓同名历史副本不再要求字节一致；协调仓构建入口委派本仓执行。插件镜像仍按铁律 5，共享 JSON/YAML 配置仍检查一致。
-7. **禁 emoji**：提交信息、PR 标题/描述、文档、标签一律不用。
-8. **issue/PR 评论只在结论定下后才发**：每条评论都会通知全部协作者。中间态、未验证的假设、排查过程、自己纠正自己，一律只写进当轮汇报，**不进 issue/PR**。允许发评论的三种情形：结论已定 / 关单或回答 issue / 有阻塞必须问维护者。写错的处置：已发出的那条**改掉，或补一条更正，然后就停**——不发第三条，不解释为什么发错，不在公开场合复盘自己的过程。
-   理由：评论是广播，不是草稿纸。发得多会吵到所有人；说错还要公开改口，成本比当初多等一会高得多。
-9. **工作区卫生**：`.deploy-tmp` 只增不减会拖垮开发机（实测 2026-10-14 达 34.8 GB / 313,393 文件，是开发机第一大空间消耗，文件数本身就在拖慢目录遍历类工具）。每完成一轮交付，在协调仓根跑 `node scripts/clean-deploy-tmp.mjs`（默认 dry-run，`--apply` 执行）。判定口径与保留清单见该脚本头注释；**注册的 git worktree 与近 3 天内活动过的目录一律保留**。
+聚合门禁以 `scripts/check-release-gates.mjs` 为入口。关键检查包括 API 路由鉴权、控制操作登记、插件测试、工具面预算、补丁镜像、执行地图和引擎/壳侧 op 清单一致性。执行地图变更后运行 `node scripts/check-code-map.mjs`，桥方法改动运行 `node scripts/check-bridge-symmetry.mjs`。具体触发规则按门禁脚本与专题文档执行。
 
----
+## 用户观察与经验记录
 
-## 5. 更新协议（改完代码必须做，否则文档失真）
-
-> **核心原则：AGENTS.md 只是地图，不承载细节。** 任何细节写进 §5.2 的对应详档。
-> 本文件**不设更新记录表**——所有版本记录进 `docs/AGENTS/changelog-archive.md`。
-
-### 5.1 按改动类型对号入座
-
-| 你改了什么 | 必须更新 | 位置 |
-|---|---|---|
-| **任何**代码/行为改动 | 坑位（若踩过坑或修了坑） | 先写自己的记录 `docs/contrib/<github-account>/`（一人一目录，见本仓 `CONTRIBUTING.md`）；协调仓同路径为权威源。确认稳定且与个人无关的经验再由维护者汇总到 `docs/AGENTS/gotchas.md` **文末追加**，编号递增（允许空缺，**不得重编号**） |
-| 新增或改写自定义界面 | 中英双语文案 | 页面侧 locale 同时注册 `zh`/`en`；壳侧 `strings.xml` 与 Kotlin 文案补英文；规则见本仓 `CONTRIBUTING.md` |
-| 版本发布 / 里程碑 | 更新记录（一行摘要，**倒序加在最上方**） | `docs/AGENTS/changelog-archive.md` |
-| 新增/删除 `.kt` 文件，或函数职责变化 | 模块地图 | `docs/AGENTS/modules.md` |
-| 模块边界、依赖方向变化 | 架构 | `docs/AGENTS/ARCHITECTURE.md` |
-| 新增/改签名桥方法、通道语义变化 | 桥协议 | `docs/AGENTS/BRIDGE-API.md`（**同步跑** `scripts/check-bridge-symmetry.mjs`） |
-| 无障碍 API 用法、权限面变化 | 无障碍参考 | `docs/AGENTS/ACCESSIBILITY-API.md` |
-| 构建链、门禁、WSL 环境差异 | 构建与环境 | `docs/AGENTS/build-and-env.md` + `docs/AGENTS/gotchas.md` |
-| 改 `scripts/patches/**` 或 `assets/patched` | 运行时补丁 | `docs/AGENTS/RUNTIME-PATCHES.md` §7.1 登记 + §2 字节数按实测更新 |
-| gradle 依赖增删/升级 | 依赖台账 | `docs/AGENTS/DEPENDENCIES.md` |
-| 发现未实现 / 有意留下的缺口 | 已知缺口 | `docs/AGENTS/known-gaps.md` |
-| **代码执行顺序 / 嵌套 / 耦合 / 流程图（排查入口）** | 执行地图对应查点 + 覆盖账本 | `docs/AGENTS/EXECUTION-MAP.md`（改完跑 `node scripts/check-code-map.mjs`） |
-| 改设备验收方式 / 新增套件或操作原语 | 模拟器验收规范 | `docs/AGENTS/emulator-test-protocol.md` |
-| **本文件 §1-§4 的描述失真** | 就地改**对应行** | 只改那一行，**不要新增章节、不要加历史** |
-
-### 5.2 写作纪律
-
-- **细节不下放 §1-§4**：一行能说清就一行；说不清 → 写进详档，本文件只放**指针**。
-- **坑位写「为什么」不只写「怎么做」**：现象 → 真因 → 修法 → 复验证据。无真因的条目等于没写。
-- **同一事实只写一处**：其余地方用链接/路径指向它。重复即漂移源。
-- **数字不写死**：坑位总数、门禁项数、文件数一律用命令现数（`grep -c '^[0-9]\+\. \*\*' docs/AGENTS/gotchas.md`、`node scripts/check-release-gates.mjs --list`）。
-- **改了要跑**：文档改动本身不需要构建；但涉及门禁/桥面/补丁改动时，对应的 `check-*.mjs` 必须跑过再提交。
-
-### 5.3 门禁（哪些是自动挡）
-
-`scripts/check-release-gates.mjs` 是聚合入口（`--list` 现数）。关键几条与文档直接相关：
-
-| 门禁 | 守什么 |
-|---|---|
-| `check-bridge-symmetry.mjs` | 桥面对称性（改桥方法必跑） |
-| `check-api-route-auth.mjs` | 新增 `/api` 路由必须自带鉴权并登记 policy |
-| `check-control-ops.mjs` | 控制 op 六面登记一致（新增 op 必须六处同改） |
-| `check-kotlin-comments.mjs` | Kotlin 嵌套块注释 |
-| `check-plugin-tests.mjs` | 每个插件的单测真实跑通（全 skip 判假绿） |
-| `check-tool-surface-budget.mjs` | 模型面 wire 预算（新增工具会撞；近义工具优先复用既有 + 参数） |
-| `check-patch-mirror.mjs` | 双仓镜像逐字节一致 |
-| `check-code-map.mjs` | 执行地图覆盖完整、锚点有效、编号一致（改代码后必跑；`--self-test` 自检） |
-| `check-op-registry-parity.mjs` | 引擎与壳侧两份「会读设备屏的 op」清单逐条相同（漂移 = 缺省 virtual-only 下工具大面积不可用） |
-| `check-tool-name-promises.mjs` | 指引里承诺的 `android_*` 工具名必须有声明位（防「指引指向一条不存在的路」） |
-
-**设备侧（不进聚合门禁，发布前由操作者按 §2.1 跑）**：
-
-| 套件 | 守什么 |
-|---|---|
-| `scripts/verify-screen-scope-matrix.mjs` | 屏幕范围/通道/落点的设备级验收：跨面一致性（引擎面 vs 壳侧面 vs 设备事实）+ 拉起落点回读（目标屏必须出现本轮新 ActivityRecord，存量 Activity 不算落点证明）+ 双屏像素对照 + `real-only` 反证。权限档位拦截归环境阻塞；**证据不足判 `INCONCLUSIVE`（exit 2），不得当通过**。 |
-
----
-
-## 6. 高频雷点（只有三条，全量见 §3 坑位表）
-
-1. **ABI**：debug 包内嵌快照决定 ABI；x86_64 快照装 arm64 真机**必崩**。真机只用 `-arm64.apk`。
-2. **快照刷新**：唯一完成标志 = `.snapshot-fingerprint` **翻转** + `.snapshot-transaction` **消失**。刷新期间（8-12 分钟）**禁 force-stop/杀进程**，且**不得跑设备套件**（会是假失败）。
-3. **`Select -First N` 会杀掉长任务子进程**——构建/长脚本必须全量重定向日志，不能用 `Select -First`。
+用户记录统一维护在协调仓根 `AGENTS.md` 的「用户观察与经验记录」区域。Agent 仅可对该区域进行 Markdown 排版。

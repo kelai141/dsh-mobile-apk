@@ -15,9 +15,9 @@ export const PHONE_CONTROL_CSS: string = `
 [data-plugin='dev-phone-control'] .dsh-pc-screen {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
-  padding: 16px 0;
+  padding: 12px 0;
   border-bottom: 0.5px solid var(--dsw-alias-border-l2);
 }
 
@@ -42,7 +42,7 @@ export const PHONE_CONTROL_CSS: string = `
 
 [data-plugin='dev-phone-control'] .dsh-pc-segment > button {
   min-width: 0;
-  min-height: 36px;
+  min-height: 42px;
   padding: 0 6px;
   border: 0;
   border-radius: 6px;
@@ -99,7 +99,8 @@ button[data-plugin='dev-phone-control'] .dsh-pc-row,
   gap: 12px;
   width: 100%;
   min-width: 0;
-  padding: 16px 0;
+  min-height: 48px;
+  padding: 10px 0;
   border: 0;
   border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   background: transparent;
