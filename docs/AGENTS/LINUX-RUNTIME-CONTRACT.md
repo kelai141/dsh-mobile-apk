@@ -34,7 +34,7 @@ bootstrap 通过宿主 `linuxAssetIO` 读取归档并复制解包树。bootstrap
 
 ### Rootfs candidate handoff
 
-运行时清单声明 `rootfsCandidateHandoff: true` 时，APK 校验归档并安全解包至私有候选目录，原子写入包含候选 ID 和资产身份的回执。后台队列或旧桥兼容路径随确认安装请求提交候选 ID。引擎按固定清单校验并认领候选，重新核对归档的字节数、摘要、目录条目类型和符号链接边界。运行时通过 guest 健康探测后才提交安装。失败清理已认领候选。后续准备会清理一小时以前的未认领候选。后台队列恢复或重试时重新准备可能已被认领的候选。
+运行时清单声明 `rootfsCandidateHandoff: true` 时，APK 校验归档并安全解包至私有候选目录，原子写入包含候选 ID 和资产身份的回执。后台队列或旧桥兼容路径随确认安装请求提交候选 ID。引擎按固定清单校验并认领候选，重新核对归档的字节数、摘要、目录条目类型和符号链接边界。运行时通过 guest 健康探测后才提交安装。失败清理已认领候选。后续准备会清理一小时以前的未认领候选。后台队列恢复或重试时重新准备可能已被认领的候选。 宿主通过运行时配置中的 `linuxAssetIO.claimRootfsCandidate` 向 Bionilux 传入认领回调，同时保留既有顶层资产接口。
 
 运行时同时声明 `sharedNodeReuse: true` 且健康的已装 Node 摘要与目标资产一致时，旧桥兼容路径可跳过准备 Node。运行时在安装锁内复验 Node。若确实需要准备 Node，宿主在认领 rootfs 前返回 HTTP 409 和 `linux-node-stage-required`。兼容路径准备 Node 后沿用原候选 ID 重试一次。后台队列按清单准备全部资产，并可利用此前校验通过的暂存件。
 
