@@ -37,10 +37,16 @@ internal object LinuxAssetPrepare {
     val kind: String? = null,
     val stagedPath: String? = null,
     val bytes: Long = 0L,
+    val size: Long = 0L,
+    val stage: String? = null,
+    val speed: Long = 0L,
   )
 
   private val lock = Any()
   private var snapshot = Snapshot()
+  private var pauseRequested = false
+  private var activeSpec: LinuxAssetIO.Spec? = null
+  private var activeFiles: File? = null
 
   /**
    * 执行体注入点：生产起后台线程（下载可能是多兆字节，绝不能阻塞 WebView 的 JS 线程），
@@ -55,7 +61,12 @@ internal object LinuxAssetPrepare {
   var debugBuild: Boolean = BuildConfig.DEBUG
 
   /** 测试复位。 */
-  fun reset() = synchronized(lock) { snapshot = Snapshot() }
+  fun reset() = synchronized(lock) {
+    snapshot = Snapshot()
+    pauseRequested = false
+    activeSpec = null
+    activeFiles = null
+  }
 
   /**
    * 开始一次准备。立即返回 `{ok,phase}`；进度/结果由 [status] 读取。
@@ -78,6 +89,7 @@ internal object LinuxAssetPrepare {
         sha256 = o.getString("sha256"),
         size = o.getLong("size"),
         kind = kind,
+        source = o.optString("source", "official"),
       )
     } catch (e: Exception) {
       return JSONObject()
@@ -98,7 +110,10 @@ internal object LinuxAssetPrepare {
         return JSONObject().put("ok", false).put("code", "linux-asset-busy")
           .put("detail", "已有一次准备在进行中").toString()
       }
-      snapshot = Snapshot(phase = PHASE_RUNNING, sha256 = spec.sha256, kind = spec.kind.wire)
+      pauseRequested = false
+      activeFiles = filesDir
+      activeSpec = spec
+      snapshot = Snapshot(phase = PHASE_RUNNING, sha256 = spec.sha256, kind = spec.kind.wire, size = spec.size)
     }
 
     // 门口就把「环境不在场」和「来源不合规」判掉：这两条不需要起线程，也不该留下任何状态。
@@ -110,9 +125,28 @@ internal object LinuxAssetPrepare {
     }
 
     val root = File(filesDir!!, LinuxAssetIO.ENV_DIR)
+    if (LinuxAssetIO.debugMappedUrl(root, spec.url, debugBuild) == null) {
+      finish(LinuxAssetIO.CODE_URL_REJECTED, "无效的调试下载源", spec)
+      return JSONObject().put("ok", true).put("phase", PHASE_RUNNING).toString()
+    }
     runner {
+      var lastUpdate = 0L
+      var lastBytes = 0L
       val failure = try {
-        prepareInto(root, spec)
+        prepareInto(root, spec) { stage, bytes ->
+          val now = System.nanoTime()
+          synchronized(lock) {
+            if (snapshot.stage != stage || now - lastUpdate >= 500_000_000L) {
+              val speed = if (snapshot.stage == stage && stage == "downloading") {
+                ((bytes - lastBytes).coerceAtLeast(0L) * 1_000_000_000L) / (now - lastUpdate)
+              } else 0L
+              snapshot = snapshot.copy(stage = stage, bytes = bytes, speed = speed)
+              lastUpdate = now
+              lastBytes = bytes
+              LinuxDownloadNotification.show(snapshot.stage, bytes, spec.size)
+            }
+          }
+        }
       } catch (e: Exception) {
         // 解包器已按失败关闭返回；这里兜住平台级异常（如无符号链接权限的 SecurityException），
         // 否则后台线程会死掉而状态永远停在 running。
@@ -134,9 +168,13 @@ internal object LinuxAssetPrepare {
         }
       } else {
         synchronized(lock) {
-          snapshot = snapshot.copy(phase = PHASE_FAILED, code = failure.code, detail = failure.detail)
+          snapshot = snapshot.copy(
+            phase = if (failure.code == LinuxAssetIO.CODE_PAUSED) "paused" else PHASE_FAILED,
+            code = failure.code, detail = failure.detail, speed = 0,
+          )
         }
       }
+      LinuxDownloadNotification.show(if (failure?.code == LinuxAssetIO.CODE_PAUSED) "paused" else null, 0, 0)
     }
     return JSONObject()
       .put("ok", true)
@@ -154,9 +192,25 @@ internal object LinuxAssetPrepare {
       .put("kind", snapshot.kind ?: JSONObject.NULL)
       .put("stagedPath", snapshot.stagedPath ?: JSONObject.NULL)
       .put("bytes", snapshot.bytes)
+      .put("size", snapshot.size)
+      .put("stage", snapshot.stage ?: JSONObject.NULL)
+      .put("speed", snapshot.speed)
       .put("code", snapshot.code ?: JSONObject.NULL)
       .put("detail", snapshot.detail ?: JSONObject.NULL)
       .toString()
+  }
+
+  fun pause(): Boolean = synchronized(lock) {
+    if (snapshot.phase != PHASE_RUNNING || snapshot.stage != "downloading") return@synchronized false
+    pauseRequested = true
+    true
+  }
+
+  fun resume(): String = synchronized(lock) {
+    val spec = activeSpec
+    if (snapshot.phase != "paused" || spec == null) return@synchronized JSONObject().put("ok", false).toString()
+    start(activeFiles, JSONObject().put("url", spec.url).put("sha256", spec.sha256)
+      .put("size", spec.size).put("kind", spec.kind.wire).put("source", spec.source).toString())
   }
 
   /**
@@ -183,28 +237,42 @@ internal object LinuxAssetPrepare {
    * 归档字节**保留**在发布目录里（`asset.tar.xz`）：引擎侧要复验时可以就地重算摘要，而不必
    * 相信宿主写下的任何标记。
    */
-  private fun prepareInto(root: File, spec: LinuxAssetIO.Spec): LinuxAssetIO.Failure? {
+  private fun prepareInto(root: File, spec: LinuxAssetIO.Spec, progress: (String, Long) -> Unit): LinuxAssetIO.Failure? {
     // 防御纵深：即便 specVerdict 已经过了，推导结果仍要独立确认落在 root 之内才允许碰文件系统。
     val staged = stagedDir(root, spec.sha256)
       ?: return LinuxAssetIO.Failure(LinuxAssetIO.CODE_SPEC_INVALID, "暂存目录推导被拒绝：${spec.sha256}")
     val staging = workDir(root, spec.sha256)
       ?: return LinuxAssetIO.Failure(LinuxAssetIO.CODE_SPEC_INVALID, "工作目录推导被拒绝：${spec.sha256}")
 
+    val cached = File(staged, "asset.tar.xz")
+    if (!java.nio.file.Files.isSymbolicLink(staged.toPath()) &&
+      cached.isFile && File(staged, "unpacked").isDirectory && File(staged, "kind").takeIf(File::isFile)?.readText() == spec.kind.wire &&
+      LinuxAssetIO.verifyVerdict(SnapshotBundledAsset.digest({ cached.inputStream() }), spec) == null) return null
     SnapshotFs.deletePath(staged)
-    SnapshotFs.deletePath(staging)
+    if (java.nio.file.Files.isSymbolicLink(staging.toPath())) SnapshotFs.deletePath(staging)
     pruneStalePartDirs(root, spec.sha256)
     staging.mkdirs()
 
     val archive = File(staging, "asset.tar.xz")
-    LinuxAssetIO.download(spec, archive, root, opener, debugBuild)?.let { failure ->
-      SnapshotFs.deletePath(staging)
-      return failure
+    if (!archive.isFile || LinuxAssetIO.verifyVerdict(SnapshotBundledAsset.digest({ archive.inputStream() }), spec) != null) {
+      LinuxAssetIO.download(spec, archive, root, opener, debugBuild, progress) {
+        synchronized(lock) { pauseRequested }
+      }?.let { failure ->
+        if (opener !== LinuxAssetIO.HttpOpener || failure.code == LinuxAssetIO.CODE_DIGEST_MISMATCH) SnapshotFs.deletePath(staging)
+        return failure
+      }
     }
-    val unpacked = File(staging, "unpacked").apply { mkdirs() }
+    progress("extracting", spec.size)
+    val unpacked = File(staging, "unpacked")
+    SnapshotFs.deletePath(unpacked)
+    if (!unpacked.mkdirs()) {
+      return LinuxAssetIO.Failure(LinuxAssetIO.CODE_DOWNLOAD_FAILED, "无法创建解压目录")
+    }
     LinuxAssetIO.extract(archive, unpacked, root, spec.kind, LinuxAssetIO.limitsFor(spec.kind))?.let { failure ->
       SnapshotFs.deletePath(staging)
       return failure
     }
+    File(staging, "kind").writeText(spec.kind.wire)
     // 发布目录的父级必须先存在：否则 renameTo 会因目标父目录缺席而失败（实测到的失败形态）。
     staged.parentFile?.mkdirs()
     if (staged.exists() || !staging.renameTo(staged)) {

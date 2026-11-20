@@ -31,6 +31,9 @@ export const LINUX_ROUTES = {
   uninstall: BASE + '/uninstall',
   autoUpdateOn: BASE + '/auto-update-on',
   autoUpdateOff: BASE + '/auto-update-off',
+  terminal: BASE + '/terminal',
+  runtime: BASE + '/runtime',
+  tools: BASE + '/tools',
 } as const
 
 /** Status payload as normalized by the host adapter (fields we read). */
@@ -40,6 +43,8 @@ export interface LinuxStatus {
   mobileVersion?: string
   installedSystemMobileVersion?: string
   autoUpdate?: boolean
+  autoStart?: boolean
+  enabled?: boolean
   availableVersion?: string
   latestReleaseVersion?: string
   updateAvailable?: boolean
@@ -47,7 +52,7 @@ export interface LinuxStatus {
   busy?: boolean
   operation?: string
   runtimeId?: string
-  runtime?: { id?: string; runtimeId?: string } | null
+  runtime?: { id?: string; runtimeId?: string; healthy?: boolean; reason?: string } | null
   runtimes?: Array<{ id: string; label?: string; architecture?: string }>
   defaultRuntimeId?: string
   architecture?: string
@@ -136,6 +141,30 @@ export function fetchStatus(): Promise<LinuxStatus> {
   return request<LinuxStatus>('GET', LINUX_ROUTES.status)
 }
 
+interface TerminalSize { cols: number; rows: number }
+type TerminalAction =
+  | ({ action: 'open' | 'restart' } & TerminalSize)
+  | { action: 'read'; id: string; after: number }
+  | { action: 'write'; id: string; data: string }
+  | ({ action: 'resize'; id: string } & TerminalSize)
+  | { action: 'stop'; id: string }
+
+export interface TerminalUpdate {
+  id: string
+  running: boolean
+  reset: boolean
+  next: number
+  more: boolean
+  output: string
+  outcome?: { exitCode: number | null; signal: string | null }
+}
+
+export function terminalRequest(action: Extract<TerminalAction, { action: 'read' }> | ({ action: 'open' | 'restart' } & TerminalSize)): Promise<TerminalUpdate>
+export function terminalRequest(action: Exclude<TerminalAction, { action: 'read' } | { action: 'open' | 'restart' }>): Promise<{ id: string; ok: boolean }>
+export function terminalRequest(action: TerminalAction): Promise<TerminalUpdate | { id: string; ok: boolean }> {
+  return request('POST', LINUX_ROUTES.terminal, action)
+}
+
 /**
  * The release manifest.
  *
@@ -187,6 +216,21 @@ export function uninstallEnvironment(): Promise<LinuxStatus> {
 /** Persist the automatic-update preference. */
 export function setAutoUpdate(enabled: boolean): Promise<LinuxStatus> {
   return request<LinuxStatus>('POST', enabled ? LINUX_ROUTES.autoUpdateOn : LINUX_ROUTES.autoUpdateOff, { confirmed: true })
+}
+
+export function setRuntimePreference(preference: { enabled: boolean } | { autoStart: boolean }): Promise<LinuxStatus> {
+  return request('POST', LINUX_ROUTES.runtime, { confirmed: true, ...preference })
+}
+
+export interface ToolchainStatus { packages: string[]; suggested: string[]; source: string }
+export function linuxTools(input: { action: 'storage'; confirmed: true }): Promise<{ bytes: number; cacheBytes: number }>
+export function linuxTools(input: { action: 'clean'; confirmed: true }): Promise<{ ok: boolean }>
+export function linuxTools(input: { action: 'status' | 'install' | 'remove' | 'mirror'; name?: string; source?: string; confirmed?: boolean }): Promise<ToolchainStatus>
+export function linuxTools(input: { action: string; name?: string; source?: string; confirmed?: boolean }): Promise<unknown> {
+  return request('POST', LINUX_ROUTES.tools, input).catch(error => {
+    if (error instanceof RouteError && error.detail) throw new Error(error.detail)
+    throw error
+  })
 }
 
 const SHA256 = /^[a-f0-9]{64}$/
@@ -304,6 +348,33 @@ export interface AssetPrepareSnapshot {
   stagedPath?: string | null
   code?: string | null
   detail?: string | null
+  bytes?: number
+  size?: number
+  speed?: number
+  stage?: string | null
+}
+
+export interface InstallJob {
+  state?: 'queued' | 'paused' | 'installing' | 'failed' | 'done'
+  error?: string
+  index?: number
+  total?: number
+  kind?: string
+  progress?: AssetPrepareSnapshot
+}
+
+export function installJobStatus(): InstallJob | undefined {
+  try {
+    return JSON.parse(window.androidBridge?.linuxInstallJob?.('status', null) ?? '{}') as InstallJob
+  } catch { return undefined }
+}
+
+export function startInstallJob(version: string, runtimeId: string, specs: readonly AssetSpec[], source: string): void {
+  const response = window.androidBridge?.linuxInstallJob?.('start', JSON.stringify({
+    version, runtimeId, assets: specs.map(({ url, sha256, size, kind }) => ({ url, sha256, size, kind, source })),
+  }))
+  const verdict = response ? JSON.parse(response) as AssetPrepareAnswer : undefined
+  if (!verdict?.ok) throw new AssetError(verdict?.code ?? 'The Android install queue is unavailable', verdict)
 }
 
 /** Progress callback for one asset. */
@@ -312,6 +383,9 @@ export interface AssetProgress {
   total: number
   field: string
   phase: string
+  bytes?: number
+  size?: number
+  speed?: number
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms) })
@@ -345,6 +419,7 @@ export async function prepareAssets(
   onProgress: (progress: AssetProgress) => void,
   pollMs = 600,
   timeoutMs = 20 * 60 * 1000,
+  source: string = 'official',
 ): Promise<void> {
   if (bridge === undefined || typeof bridge.linuxAssetPrepare !== 'function' || typeof bridge.linuxAssetPrepareStatus !== 'function') {
     throw new AssetError('The Android asset bridge is unavailable', { code: 'linux-asset-bridge-missing' })
@@ -356,7 +431,10 @@ export async function prepareAssets(
   for (let index = 0; index < specs.length; index += 1) {
     const spec = specs[index]
     const total = specs.length
-    const report = (phase: string): void => onProgress({ index: index + 1, total, field: spec.field, phase })
+    const report = (phase: string, snapshot?: AssetPrepareSnapshot): void => onProgress({
+      index: index + 1, total, field: spec.field, phase, bytes: snapshot?.bytes,
+      size: snapshot?.size ?? spec.size, speed: snapshot?.speed,
+    })
     report('starting')
 
     let started = false
@@ -368,6 +446,7 @@ export async function prepareAssets(
         sha256: spec.sha256,
         size: spec.size,
         kind: spec.kind,
+        ...(source === 'official' ? {} : { source }),
       }))) as AssetPrepareAnswer | null
       if (answer === null) {
         throw new AssetError('The Android asset bridge returned no answer', { code: 'linux-asset-bridge-invalid', assetId: spec.id })
@@ -390,10 +469,11 @@ export async function prepareAssets(
       throw new AssetError('Another asset preparation never finished', { code: 'linux-asset-busy', assetId: spec.id })
     }
 
-    const deadline = Date.now() + timeoutMs
+    let deadline = Date.now() + timeoutMs
     for (;;) {
       const snapshot = parse(bridge.linuxAssetPrepareStatus()) as AssetPrepareSnapshot | null
       const phase = snapshot?.phase ?? ''
+      if (phase === 'paused') deadline = Date.now() + timeoutMs
       if (phase === 'ok') {
         if (snapshot?.sha256 !== spec.sha256) {
           throw new AssetError('The staged asset does not match the requested digest', {
@@ -417,7 +497,7 @@ export async function prepareAssets(
       if (Date.now() > deadline) {
         throw new AssetError('Asset preparation timed out', { code: 'linux-asset-timeout', assetId: spec.id })
       }
-      report(phase === 'running' ? 'preparing' : phase)
+      report(phase === 'running' ? snapshot?.stage ?? 'preparing' : phase, snapshot ?? undefined)
       await sleep(pollMs)
     }
     report('staged')

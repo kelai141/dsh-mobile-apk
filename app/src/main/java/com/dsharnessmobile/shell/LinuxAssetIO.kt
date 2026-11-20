@@ -52,6 +52,7 @@ internal object LinuxAssetIO {
   const val CODE_DIGEST_MISMATCH = "linux-asset-digest-mismatch"
   const val CODE_SIZE_MISMATCH = "linux-asset-size-mismatch"
   const val CODE_DOWNLOAD_FAILED = "linux-asset-download-failed"
+  const val CODE_PAUSED = "linux-asset-paused"
   const val CODE_KIND_INVALID = "linux-asset-kind-invalid"
 
   /**
@@ -103,6 +104,11 @@ internal object LinuxAssetIO {
   const val REQUIRED_PATH_PREFIX = "/kelai141/dsh-bionilux/releases/download/"
 
   const val MAX_REDIRECTS = 5
+  val MIRRORS = mapOf(
+    "gh-proxy" to "https://gh-proxy.com/",
+    "ghfast" to "https://ghfast.top/",
+    "ghproxy" to "https://ghproxy.net/",
+  )
 
   /** 声明体量之上的兜底上限，避免被无限流拖住（插件包远小于此）。 */
   const val MAX_DOWNLOAD_BYTES = 512L * 1024L * 1024L
@@ -113,6 +119,7 @@ internal object LinuxAssetIO {
     val sha256: String,
     val size: Long,
     val kind: Kind = Kind.PLUGIN,
+    val source: String = "official",
   )
 
   /** 失败原因：稳定 code + 可落盘的一行 detail。 */
@@ -185,6 +192,7 @@ internal object LinuxAssetIO {
     if (spec.size < 0L || spec.size > MAX_DOWNLOAD_BYTES) {
       return "size 必须是 0..$MAX_DOWNLOAD_BYTES 的整数（实际 ${spec.size}）"
     }
+    if (spec.source !in MIRRORS && spec.source !in setOf("official", "auto")) return "未知下载来源"
     return null
   }
 
@@ -318,6 +326,8 @@ internal object LinuxAssetIO {
     root: File,
     opener: Opener = HttpOpener,
     debugBuild: Boolean = BuildConfig.DEBUG,
+    progress: (String, Long) -> Unit = { _, _ -> },
+    paused: () -> Boolean = { false },
   ): Failure? {
     // 清单字面量先判：摘要是路径段的来源，校验必须早于任何文件系统动作（含下面的 mkdirs/delete）。
     specVerdict(spec)?.let { return Failure(CODE_SPEC_INVALID, it) }
@@ -332,8 +342,27 @@ internal object LinuxAssetIO {
     val tmp = File(destination.parentFile, destination.name + ".tmp")
     try {
       destination.parentFile?.mkdirs()
-      tmp.delete()
-      val read = opener.fetch(fetchUrl, tmp, MAX_DOWNLOAD_BYTES)
+      if (java.nio.file.Files.isSymbolicLink(tmp.toPath())) tmp.delete()
+      val read = if (opener === HttpOpener) {
+        val sources = when {
+          fetchUrl != spec.url || spec.source == "official" -> listOf(fetchUrl)
+          spec.source == "auto" -> HttpOpener.preferredMirrors(fetchUrl) + fetchUrl
+          else -> listOf(MIRRORS.getValue(spec.source) + fetchUrl)
+        }
+        var count = -1L
+        for (source in sources) {
+          if (paused()) return Failure(CODE_PAUSED, "下载已暂停")
+          count = runCatching {
+            HttpOpener.fetchResumable(source, tmp, spec.size, paused) { progress("downloading", it) }
+          }.getOrDefault(-1)
+          if (count == spec.size) break
+        }
+        count
+      } else {
+        tmp.delete()
+        opener.fetch(fetchUrl, tmp, MAX_DOWNLOAD_BYTES)
+      }
+      if (paused()) return Failure(CODE_PAUSED, "下载已暂停")
       if (read < 0) return Failure(CODE_DOWNLOAD_FAILED, "下载失败或逐跳校验未通过")
       // 兜底上限在**本函数**里再判一次：注入的下载器可能不自己设限，判据不能只存在于生产实现里。
       if (read > MAX_DOWNLOAD_BYTES) {
@@ -341,9 +370,11 @@ internal object LinuxAssetIO {
       }
       // 先验字节数（便宜且能挡住截断），再验摘要。lambda 必须括号包起来：尾随 lambda 会绑定到
       // 最后一个参数（这里是 bufferSize: Int），`digest { }` 会被判成类型不符。
+      progress("verifying", read)
       val digest = SnapshotBundledAsset.digest({ tmp.inputStream() })
       verifyVerdict(digest, spec)?.let { detail ->
         val code = if (digest.bytes != spec.size) CODE_SIZE_MISMATCH else CODE_DIGEST_MISMATCH
+        if (code == CODE_DIGEST_MISMATCH) tmp.delete()
         return Failure(code, detail)
       }
       // #1057：校验通过后仍**读回已验证的字节**，再交给唯一原子写入口发布。
@@ -351,12 +382,13 @@ internal object LinuxAssetIO {
       // delete 后被杀就没有资产，copyTo 覆盖则会留下半份 tar.xz。
       // 代价是这份资产（压缩包，量级几十 MB）要多读一次；换来的是「要发布的字节 == 已验证的字节」，
       // 而不是「发布另一次写出的字节」。
-      AtomicFileReplace.writeBytes(destination, tmp.readBytes())
+      java.io.RandomAccessFile(tmp, "rw").use { it.fd.sync() }
+      if (!AtomicFileReplace.publish(tmp, destination)) return Failure(CODE_DOWNLOAD_FAILED, "下载文件无法发布")
       return null
     } catch (e: Exception) {
       return Failure(CODE_DOWNLOAD_FAILED, e.message ?: e.javaClass.simpleName)
     } finally {
-      tmp.delete()
+      if (opener !== HttpOpener) tmp.delete()
     }
   }
 
@@ -367,14 +399,77 @@ internal object LinuxAssetIO {
 
   /** 生产下载器：https + 主机白名单逐跳校验 + 有界流式落盘。 */
   object HttpOpener : Opener {
-    override fun fetch(url: String, dest: File, maxBytes: Long): Long {
+    @Volatile private var preferred: Pair<Long, List<String>>? = null
+
+    fun preferredMirrors(url: String): List<String> {
+      val prefixes = preferred?.takeIf { System.currentTimeMillis() - it.first < 300_000L }?.second ?: run {
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(MIRRORS.size)
+        try {
+          val results = pool.invokeAll(MIRRORS.values.map { prefix ->
+            java.util.concurrent.Callable { prefix to probe(prefix + url) }
+          }, 4, java.util.concurrent.TimeUnit.SECONDS)
+          val picked = results.mapNotNull { runCatching { it.get() }.getOrNull() }
+            .filter { it.second != Long.MAX_VALUE }.sortedBy { it.second }.map { it.first }
+          preferred = System.currentTimeMillis() to picked
+          picked
+        } finally {
+          pool.shutdownNow()
+        }
+      }
+      return (prefixes + MIRRORS.values).distinct().map { it + url }
+    }
+
+    private fun probe(url: String): Long {
+      val start = System.nanoTime()
+      val connection = URL(url).openConnection(Proxy.NO_PROXY) as HttpURLConnection
+      connection.instanceFollowRedirects = false
+      connection.connectTimeout = 3_000
+      connection.readTimeout = 3_000
+      connection.setRequestProperty("Range", "bytes=0-32767")
+      return try {
+        if (connection.responseCode !in setOf(200, 206)) Long.MAX_VALUE
+        else {
+          connection.inputStream.use { input ->
+            val sample = ByteArray(8192)
+            var received = 0
+            while (received < 32_768) {
+              val count = input.read(sample)
+              if (count <= 0) break
+              received += count
+            }
+          }
+          System.nanoTime() - start
+        }
+      } catch (_: IOException) {
+        Long.MAX_VALUE
+      } finally {
+        connection.disconnect()
+      }
+    }
+
+    override fun fetch(url: String, dest: File, maxBytes: Long): Long =
+      transfer(url, dest, maxBytes, null, { false }, {})
+
+    fun fetchResumable(url: String, dest: File, size: Long, paused: () -> Boolean, progress: (Long) -> Unit): Long =
+      transfer(url, dest, size, size, paused, progress)
+
+    private fun transfer(
+      url: String, dest: File, maxBytes: Long, size: Long?, paused: () -> Boolean, progress: (Long) -> Unit,
+    ): Long {
       var current = url
       var hops = 0
+      val mirrorHost = MIRRORS.values.firstOrNull { url.startsWith(it) }?.let { URL(it).host }
+      if (size != null && dest.length() > size) dest.delete()
+      var offset = if (size != null) dest.length() else 0L
+      if (size != null && offset == size && dest.isFile) return offset
+      progress(offset)
       while (true) {
         val conn = URL(current).openConnection(Proxy.NO_PROXY) as HttpURLConnection
         conn.connectTimeout = 10_000
         conn.readTimeout = 30_000
         conn.instanceFollowRedirects = false
+        conn.setRequestProperty("Accept-Encoding", "identity")
+        if (offset > 0) conn.setRequestProperty("Range", "bytes=$offset-")
         try {
           val code = conn.responseCode
           if (code in 300..399) {
@@ -384,24 +479,36 @@ internal object LinuxAssetIO {
             if (hops > MAX_REDIRECTS) return -1
             // 相对 Location 按当前 URL 解析，再逐跳复核（自动跟随不校验中间跳，故关掉它）。
             val resolved = try { URL(URL(current), location).toString() } catch (_: Exception) { return -1 }
-            if (hopVerdict(resolved) != null) {
+            val target = URL(resolved)
+            val sameMirror = mirrorHost != null && target.host == mirrorHost && target.protocol == "https" &&
+              target.userInfo == null && target.port in setOf(-1, 443)
+            if (hopVerdict(resolved) != null && !sameMirror) {
               android.util.Log.w(TAG, "linux-asset redirect rejected: $resolved")
               return -1
             }
             current = resolved
             continue
           }
-          if (code != 200) return -1
-          var read = 0L
-          dest.outputStream().use { out ->
+          when (code) {
+            200 -> offset = 0
+            206 -> {
+              val range = conn.getHeaderField("Content-Range") ?: return -1
+              if (offset == 0L || size == null || range != "bytes $offset-${size - 1}/$size") return -1
+            }
+            else -> return -1
+          }
+          var read = offset
+          java.io.FileOutputStream(dest, offset > 0).use { out ->
             conn.inputStream.use { input ->
               val buf = ByteArray(128 * 1024)
               while (true) {
+                if (paused()) return -1
                 val n = input.read(buf)
                 if (n < 0) break
                 read += n
                 if (read > maxBytes) throw IOException("下载体量超过上限 $maxBytes")
                 out.write(buf, 0, n)
+                progress(read)
               }
             }
           }

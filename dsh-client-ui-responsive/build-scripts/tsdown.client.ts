@@ -10,6 +10,7 @@
  */
 import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { basename, dirname, relative, resolve as resolvePath, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { UserConfig } from 'tsdown'
@@ -23,6 +24,7 @@ import { PLATFORM_MODULES } from './platform.ts'
  */
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
+const XTERM_CSS = '@xterm/xterm/css/xterm.css'
 
 /**
  * Wire/type layers a client bundle may inline: browser-safe contracts
@@ -234,6 +236,9 @@ function clientConfig(id: string, entry: string): UserConfig {
     }, {
       name: 'dsh-css-modules-inline',
       resolveId(source: string, importer: string | undefined) {
+        if (source === XTERM_CSS) {
+          return CSS_VIRTUAL_PREFIX + createRequire(import.meta.url).resolve(XTERM_CSS) + CSS_VIRTUAL_SUFFIX
+        }
         if (!source.endsWith('.module.css')) return null
         const abs = importer !== undefined ? sourceAssetPath(source, importer) : source
         return CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
@@ -247,7 +252,7 @@ function clientConfig(id: string, entry: string): UserConfig {
         const { code, exports: cssExports } = transform({
           filename: fileId,
           code: source,
-          cssModules: { pattern: '[hash]_[local]' },
+          cssModules: fileId.endsWith('.module.css') ? { pattern: '[hash]_[local]' } : false,
           minify: true,
         })
         const classMap: Record<string, string> = {}

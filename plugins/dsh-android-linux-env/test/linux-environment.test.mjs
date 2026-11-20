@@ -62,7 +62,7 @@ function harness(bootstrap = makeBootstrap(), manifest = null) {  const routes =
 
 test('all eight routes authenticate before any bootstrap action and enforce HTTP methods', async () => {
   const h = harness()
-  assert.equal(h.routes.size, 8)
+  assert.equal(h.routes.size, 9)
   for (const path of h.routes.keys()) {
     const action = path.split('/').at(-1)
     assert.equal((await h.call(action, { token: '' })).code, 401)
