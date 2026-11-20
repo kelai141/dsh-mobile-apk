@@ -15,6 +15,7 @@ import { basename, dirname, relative, resolve as resolvePath, sep } from 'node:p
 import { fileURLToPath } from 'node:url'
 import type { UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
+import MagicString from 'magic-string'
 import { PLATFORM_MODULES } from './platform.ts'
 
 /**
@@ -232,6 +233,17 @@ function clientConfig(id: string, entry: string): UserConfig {
           `client bundle purity: "${source}" is not a platform module (CLIENT_EXTERNALS), an inline-safe wire layer, or a generated /remote contribution — `
           + 'cross-plugin value imports are forbidden; collaborate through cordis services (type-only imports are erased and never reach this gate)',
         )
+      },
+    }, {
+      name: 'dsh-xterm-browser-floor',
+      transform(code: string, id: string) {
+        // xterm's accessibility handler uses a Unicode property escape. Emit the
+        // equivalent C0 and C1 ranges before bundling and retain its source map.
+        const controlLiteral = String.raw`/\p{Control}/u`
+        if (!id.replaceAll('\\', '/').endsWith('/@xterm/xterm/lib/xterm.js') || !code.includes(controlLiteral)) return null
+        const source = new MagicString(code)
+        source.replaceAll(controlLiteral, String.raw`/[\x00-\x1f\x7f-\x9f]/u`)
+        return { code: source.toString(), map: source.generateMap({ hires: true }) }
       },
     }, {
       name: 'dsh-css-modules-inline',
