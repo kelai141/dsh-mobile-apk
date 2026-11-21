@@ -310,14 +310,11 @@ class OverlayV2IntegrationTest {
     val restore = method("restoreMorphTouch")
     assertTrue(restore.contains("lp.flags = flags; lp.alpha = morphInteractionAlpha"))
     val sheet = method("syncDrawerWindow")
-    assertTrue(sheet.contains("val coverBottomControls = c.view.height + c.chipSizesPx("))
-    assertTrue(sheet.contains(".first.second + c.chipGapPx + (24f * screen.density).toInt()"))
-    assertTrue("sheet must cover input+chips without moving them",
-      sheet.contains("maxOf(c.measureDrawerHeightPx(OverlayWindowFrames.composerWidthPx(screen)), coverBottomControls)"))
-    assertTrue("picker may grow to 55%; the covering sheet retains its 40% cap",
+    assertTrue(sheet.contains("val contentHeight = c.measureDrawerHeightPx(contentWidth)"))
+    assertTrue("picker may grow to 55%; commands retain their 40% cap",
       sheet.contains("OverlayWindowFrames.availableHeightPx(screen) * if (picker) .55f else .4f"))
-    val coveringSheet = sheet.substringAfter("coverBottomControls)")
-    assertTrue("covering sheet enforces its height cap", coveringSheet.contains(".coerceIn(1, maxHeight)"))
+    assertTrue(sheet.contains("maxOf(contentHeight, minimumHeight).coerceIn(1, maxHeight)"))
+    assertTrue("drawer bottom must stay above the openers", sheet.contains("screen.heightPx - chipRowTop + gapPx"))
     assertFalse(sheet.contains("composerParams?.y ="))
   }
 
@@ -334,10 +331,8 @@ class OverlayV2IntegrationTest {
       text.replace(fallback, "if (morphProgress > 0f && c.updateMorphTouchableRegion()) yieldMorphTouch()"),
       text.replace("    morphProgress = progress.coerceIn(0f, 1f)", "    yieldMorphTouch()\n    morphProgress = progress.coerceIn(0f, 1f)"),
       text.replace("      c.applyMorph(", "      c.updateMorphTouchableRegion()\n      c.applyMorph("),
-      text.replace(" + c.chipGapPx + (24f * screen.density).toInt()", " + c.chipGapPx"),
-      text.replace("maxOf(c.measureDrawerHeightPx(OverlayWindowFrames.composerWidthPx(screen)), coverBottomControls)",
-        "c.measureDrawerHeightPx(OverlayWindowFrames.composerWidthPx(screen))"),
-      text.replace("coverBottomControls)\n        .coerceIn(1, maxHeight)", "coverBottomControls)"),
+      text.replace("screen.heightPx - chipRowTop + gapPx", "screen.heightPx - chipRowTop - gapPx"),
+      text.replace("maxOf(contentHeight, minimumHeight).coerceIn(1, maxHeight)", "contentHeight"),
       text.replace("if (picker) .55f else .4f", ".55f"),
     )
     for (mutated in mutants) {

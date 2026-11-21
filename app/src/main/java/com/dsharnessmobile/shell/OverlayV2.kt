@@ -1365,10 +1365,7 @@ internal class OverlayV2(private val svc: OverlayService) {
   }
 
   /**
-   * 把底部 sheet 摆成一个独立窗口（Slot.DRAWER），覆盖在输入区上方。
-   *
-   * 用户基线原文：「＋打开独立底部sheet，覆盖其它app及input，input原位置/尺寸不变」。
-   * 因此这里绝不碰 composerParams、不做 translationY、不 MATCH_PARENT 撑高输入区。
+   * 把抽屉悬放在输入区和入口按钮上方。输入区保留原窗口和草稿，入口可以原路关闭。
    *
    * drawerWindowGeneration 是「迟到关闭回调」的护栏：每次开/关都自增，回调只在自己那一代
    * 仍然是最新时才真正 remove，否则会把用户刚重新打开的 sheet 误收掉。
@@ -1442,25 +1439,13 @@ internal class OverlayV2(private val svc: OverlayService) {
     val maxHeight = (OverlayWindowFrames.availableHeightPx(screen) * if (picker) .55f else .4f)
       .toInt().coerceAtLeast(1)
     c.setMaxDrawerHeightPx(maxHeight)
-    // sheet 必须把「输入区 + chip 行」整块盖住，否则用户会看到输入框从 sheet 底下露出来。
-    // coverBottomControls 用输入窗实际高度加 chip 行高与间距，再加 24dp 视觉余量。
-    val coverBottomControls = c.view.height + c.chipSizesPx(
-      OverlayWindowFrames.composerWidthPx(screen),
-    ).first.second + c.chipGapPx + (24f * screen.density).toInt()
-    // 选择器模式（会话/工作区）是"气泡"：宽度贴着被点的 chip，不铺满整行。
-    // 命令/附件仍用原来的通栏 sheet —— 那里是三个并排瓦片加命令列表，缩窄反而放不下。
+    // Both standalone surfaces leave the original opener accessible below them.
     c.setPickerMode(picker)
-    // 选择器是浮起的气泡（四角全圆、离底有间隙）；命令/附件仍是接底通栏（只圆上两角）。
     c.setDrawerFloating(picker)
-    // 选择器是"向上浮起的气泡"：高度按内容收紧，不撑到盖住输入区，底部留出间隙。
-    // 命令/附件才需要 coverBottomControls 去盖住输入区（它们是从输入行长出来的通栏）。
-    val h = if (picker) {
-      maxOf(c.measureDrawerHeightPx(bubbleWidthPx(screen)), (224f * screen.density).toInt())
-        .coerceIn(1, maxHeight)
-    } else {
-      maxOf(c.measureDrawerHeightPx(OverlayWindowFrames.composerWidthPx(screen)), coverBottomControls)
-        .coerceIn(1, maxHeight)
-    }
+    val contentWidth = if (picker) bubbleWidthPx(screen) else OverlayWindowFrames.composerWidthPx(screen)
+    val contentHeight = c.measureDrawerHeightPx(contentWidth)
+    val minimumHeight = if (picker) (224f * screen.density).toInt() else 0
+    val h = maxOf(contentHeight, minimumHeight).coerceIn(1, maxHeight)
     if (h <= 0) return
     val lp = drawerParams ?: WindowManager.LayoutParams(
       OverlayWindowFrames.composerWidthPx(screen), h,
@@ -1491,24 +1476,20 @@ internal class OverlayV2(private val svc: OverlayService) {
       val bubbleWidth = bubbleWidthPx(screen)
       lp.width = bubbleWidth
       lp.x = bubbleAnchorX(screen, bubbleWidth).coerceIn(margin, (rightLimit - bubbleWidth).coerceAtLeast(margin))
-      // BOTTOM 定位固定气泡下缘，高度限制在实际输入区及状态栏之间。
-      lp.gravity = Gravity.BOTTOM or Gravity.START
-      val location = IntArray(2)
-      c.view.getLocationOnScreen(location)
-      val chipHeight = c.chipSizesPx(OverlayWindowFrames.composerWidthPx(screen)).first.second
-      val boundedAnchor = chipRowTop(c, screen, location[1], chipHeight)
-      val actualChipTop = windows.view(OverlayWindows.Slot.WORKSPACE)
-        ?.takeIf { it.isAttachedToWindow && it.height > 0 }
-        ?.let { chip -> chip.getLocationOnScreen(location); location[1] }
-        ?: windows.params(OverlayWindows.Slot.WORKSPACE)?.y
-      val chipRowTop = minOf(actualChipTop ?: boundedAnchor, boundedAnchor)
-      val gapPx = (10f * screen.density).toInt()
-      lp.y = (screen.heightPx - chipRowTop + gapPx).coerceAtLeast(margin)
-      lp.height = h.coerceAtMost((chipRowTop - gapPx - screen.statusBarPx).coerceAtLeast(1))
-    } else {
-      lp.gravity = Gravity.BOTTOM or Gravity.START
-      lp.y = screen.navBarPx
     }
+    lp.gravity = Gravity.BOTTOM or Gravity.START
+    val location = IntArray(2)
+    c.view.getLocationOnScreen(location)
+    val chipHeight = c.chipSizesPx(OverlayWindowFrames.composerWidthPx(screen)).first.second
+    val boundedAnchor = chipRowTop(c, screen, location[1], chipHeight)
+    val actualChipTop = windows.view(OverlayWindows.Slot.WORKSPACE)
+      ?.takeIf { it.isAttachedToWindow && it.height > 0 }
+      ?.let { chip -> chip.getLocationOnScreen(location); location[1] }
+      ?: windows.params(OverlayWindows.Slot.WORKSPACE)?.y
+    val chipRowTop = minOf(actualChipTop ?: boundedAnchor, boundedAnchor)
+    val gapPx = (10f * screen.density).toInt()
+    lp.y = (screen.heightPx - chipRowTop + gapPx).coerceAtLeast(0)
+    lp.height = h.coerceAtMost((chipRowTop - gapPx - screen.statusBarPx).coerceAtLeast(1))
     // sheet 是独立窗口，它自己也要把 outside 转给同一处处理逻辑：
     // 盖住输入区之后，屏幕中部/上方的空白点击只会发给 sheet（composer 收不到）。
     // 每次都重设 listener：drawerView 实例会被反复复用，只在首次挂会在重开后失效。

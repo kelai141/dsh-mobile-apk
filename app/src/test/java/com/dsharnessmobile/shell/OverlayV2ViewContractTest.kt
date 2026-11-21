@@ -138,10 +138,10 @@ class OverlayV2ViewContractTest {
     val v2 = source("OverlayV2.kt")
     val sync = v2.substringAfter("private fun syncDrawerWindow()").substringBefore("private fun hideDrawer(")
     assertTrue("选择卡片必须交给独立窗口而非撑高输入根", sync.contains("windows.add(OverlayWindows.Slot.DRAWER, c.drawerView, lp)"))
-    assertTrue(sync.contains("c.measureDrawerHeightPx(OverlayWindowFrames.composerWidthPx(screen))"))
+    assertTrue(sync.contains("c.measureDrawerHeightPx(contentWidth)"))
     assertTrue(sync.contains("OverlayWindowFrames.availableHeightPx(screen) * if (picker) .55f else .4f"))
     assertTrue(sync.contains("lp.height = h.coerceAtMost((chipRowTop - gapPx - screen.statusBarPx)"))
-    assertTrue(sync.contains("maxOf(c.measureDrawerHeightPx(bubbleWidthPx(screen)), (224f * screen.density)"))
+    assertTrue(sync.contains("if (picker) (224f * screen.density).toInt()"))
     assertTrue(v2.contains("(360f * screen.density).toInt().coerceIn(1, available)"))
   }
 

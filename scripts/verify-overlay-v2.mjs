@@ -397,8 +397,8 @@ export async function runVerification(options, { adb, write, settle = ms => new 
       for (const slot of Object.keys(before.windows)) sameWindow(before, slot)
       assertNativePreserved(before.native, current.native, { restoreFlags: true })
       const c = current.windows.composer.frame, d = current.windows.drawer.frame
-      requireThat(Math.max(c.left, d.left) < Math.min(c.right, d.right) && Math.max(c.top, d.top) < Math.min(c.bottom, d.bottom), 'Sheet does not overlap original composer frame')
-      report.checks.push('F35 actual composer/chip frames/Windows/Views/editor unchanged; independent sheet overlaps input')
+      requireThat(d.bottom <= c.top && d.bottom <= (current.windows.workspace?.frame.top ?? c.top), 'Drawer must leave its original controls touchable')
+      report.checks.push('F35 composer/chip frames and draft are unchanged; drawer leaves its own opener touchable')
       await tapNode('overlay-drawer-attach-file', 'drawer', 'file-picker-open')
       expected(['entry', 'card', 'composer'], ['drawer', 'pill'])
       for (let attempt = 0; attempt < 6 && current.native?.pickerActive && !current.pickerReady; attempt++) {
