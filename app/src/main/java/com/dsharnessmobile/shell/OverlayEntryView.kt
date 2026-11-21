@@ -27,7 +27,7 @@ import androidx.core.content.ContextCompat
  * @param context 取资源/颜色/density 的上下文（壳侧传 Service，/ Theme 不需要 Activity）。
  * @param style 初始入口形态；形态终态切换仍须调用方同步更新窗口几何。
  */
-internal class OverlayEntryView(private val context: Context, style: OverlayEntryStyle) {
+internal class OverlayEntryView(private val context: Context, style: OverlayEntryStyle, private val stripRight: Boolean = true) {
 
   private val density = context.resources.displayMetrics.density
   var style: OverlayEntryStyle = style
@@ -183,7 +183,7 @@ internal class OverlayEntryView(private val context: Context, style: OverlayEntr
         postTranslate(dx, dy)
       }
     }
-    // 白底圆是球的唯一视觉；球窗尺寸 = 34dp，因此这里不设额外内边距（窗口矩形就是可见圆）。
+    // The painted circle stays at 34dp, centered within the larger touch window.
     val ball = LinearLayout(context).apply {
       orientation = LinearLayout.VERTICAL
       gravity = Gravity.CENTER
@@ -199,21 +199,11 @@ internal class OverlayEntryView(private val context: Context, style: OverlayEntr
       contentDescription = UiText.t(context, "悬浮球", "Floating ball")
     }
     return FrameLayout(context).apply {
-      addView(ball, FrameLayout.LayoutParams(ballSizePx, ballSizePx))
+      addView(ball, FrameLayout.LayoutParams(ballSizePx, ballSizePx, Gravity.CENTER))
     }
   }
 
-  /**
-   * 细条形态：窗口 8x88dp，可视条 8x64dp 垂直居中（上下各留 12dp 透明）。
-   *
-   * 为什么窗口比可视条高 24dp：§9.2 拍板「细条只纵向扩大命中区」。横向扩大会在屏内留下
-   * 16dp 隐形触区（与边缘手势冲突、违反窗口=可视纪律）；纵向只沿屏幕边缘外侧延展，
-   * 对底层应用零侵入。窗口宽度仍 = 可视宽度 8dp，所以根 View 必须与窗口同尺寸并透明，
-   * 由居中的子 View 画出 8x64dp 圆角条。
-   *
-   * 底色口径与隐藏态召回条同源（OverlayTheme.themeColors().recallStrip，中性灰/白半透明、
-   * 随主题）：两条入口在用户眼里是同一族「贴边拉手」，新造色相会让同一块屏出现第三套配色。
-   */
+  /** The artwork remains at the edge. The surrounding transparent window supplies touch padding. */
   private fun buildStrip(context: Context): View {
     val stripWidthPx = dp(10)
     val visibleHeightPx = dp(72)
@@ -238,14 +228,11 @@ internal class OverlayEntryView(private val context: Context, style: OverlayEntr
       )
       contentDescription = UiText.t(context, "悬浮入口条", "Floating entry strip")
     }
-    // 根 View 与窗口同尺寸（8x88dp）：尺寸由服务侧 WindowManager.LayoutParams 按形态给定
-    // （OverlayWindowFrames），这里不自设 layoutParams——根 View 的 LayoutParams 会被
-    // WindowManager 的 addView(view, params) 覆盖，写在这里只会成为一处误导性的第二口径。
     return FrameLayout(context).apply {
-      // 根透明：上下各 12dp 是命中区而不是图形，不能画任何底色。
+      // Keep the expanded touch target transparent.
       addView(
         strip,
-        FrameLayout.LayoutParams(stripWidthPx, visibleHeightPx, Gravity.CENTER),
+        FrameLayout.LayoutParams(stripWidthPx, visibleHeightPx, Gravity.CENTER_VERTICAL or (if (stripRight) Gravity.RIGHT else Gravity.LEFT)),
       )
     }
   }

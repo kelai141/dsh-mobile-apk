@@ -248,6 +248,24 @@ class OverlayWindowFramesTest {
   }
 
   @Test
+  fun `恢复悬浮球保留贴边方向和纵向中心并避开边缘`() {
+    val left = OverlayWindowFrames.restoredEntryBallPlacement(landscape, false, 100, 242)
+    val right = OverlayWindowFrames.restoredEntryBallPlacement(landscape, true, 100, 242)
+    assertEquals(88, left.first)
+    assertEquals(2400 - 132 - 88, right.first)
+    assertEquals(155, left.second)
+    assertEquals(left.second, right.second)
+  }
+
+  @Test
+  fun `悬浮触区扩大后贴边窗口仍以真实宽度定位`() {
+    assertEquals(48, OverlayWindowFrames.ballHitSizePx(1f))
+    val width = OverlayWindowFrames.stripHitWidthPx(landscape.density)
+    assertEquals(77, width)
+    assertEquals(2400 - width, OverlayWindowFrames.stripPlacement(landscape, true, 100, 242, width).first)
+  }
+
+  @Test
   fun `细条纵向落点被夹在可用区内`() {
     val bottom = OverlayWindowFrames.stripPlacement(
       landscape, rightSide = true, y = 99999, windowHeightPx = 242,

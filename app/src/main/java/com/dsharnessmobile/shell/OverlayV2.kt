@@ -190,26 +190,23 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (entryHiddenByUser || hostForeground) return
     val s = screen()
     val styleEnum = if (style == STYLE_STRIP) OverlayEntryStyle.STRIP else OverlayEntryStyle.BALL
-    val view = OverlayEntryView(svc, styleEnum).also { entryView = it }
+    val view = OverlayEntryView(svc, styleEnum, entryStripRight).also { entryView = it }
     // 「从未摆过」的哨兵：坐标为 (0,0) 说明用户还没拖过它（偏好默认值就是 0/0）。
     // 必须在两个分支之前算出来 —— 分开判会让球和条各写一份判据，之后必然漂移。
     val initialEntry = entryX == 0 && entryY == 0
     val w: Int
     val h: Int
     if (styleEnum == OverlayEntryStyle.STRIP) {
-      w = OverlayWindowFrames.stripWindowWidthPx(s.density)
+      w = OverlayWindowFrames.stripHitWidthPx(s.density)
       h = OverlayWindowFrames.stripWindowHeightPx(s.density)
-      // 细条贴边：默认贴右，从上一次的位置判断该贴哪边（左侧同样必须成立）。
-      // 首次挂载必须离开 y=0：那是状态栏的触摸死区，条会「看得见点不到」。
-      val right = if (initialEntry) true else entryX + w / 2 >= s.widthPx / 2
-      entryStripRight = right
+      // 贴边方向由吸附时记录。转屏后的宽度不能重新解释旧横坐标。
       val placement = OverlayWindowFrames.stripPlacement(
-        s, right, if (initialEntry) s.heightPx / 3 else entryY, h,
+        s, entryStripRight, if (initialEntry) s.heightPx / 3 else entryY, h, w,
       )
       entryX = placement.first
       entryY = placement.second
     } else {
-      w = (OverlayWindowFrames.ENTRY_BALL_DP * s.density).toInt()
+      w = OverlayWindowFrames.ballHitSizePx(s.density)
       h = w
       // 初始右上角：与旧实现同口径（距右缘 12dp、竖直 1/3 处）。
       if (initialEntry) {
@@ -251,11 +248,13 @@ internal class OverlayV2(private val svc: OverlayService) {
       vc.scaledTouchSlop.toFloat(),
       ViewConfiguration.getDoubleTapTimeout().toLong(),
       ViewConfiguration.getLongPressTimeout().toLong(),
+      tripleTapEnabled = true,
     )
     var startX = 0
     var startY = 0
     var downRawX = 0f
     var downRawY = 0f
+    var horizontalStripSwipe = false
     // 这次入口触摸的 downTime：双击判定要延迟到超时之后才结算 TAP，那时已经拿不到 MotionEvent。
     var entryDownTime = -1L
     val longPress = Runnable {
@@ -264,11 +263,23 @@ internal class OverlayV2(private val svc: OverlayService) {
       }
     }
     val resolveTap = Runnable {
-      if (router.resolvePendingTap(SystemClock.uptimeMillis()) == EntryGesture.TAP) {
-        val openCardOnTap = overlayEntryTapShouldOpen(cardVisible(), outsideClosedCardDownTime == entryDownTime)
-        onEntryTap(openCardOnTap)
+      when (router.resolvePendingTap(SystemClock.uptimeMillis())) {
+        EntryGesture.TAP -> {
+          val open = overlayEntryTapShouldOpen(cardVisible(), outsideClosedCardDownTime == entryDownTime)
+          onEntryTap(open)
+        }
+        EntryGesture.DOUBLE_TAP -> svc.jumpToApp()
+        else -> Unit
       }
     }
+    view.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+      override fun onViewAttachedToWindow(v: View) = Unit
+      override fun onViewDetachedFromWindow(v: View) {
+        main.removeCallbacks(longPress)
+        main.removeCallbacks(resolveTap)
+        router.reset()
+      }
+    })
     view.setOnTouchListener { _, ev ->
       val lp = entryParams ?: return@setOnTouchListener false
       when (ev.actionMasked) {
@@ -279,6 +290,7 @@ internal class OverlayV2(private val svc: OverlayService) {
           startY = lp.y
           downRawX = ev.rawX
           downRawY = ev.rawY
+          horizontalStripSwipe = false
           main.removeCallbacks(resolveTap)
           main.postDelayed(longPress, ViewConfiguration.getLongPressTimeout().toLong())
           true
@@ -286,6 +298,12 @@ internal class OverlayV2(private val svc: OverlayService) {
         MotionEvent.ACTION_MOVE -> {
           val dx = ev.rawX - downRawX
           val dy = ev.rawY - downRawY
+          if (strip && !router.isDragging() && kotlin.math.abs(dx) > vc.scaledTouchSlop && kotlin.math.abs(dx) > kotlin.math.abs(dy)) {
+            horizontalStripSwipe = true
+            main.removeCallbacks(longPress)
+            router.reset()
+          }
+          if (horizontalStripSwipe) return@setOnTouchListener true
           if (router.onMove(dx, dy) == EntryGesture.DRAG_START) main.removeCallbacks(longPress)
           if (router.isDragging()) {
             main.removeCallbacks(longPress)
@@ -297,8 +315,12 @@ internal class OverlayV2(private val svc: OverlayService) {
           main.removeCallbacks(longPress)
           val dx = ev.rawX - downRawX
           val dy = ev.rawY - downRawY
+          if (horizontalStripSwipe) return@setOnTouchListener true
           when (router.onUp(dx, dy, SystemClock.uptimeMillis())) {
-            EntryGesture.DRAG_END -> settleEntry(lp, strip, dx)
+            EntryGesture.DRAG_END -> {
+              moveEntry(lp, startX, startY, dx, dy, strip)
+              settleEntry(lp, strip, dx)
+            }
             EntryGesture.TAP -> {
               // 先把「这一次要不要展开」算成一个明确的决定，再交给 onEntryTap：
               // 同一次空白触摸已经收掉了卡片时，这里必须是 false。
@@ -306,12 +328,14 @@ internal class OverlayV2(private val svc: OverlayService) {
               onEntryTap(openCardOnTap)
             }
             EntryGesture.DOUBLE_TAP -> svc.jumpToApp()
+            EntryGesture.TRIPLE_TAP -> toggleEntryShape()
             else -> main.postDelayed(resolveTap, ViewConfiguration.getDoubleTapTimeout().toLong())
           }
           true
         }
         MotionEvent.ACTION_CANCEL -> {
           main.removeCallbacks(longPress)
+          main.removeCallbacks(resolveTap)
           router.reset()
           true
         }
@@ -336,7 +360,7 @@ internal class OverlayV2(private val svc: OverlayService) {
   }
 
   /**
-   * 拖动结算：球贴边后继续朝边框方向拖 = 收成白条；白条朝屏内拖 = 拉回球。
+   * 球向边框拖动会吸附成细条。细条只纵向拖动，三击可切换两种形态。
    *
    * 语义来自「常驻入口只有一种形态会误导」：贴边的球既挡点击又挡系统手势，
    * 用户朝边框推它就是在说「收起来」，不是「再往边上挪 2px」。
@@ -346,26 +370,12 @@ internal class OverlayV2(private val svc: OverlayService) {
     val density = s.density
     val pull = 24f * density
     if (strip) {
-      val right = entryStripRight
-      val inward = if (right) dx <= -pull else dx >= pull
-      if (inward) {
-        style = STYLE_BALL
-        prefs(svc).edit().putString(KEY_ENTRY_STYLE, style).apply()
-        val ball = (OverlayWindowFrames.ENTRY_BALL_DP * density).toInt()
-        entryX = if (right) (s.widthPx - ball).coerceAtLeast(0) else 0
-        entryY = OverlayWindowFrames.clampPillY(lp.y, ball, ball, s)
-        removeEntryWindow()
-        showEntry()
-        hapticConfirm(entryView?.view)
-        return
-      }
-      // 松手后吸附到最近的水平边缘：细条必须是「贴边拉手」，浮在屏中间毫无意义。
-      val placement = OverlayWindowFrames.stripPlacement(s, right, entryY, lp.height)
+      val placement = OverlayWindowFrames.stripPlacement(s, entryStripRight, entryY, lp.height, lp.width)
       entryX = placement.first
       entryY = placement.second
       lp.x = entryX
       lp.y = entryY
-      lp.width = OverlayWindowFrames.stripWindowWidthPx(s.density)
+      lp.width = OverlayWindowFrames.stripHitWidthPx(s.density)
       lp.height = OverlayWindowFrames.stripWindowHeightPx(s.density)
     } else {
       entryX = OverlayWindowFrames.clampPillX(lp.x, lp.width, s)
@@ -392,6 +402,36 @@ internal class OverlayV2(private val svc: OverlayService) {
     windows.update(OverlayWindows.Slot.ENTRY, lp)
   }
 
+  private fun toggleEntryShape() {
+    val lp = entryParams ?: return
+    if (attachmentInteraction != null) return
+    if (style == STYLE_STRIP) {
+      restoreEntryBall()
+      return
+    }
+    val s = screen()
+    entryStripRight = lp.x + lp.width / 2 >= s.widthPx / 2
+    val stripHeight = OverlayWindowFrames.stripWindowHeightPx(s.density)
+    entryY = OverlayWindowFrames.clampStripY(lp.y + (lp.height - stripHeight) / 2, stripHeight, s)
+    style = STYLE_STRIP
+    prefs(svc).edit().putString(KEY_ENTRY_STYLE, style).apply()
+    removeEntryWindow()
+    showEntry()
+    hapticConfirm(entryView?.view)
+  }
+
+  private fun restoreEntryBall() {
+    val lp = entryParams ?: return
+    val (x, y) = OverlayWindowFrames.restoredEntryBallPlacement(screen(), entryStripRight, lp.y, lp.height)
+    style = STYLE_BALL
+    prefs(svc).edit().putString(KEY_ENTRY_STYLE, style).apply()
+    entryX = x
+    entryY = y
+    removeEntryWindow()
+    showEntry()
+    hapticConfirm(entryView?.view)
+  }
+
   /**
    * 入口点击。是否展开由 [open] 决定（由手势路由器与「同一次 outside 触摸」共同裁定）。
    *
@@ -410,9 +450,13 @@ internal class OverlayV2(private val svc: OverlayService) {
 
   private fun onEntryLongPress() {
     hapticConfirm(entryView?.view)
-    // 长按 = 卡片 + 输入区同时展开；**不自动聚焦输入框**（刚长按完就弹键盘会挡住卡片）。
-    showCard()
-    showComposer(focusInput = false)
+    if (cardVisible() && composerVisible()) {
+      hideComposer()
+      hideCard()
+    } else {
+      showCard()
+      showComposer(focusInput = false)
+    }
   }
 
   /**
@@ -1899,13 +1943,15 @@ internal class OverlayV2(private val svc: OverlayService) {
     // 转屏/分屏后所有窗口都要按新几何重算（旧实现只重定位了球与面板，卡片/药丸/输入全不会动）。
     entryParams?.let { lp ->
       if (style == STYLE_STRIP) {
-        val placement = OverlayWindowFrames.stripPlacement(s, lp.x + lp.width / 2 >= s.widthPx / 2, lp.y, lp.height)
+        val placement = OverlayWindowFrames.stripPlacement(s, entryStripRight, lp.y, lp.height, lp.width)
         lp.x = placement.first
         lp.y = placement.second
       } else {
         lp.x = OverlayWindowFrames.clampPillX(lp.x, lp.width, s)
         lp.y = OverlayWindowFrames.clampPillY(lp.y, lp.width, lp.height, s)
       }
+      entryX = lp.x
+      entryY = lp.y
       windows.update(OverlayWindows.Slot.ENTRY, lp)
     }
     cardParams?.let { lp ->
@@ -2392,6 +2438,15 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (attachmentInteraction != null) return
     val next = entryStyle(svc)
     if (style == next) return
+    if (next == STYLE_STRIP) {
+      entryParams?.let { lp -> entryStripRight = lp.x + lp.width / 2 >= screen().widthPx / 2 }
+    } else {
+      val s = screen()
+      val stripHeight = entryParams?.height ?: OverlayWindowFrames.stripWindowHeightPx(s.density)
+      val (x, y) = OverlayWindowFrames.restoredEntryBallPlacement(s, entryStripRight, entryY, stripHeight)
+      entryX = x
+      entryY = y
+    }
     style = next
     if (entryHiddenByUser || hostForeground) return
     removeEntryWindow()
@@ -2466,7 +2521,7 @@ internal class OverlayV2(private val svc: OverlayService) {
         entryParams?.let { lp ->
           val s = screen()
           if (style == STYLE_STRIP) {
-            val place = OverlayWindowFrames.stripPlacement(s, savedEntryX + lp.width / 2 >= s.widthPx / 2, savedEntryY, lp.height)
+            val place = OverlayWindowFrames.stripPlacement(s, entryStripRight, savedEntryY, lp.height, lp.width)
             lp.x = place.first; lp.y = place.second
           } else {
             lp.x = OverlayWindowFrames.clampPillX(savedEntryX, lp.width, s)
