@@ -833,9 +833,9 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (attachmentInteraction != null) return
     if (event.actionMasked != MotionEvent.ACTION_OUTSIDE) return
     // Android redacts cross-UID outside coordinates. A redacted event cannot
-    // tell a keyboard tap from a tap on the other app, so let window focus
-    // and Back control the editing session in that case.
-    if (event.rawX == 0f && event.rawY == 0f && (pickerOpen() || composer?.isEditing() == true)) return
+    // tell a keyboard tap from a tap on the other app while the IME is shown.
+    // The input can keep focus after Back or a picker round trip hides the IME.
+    if (event.rawX == 0f && event.rawY == 0f && (pickerOpen() || composerImeVisible())) return
     // 一次点击会向每个浮窗各发一次 OUTSIDE；按 downTime 去重，否则同一击会先收 sheet 再收输入区。
     if (event.downTime == outsideHandledDownTime) return
     outsideHandledDownTime = event.downTime
@@ -862,6 +862,16 @@ internal class OverlayV2(private val svc: OverlayService) {
       return
     }
     hideComposer()
+  }
+
+  private fun composerImeVisible(): Boolean {
+    val c = composer ?: return false
+    if (android.os.Build.VERSION.SDK_INT >= 30) {
+      c.view.rootWindowInsets?.let { return it.isVisible(android.view.WindowInsets.Type.ime()) }
+    }
+    if (!c.isEditing()) return false
+    val s = screen()
+    return pickerVisibleBottom(c, s) < s.heightPx - s.navBarPx
   }
 
   /** 某个槽位的窗口是否覆盖这个屏幕坐标（用于区分「点到空白」与「点到别的浮窗」）。 */
