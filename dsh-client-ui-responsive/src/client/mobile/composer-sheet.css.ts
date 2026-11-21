@@ -145,23 +145,12 @@ export const COMPOSER_SHEET_CSS = `
 }
 /* 第二段：上游「+」菜单项的映射行（图标 + 标题 + 副标题）。 */
 [data-dsh-composer-sheet-rows] {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   /* 列表是**唯一滚动容器**：卡片高度不够时由它滚，三块瓦片留在顶部不跟着滚。 */
   overflow-y: auto;
   overscroll-behavior-y: contain;
   min-height: 0;
-  /* 显式 minmax(0, 1fr) 而不是隐式 auto 轨道：
-     auto 轨道按 min-content 撑开，副标题 nowrap 时 min-content 等于整句宽度，
-     长副标题会把整行顶出卡片（实测 360 宽卡片里行宽涨到 367，落在卡片外）。 */
-  grid-template-columns: minmax(0, 1fr);
-  /* 行高用**内容高**（auto），不要 minmax(0, 1fr)：
-     1fr 会把 8 行强行等分到卡片可用高度里，横屏卡片只有 420px 高时
-     每行被压到 ~33px（小于行视觉高度 46px）→ 行与行重叠、末行被切半。
-     实测截图：横屏行列表挤成一团。内容超高时由本容器的 overflow-y 滚动承担。 */
-  grid-auto-rows: auto;
-  /* align-content: stretch（默认值）会把多余高度按比例塞进每条 auto 行：卡片一展开，
-     行高就从 46 涨到 86，peek 的「2.5 行」跟着算错（实测 249 → 350）。行必须按内容高。 */
-  align-content: start;
   min-width: 0;
   gap: 2px;
   margin-top: 10px;
@@ -174,6 +163,7 @@ export const COMPOSER_SHEET_CSS = `
 }
 [data-dsh-composer-sheet-row] {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 10px;
   box-sizing: border-box;
@@ -232,12 +222,16 @@ export const COMPOSER_SHEET_CSS = `
 }
 /* 行副标题：**两种形态都显示**（规格取消横屏隐藏）。 */
 [data-dsh-composer-sheet-row-sub] {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  max-height: 30px;
+  overflow: hidden;
   font-size: 12px;
   line-height: 15px;
   color: var(--dsw-alias-label-secondary, inherit);
   white-space: normal;
   overflow-wrap: anywhere;
-  text-wrap: pretty;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────

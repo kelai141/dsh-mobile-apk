@@ -47,7 +47,6 @@ const FILE_INPUT_SELECTOR = 'input[type="file"][multiple]'
 
 const BACKDROP_ATTR = 'data-dsh-composer-sheet-backdrop'
 const WAITING_IME_ATTR = 'data-dsh-composer-sheet-waiting-ime'
-const IME_SETTLE_MAX_MS = 750
 const PANEL_ATTR = 'data-dsh-composer-sheet-panel'
 const TILES_ATTR = 'data-dsh-composer-sheet-tiles'
 const TILE_ATTR = 'data-dsh-composer-sheet-tile'
@@ -281,7 +280,7 @@ export class ComposerSheet {
   }
 
   private backdrop: HTMLElement | null = null
-  private imeRevealTimer: number | undefined
+  private imeRevealFrame = 0
   /** 面板里的回执位（每次 open 重建，close 时置空）。 */
   private status: HTMLElement | null = null
   private addButton: HTMLElement | null = null
@@ -372,7 +371,8 @@ export class ComposerSheet {
   private dragPeekMax(): { peek: number; max: number } {
     const cached = this.dragGeometry
     if (cached !== null) return cached
-    const fresh = { peek: this.peekHeight(), max: this.maxHeight() }
+    const peek = this.peekHeight()
+    const fresh = { peek, max: this.maxHeight(peek) }
     this.dragGeometry = fresh
     return fresh
   }
@@ -505,7 +505,7 @@ export class ComposerSheet {
     const sheetForm = this.sheetFormRequested()
     const backdrop = document.createElement('div')
     backdrop.setAttribute(BACKDROP_ATTR, '')
-    if (sheetForm && this.keyboardInset() > 0) backdrop.setAttribute(WAITING_IME_ATTR, '')
+    if (sheetForm && this.keyboardVisible()) backdrop.setAttribute(WAITING_IME_ATTR, '')
     backdrop.addEventListener(COMPOSER_BACK_EVENT, event => {
       if (this.backdrop !== backdrop) return
       event.preventDefault()
@@ -555,11 +555,8 @@ export class ComposerSheet {
       this.blurActiveEditor()
       // 行到齐之后重算 peek：行高只有真实行才量得到（打开瞬间还没有行）。
       this.relayoutSheet()
-      if (backdrop.hasAttribute(WAITING_IME_ATTR) && this.keyboardInset() > 0) {
-        this.imeRevealTimer ??= window.setTimeout(() => this.revealPanel(), IME_SETTLE_MAX_MS)
-      } else {
-        this.revealPanel()
-      }
+      if (backdrop.hasAttribute(WAITING_IME_ATTR)) this.onSheetIme()
+      else this.focusFirstTile()
     })
   }
 
@@ -570,21 +567,35 @@ export class ComposerSheet {
       // fillRows has started the upstream menu with its editor focused. Android
       // can now close the IME while React loads the menu rows.
       bridge.dismissWebIme()
-      this.imeRevealTimer = window.setTimeout(() => this.revealPanel(), IME_SETTLE_MAX_MS)
     } catch {
       // An older shell or an unavailable bridge still uses the blur path.
     }
   }
 
-  private revealPanel(): void {
-    window.clearTimeout(this.imeRevealTimer)
-    this.imeRevealTimer = undefined
-    this.backdrop?.removeAttribute(WAITING_IME_ATTR)
+  private focusFirstTile(): void {
     if (!this.borrowing) this.panel()?.querySelector<HTMLElement>('[' + TILE_ATTR + ']')?.focus({ preventScroll: true })
   }
 
+  private keyboardVisible(): boolean {
+    return document.documentElement.hasAttribute('data-dsh-ime') || this.keyboardInset() > 1
+  }
+
   private readonly onSheetIme = (): void => {
-    if (this.imeRevealTimer !== undefined && this.keyboardInset() === 0) this.revealPanel()
+    const backdrop = this.backdrop
+    if (!backdrop?.hasAttribute(WAITING_IME_ATTR)) return
+    window.cancelAnimationFrame(this.imeRevealFrame)
+    this.imeRevealFrame = 0
+    if (this.keyboardVisible()) return
+    // The native zero inset can arrive before WebView finishes its final layout.
+    // A new resize or inset change restarts the settle window.
+    this.imeRevealFrame = window.requestAnimationFrame(() => {
+      this.imeRevealFrame = window.requestAnimationFrame(() => {
+        this.imeRevealFrame = 0
+        if (this.backdrop !== backdrop || this.keyboardVisible()) return
+        backdrop.removeAttribute(WAITING_IME_ATTR)
+        this.focusFirstTile()
+      })
+    })
   }
 
   /**
@@ -782,12 +793,14 @@ export class ComposerSheet {
     // 一次上游提交，这几帧里面板可能还没挂到 body 上（实测：读到了 9 个上游项，
     // 却因为此刻未挂载而整批丢弃，面板只剩三块瓦片）。
     if (this.backdrop === null || !this.backdrop.contains(rows)) return
+    const fragment = document.createDocumentFragment()
     for (const row of mapped) {
       // 附件入口那条（文件 / file）不复制：三块瓦片已经覆盖它。
       // 用标题精确命中而不是位置/前缀，理由见 ATTACHMENT_ROW_TITLES。
       if (ATTACHMENT_ROW_TITLES.has(row.title.trim().toLowerCase())) continue
-      rows.append(this.buildRow(row))
+      fragment.append(this.buildRow(row))
     }
+    rows.append(fragment)
   }
 
   private buildRow(row: MappedRow): HTMLElement {
@@ -1094,9 +1107,9 @@ export class ComposerSheet {
   }
 
   /** 展开上限取整张遮罩的高度。 */
-  private maxHeight(): number {
+  private maxHeight(peek = this.peekHeight()): number {
     const cap = Math.round(this.viewportHeight() * MAX_HEIGHT_RATIO)
-    return Math.max(this.peekHeight(), cap)
+    return Math.max(peek, cap)
   }
 
   /**
@@ -1168,13 +1181,12 @@ export class ComposerSheet {
   }
 
   /** 把 peek / max 两个数值写到面板上，供 CSS 与设备验收逐条取值。 */
-  private writeHeights(phase: string): void {
+  private writeHeights(phase: string, peek: number, max: number): void {
     const panel = this.panel()
     if (panel === null) return
-    const peek = this.peekHeight()
     panel.setAttribute(PHASE_ATTR, phase)
     panel.setAttribute(PEEK_ATTR, String(peek))
-    panel.setAttribute(MAX_ATTR, String(this.maxHeight()))
+    panel.setAttribute(MAX_ATTR, String(max))
   }
 
   /**
@@ -1182,7 +1194,7 @@ export class ComposerSheet {
    *
    * **拖拽期间必须走 per-drag 缓存**：本函数在 onSheetTouchMove 里每帧被调一次，
    * 若在这里直接 peekHeight()/maxHeight()，刚才在 touchmove 里省下的几何读会原样付回来
-   * （实测：缓存做了但仍每帧 12 次读）。拖拽外的调用照旧实时计算。
+   * （实测：缓存做了但仍每帧 12 次读）。非拖拽路径复用最近一次布局写入的值。
    */
   private publishGeometry(): void {
     const panel = this.panel()
@@ -1194,8 +1206,8 @@ export class ComposerSheet {
       form: this.mountedForm(),
       phase: panel.getAttribute(PHASE_ATTR),
       height: Number.isFinite(inline) ? Math.round(inline) : Math.round(this.currentHeight()),
-      peek: dragGeometry?.peek ?? this.peekHeight(),
-      max: dragGeometry?.max ?? this.maxHeight(),
+      peek: dragGeometry?.peek ?? Number(panel.getAttribute(PEEK_ATTR)),
+      max: dragGeometry?.max ?? Number(panel.getAttribute(MAX_ATTR)),
       viewport: { height: Math.round(this.viewportHeight()), innerHeight: window.innerHeight, keyboard: this.keyboardInset() },
       feel: this.feel().id,
     }
@@ -1206,8 +1218,9 @@ export class ComposerSheet {
   private activateSheet(panel: HTMLElement): void {
     this.sheetPanel = panel
     this.invalidateDragGeometry()
-    this.setHeight(this.peekHeight())
-    this.writeHeights('peek')
+    const peek = this.peekHeight()
+    this.setHeight(peek)
+    this.writeHeights('peek', peek, this.maxHeight(peek))
     panel.addEventListener('touchstart', this.onSheetTouchStart, { passive: true })
     // 必须非 passive：归属卡片时要 preventDefault 才能压住原生滚动。
     panel.addEventListener('touchmove', this.onSheetTouchMove, { passive: false })
@@ -1216,11 +1229,12 @@ export class ComposerSheet {
     window.addEventListener('resize', this.onSheetViewport)
     window.addEventListener('dsh-page-ime-change', this.onSheetIme)
     window.visualViewport?.addEventListener('resize', this.onSheetIme)
+    window.visualViewport?.addEventListener('scroll', this.onSheetIme)
     // 字体加载完成会改行高 ⇒ peek 跟着变。rowHeightPx 只在首次量到真行时写入，
     // 而那次量到的可能是回退字体；这里在字体就绪后重新采样一次并重算。
     // （jsdom / 老内核没有 document.fonts：存在性判断后跳过，不改变原有行为。）
-    const fonts = (document as unknown as { fonts?: { ready?: Promise<unknown> } }).fonts
-    if (fonts?.ready !== undefined) {
+    const fonts = document.fonts
+    if (fonts?.ready !== undefined && fonts.status !== 'loaded') {
       void fonts.ready.then(() => {
         if (this.sheetPanel !== panel) return
         this.rowHeightPx = null
@@ -1243,8 +1257,9 @@ export class ComposerSheet {
     window.removeEventListener('resize', this.onSheetViewport)
     window.removeEventListener('dsh-page-ime-change', this.onSheetIme)
     window.visualViewport?.removeEventListener('resize', this.onSheetIme)
-    window.clearTimeout(this.imeRevealTimer)
-    this.imeRevealTimer = undefined
+    window.visualViewport?.removeEventListener('scroll', this.onSheetIme)
+    window.cancelAnimationFrame(this.imeRevealFrame)
+    this.imeRevealFrame = 0
     // 调试取数口随面板一起失效：留着会把竖屏的 peek/max 带进横屏读到的旧值。
     delete (window as unknown as { __dshComposerSheet?: unknown }).__dshComposerSheet
     if (panel === null) return
@@ -1271,10 +1286,10 @@ export class ComposerSheet {
     // 行到齐（fillRows 收尾）/ 视口变化都会走到这里：几何缓存必须随之失效。
     this.invalidateDragGeometry()
     const peek = this.peekHeight()
-    const max = this.maxHeight()
+    const max = this.maxHeight(peek)
     const phase = panel.getAttribute(PHASE_ATTR) === 'expanded' ? 'expanded' : 'peek'
     this.setHeight(phase === 'expanded' ? max : Math.min(peek, max))
-    this.writeHeights(phase)
+    this.writeHeights(phase, peek, max)
     this.publishGeometry()
   }
 
@@ -1295,9 +1310,10 @@ export class ComposerSheet {
     }
     // 松手吸附仍在拖拽生命周期内（drag 尚未清空）：复用本次拖拽的几何，避免再付一轮读。
     // 缓存缺失（例如非手势路径调用）时 dragPeekMax 会现算，行为与原先一致。
-    const phase = target > this.dragPeekMax().peek + 1 ? 'expanded' : 'peek'
+    const { peek, max } = this.dragPeekMax()
+    const phase = target > peek + 1 ? 'expanded' : 'peek'
     this.setHeight(target)
-    this.writeHeights(phase)
+    this.writeHeights(phase, peek, max)
     this.publishGeometry()
     if (this.settleTimer !== undefined) window.clearTimeout(this.settleTimer)
     this.settleTimer = window.setTimeout(() => {
@@ -1310,6 +1326,7 @@ export class ComposerSheet {
     // Only layout viewport changes can move the bottom sheet or change its height cap.
     this.invalidateDragGeometry()
     this.relayoutSheet()
+    this.onSheetIme()
   }
 
   /** 起手只记录，不判定归属（8px 方向锁在 move 里）。 */

@@ -344,24 +344,17 @@ describe('列表滚动：最后一行不得被切半', () => {
     expect(rows).toMatch(/scroll-padding-bottom:\s*[1-9]/)
   })
 
-  /**
-   * 真缺陷（2026-10-31 设备截图）：`grid-auto-rows: minmax(0, 1fr)` 把 8 行强行等分到
-   * 卡片可用高度里。横屏卡片只有 420px 高时每行被压到约 33px，小于行的视觉高度
-   * （min-height 46px）→ 行与行重叠、最后一行被切半。
-   *
-   * 判据：轨道必须是内容高（auto），且行自身有 min-height 兜底。
-   */
-  it('行轨道是 auto（内容高），不是 1fr 等分（否则横屏把行压扁重叠）', () => {
+  it('每行由内容撑开，列表空间不足时滚动', () => {
     const rows = ruleBody('[data-dsh-composer-sheet-rows]')
-    expect(rows).toContain('grid-auto-rows: auto')
-    expect(rows).not.toContain('grid-auto-rows: minmax(0, 1fr)')
+    expect(rows).toContain('flex-direction: column')
+    expect(ruleBody('[data-dsh-composer-sheet-row]')).toContain('flex: none')
     expect(ruleBody('[data-dsh-composer-sheet-row]')).toMatch(/min-height:\s*4[0-9]px/)
   })
 
   it('行文本列能收缩并裁切（副标题不画出卡片外）', () => {
-    expect(COMPOSER_SHEET_CSS).toContain('grid-template-columns: minmax(0, 1fr)')
     expect(ruleBody('[data-dsh-composer-sheet-row]')).toContain('min-width: 0')
     expect(ruleBody('[data-dsh-composer-sheet-row-text]')).toContain('overflow: hidden')
+    expect(ruleBody('[data-dsh-composer-sheet-row-sub]')).toContain('-webkit-line-clamp: 2')
   })
 })
 
