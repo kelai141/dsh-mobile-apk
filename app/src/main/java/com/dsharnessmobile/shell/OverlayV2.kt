@@ -1885,7 +1885,7 @@ internal class OverlayV2(private val svc: OverlayService) {
   internal fun onLiveEvent(event: LiveEvent) {
     if (destroyed) return
     val at = event.atMs
-    val sessionMatches = svc.activeSessionId.isEmpty() || event.sessionId.isEmpty() || event.sessionId == svc.activeSessionId
+    val sessionMatches = event.sessionId.isEmpty() || event.sessionId == svc.activeSessionId
     if (!sessionMatches) return
     model = when (event.kind) {
       LiveEvent.KIND_TOOL_CALL -> {
@@ -1950,6 +1950,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (destroyed) return
     val previousSession = previousSessionId
     if (previousSession == svc.activeSessionId) return
+    model = OverlayCardModel(engineOnline = model.engineOnline)
     val previousDraft = exportDraftSnapshot()
     sessionDrafts[previousSession] = previousDraft.copy(sessionId = previousSession)
     previousSessionId = svc.activeSessionId
@@ -2031,7 +2032,7 @@ internal class OverlayV2(private val svc: OverlayService) {
       renderPending = false
       if (destroyed) return@postDelayed
       if (cardVisible()) renderCard()
-      if (pillVisible()) pill?.render(OverlayUiModel.pillOf(model, UiText.isEnglish(svc)).text, toneOf(OverlayUiModel.pillOf(model, UiText.isEnglish(svc)).tone))
+      if (pillVisible()) renderPill()
       if (composerVisible()) renderComposer()
     }, 100)
   }
@@ -2042,7 +2043,7 @@ internal class OverlayV2(private val svc: OverlayService) {
   private fun canAutoCollapseCard(): Boolean =
     !destroyed && !uiSuspended && !hostForeground && cardVisible() &&
       !cardExpanded && !cardHandleDragging && attachmentInteraction == null &&
-      model.completionKind == "completed" && !model.turnActive && model.pending.isEmpty()
+      model.completionKind == "completed" && !model.turnActive && model.pending.isEmpty() && svc.autoCollapseOnDone()
 
   private fun updateCardAutoCollapse() {
     if (!canAutoCollapseCard()) {

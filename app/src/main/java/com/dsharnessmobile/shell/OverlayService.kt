@@ -706,7 +706,7 @@ class OverlayService : Service() {
   }
 
   /** issue #133：完成后自动收起面板（默认开，可在 overlay_display prefs 关掉）。 */
-  private fun autoCollapseOnDone(): Boolean = try {
+  internal fun autoCollapseOnDone(): Boolean = try {
     getSharedPreferences("overlay_display", MODE_PRIVATE).getBoolean("auto_collapse_on_done", true)
   } catch (_: Exception) {
     true
