@@ -132,6 +132,7 @@ test('a native Linux loader source directory is staged per ABI and asserted on t
     artifactName: 'with-loader.apk',
     fingerprintGate: '/tools/check-snapshot-fingerprint.mjs',
     nativeLinuxLoaderDir: loaderDir,
+    abi: 'aarch64',
     log() {},
   }, runner)
   // ① stage 调用带来源目录与 stage 落点，且 stage 落在构建目录内（不会残留到源码树）。
@@ -142,6 +143,8 @@ test('a native Linux loader source directory is staged per ABI and asserted on t
   // ② 交给 Gradle 的是 stage 目录，不是调用方目录（否则两个 ABI 的 loader 会互相串味）。
   assert.ok(gradleArgs.includes(`-PnativeLinuxLoaderDir=${staged}`),
     'Gradle 属性必须是分档后的目录，实际: ' + gradleArgs.join(' '))
+  assert.ok(gradleArgs.includes('-PnativeControlAbis=arm64-v8a'))
+  assert.equal(stageCall[stageCall.indexOf('--abi') + 1], 'arm64')
   assert.equal(gradleArgs.some((arg) => arg.includes(loaderDir) && !arg.includes(staged)), false,
     '不得把未分档的源目录交给 Gradle')
   // ③ 产物断言用 --require（给了源目录就必须真的带上 loader），且排在签名的同一关口。
