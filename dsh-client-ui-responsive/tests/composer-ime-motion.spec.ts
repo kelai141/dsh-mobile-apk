@@ -58,7 +58,7 @@ it('moves the layer on open before committing layout, and expands once on close'
   expect(layout()).toBe(0)
   expect(animate).toHaveBeenLastCalledWith([
     { transform: 'translate3d(0, -250px, 0)' }, { transform: 'translate3d(0, 0px, 0)' },
-  ], expect.objectContaining({ duration: 180 }))
+  ], expect.objectContaining({ duration: 108 }))
 })
 
 it('reverses from the painted position and ignores a canceled animation completion', () => {
@@ -68,7 +68,7 @@ it('reverses from the painted position and ignores a canceled animation completi
   changeTarget(0)
   expect(animate).toHaveBeenLastCalledWith([
     { transform: 'translate3d(0, -90px, 0)' }, { transform: 'translate3d(0, 0px, 0)' },
-  ], expect.objectContaining({ duration: 180 }))
+  ], expect.objectContaining({ duration: 108 }))
   animate.mock.results[0].value.dispatchEvent(new Event('finish'))
   expect(layout()).toBe(0)
 })

@@ -74,10 +74,15 @@ export class ComposerImeMotion {
     }
 
     clip.setAttribute(CLIP_ATTR, '')
+    const opening = target > previous
     const animation = layer.animate([
       { transform: `translate3d(0, ${from}px, 0)` },
       { transform: `translate3d(0, ${to}px, 0)` },
-    ], { duration, fill: 'both', easing: target > previous ? 'cubic-bezier(.2,.7,.25,1)' : 'linear' })
+    ], {
+      duration: opening ? duration : duration * 0.6,
+      fill: 'both',
+      easing: opening ? 'cubic-bezier(.2,.7,.25,1)' : 'linear',
+    })
     this.flight = { animation, clip }
     animation.addEventListener('finish', () => {
       if (this.flight?.animation !== animation) return
