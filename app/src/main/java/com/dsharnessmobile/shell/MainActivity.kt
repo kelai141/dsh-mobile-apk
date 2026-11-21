@@ -84,9 +84,8 @@ class MainActivity : ComponentActivity() {
   /** apk #182-2：横屏 + 侧边挖孔（short edge = 左右）时页面需要左右 inset 才能避让。 */
   private var webSystemLeftInset = 0
   private var webSystemRightInset = 0
-  /** Coalesces insets while a WebView evaluation is queued or running. */
+  /** Coalesces inset updates queued on the same UI turn. */
   private var webInsetsPushScheduled = false
-  private var webInsetsDirty = false
   /** 目录选择桥鉴权 token（进程级共享：MainActivity 重建/看门狗重启不更换，
    *  与引擎 env 的 DSH_PICK_TOKEN 始终一致；C1 修复）。 */
   private val pickToken: String = EngineManager.ensurePickToken()
@@ -2157,24 +2156,16 @@ class MainActivity : ComponentActivity() {
    * 留出一条纯背景带。IME 原始高度与页面剩余遮挡量分别发布。WebView 的布局尺寸保持稳定。
    */
   private fun scheduleWebInsetsPush() {
-    if (!pageUiActive || !webViewReady) return
-    webInsetsDirty = true
-    if (webInsetsPushScheduled) return
+    if (!pageUiActive || !webViewReady || webInsetsPushScheduled) return
     webInsetsPushScheduled = true
     webView.post {
-      webInsetsDirty = false
-      pushWebInsets(onComplete = {
-        webInsetsPushScheduled = false
-        if (webInsetsDirty) scheduleWebInsetsPush()
-      })
+      webInsetsPushScheduled = false
+      pushWebInsets()
     }
   }
 
-  private fun pushWebInsets(view: WebView = webView, onComplete: (() -> Unit)? = null) {
-    if (!pageUiActive || view !== webView) {
-      onComplete?.invoke()
-      return
-    }
+  private fun pushWebInsets(view: WebView = webView) {
+    if (!pageUiActive || view !== webView) return
     try {
       val insetsScript =
         "(function(){var root=document.documentElement;if(!root)return;var top='" + webSystemTopInset +
@@ -2194,10 +2185,9 @@ class MainActivity : ComponentActivity() {
           "set('--dsh-android-page-ime-overlap',overlap);" +
           "window.dispatchEvent(new Event('dsh-page-ime-change'));}" +
           "})()"
-      view.evaluateJavascript(insetsScript, onComplete?.let { complete -> ValueCallback { complete() } })
+      view.evaluateJavascript(insetsScript, null)
     } catch (_: Exception) {
       // onPageFinished republishes the current insets after navigation.
-      onComplete?.invoke()
     }
   }
 
