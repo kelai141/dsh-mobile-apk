@@ -17,6 +17,28 @@ class OverlayGestureRouterTest {
   private fun router(): OverlayGestureRouter =
     OverlayGestureRouter(touchSlopPx = 10f, doubleTapTimeoutMs = 300L, longPressTimeoutMs = 500L)
 
+  @Test
+  fun `three taps switch shape without first firing double tap`() {
+    val r = OverlayGestureRouter(10f, 300L, 500L, tripleTapEnabled = true)
+    for (time in listOf(0L, 100L, 200L)) {
+      r.onDown(time)
+      assertEquals(if (time == 200L) EntryGesture.TRIPLE_TAP else EntryGesture.NONE, r.onUp(0f, 0f, time + 15))
+    }
+    assertEquals(EntryGesture.NONE, r.resolvePendingTap(600L))
+  }
+
+  @Test
+  fun `two taps still open the app after the third tap window closes`() {
+    val r = OverlayGestureRouter(10f, 300L, 500L, tripleTapEnabled = true)
+    r.onDown(0L)
+    r.onUp(0f, 0f, 20L)
+    r.onDown(100L)
+    r.onUp(0f, 0f, 120L)
+    assertEquals(EntryGesture.NONE, r.resolvePendingTap(419L))
+    assertEquals(EntryGesture.DOUBLE_TAP, r.resolvePendingTap(420L))
+    assertEquals(EntryGesture.NONE, r.resolvePendingTap(421L))
+  }
+
   // ── 拖动阈值 ─────────────────────────────────────────────────────────
 
   @Test

@@ -8,7 +8,7 @@ import kotlin.math.sqrt
  * 为什么把拖动拆成 START/MOVE/END 三档：渲染层要分别做「起拖时抬起视觉反馈」、
  * 「拖动中跟手位移」、「松手后吸边/回弹」，三者动画不同，合成一个 DRAG 就没法区分。
  */
-internal enum class EntryGesture { NONE, TAP, DOUBLE_TAP, LONG_PRESS, DRAG_START, DRAG_MOVE, DRAG_END }
+internal enum class EntryGesture { NONE, TAP, DOUBLE_TAP, TRIPLE_TAP, LONG_PRESS, DRAG_START, DRAG_MOVE, DRAG_END }
 
 /** Outside与入口DOWN属于同次触摸时只收一次，不能按被outside改变后的可见态误重开。 */
 internal fun overlayEntryTapShouldOpen(cardVisibleAtDown: Boolean, outsideClosedSameDown: Boolean): Boolean =
@@ -31,6 +31,7 @@ internal class OverlayGestureRouter(
   private val touchSlopPx: Float,
   private val doubleTapTimeoutMs: Long,
   private val longPressTimeoutMs: Long,
+  private val tripleTapEnabled: Boolean = false,
 ) {
   /** 本次手势是否已跨过 touchSlop（拖动进行中）。 */
   private var dragging = false
@@ -49,6 +50,7 @@ internal class OverlayGestureRouter(
 
   /** 是否有一个单击在等待双击窗口过去（调用方在窗口结束时调 [resolvePendingTap]）。 */
   private var pendingTap = false
+  private var tapCount = 0
 
   /**
    * 按下：开启一次新手势。
@@ -82,6 +84,7 @@ internal class OverlayGestureRouter(
     // 避免松手后调用方还按旧时间窗口判出一次双击。
     pendingTap = false
     lastTapUpAtMs = null
+    tapCount = 0
     return EntryGesture.DRAG_START
   }
 
@@ -104,6 +107,7 @@ internal class OverlayGestureRouter(
     if (wasDragging) {
       pendingTap = false
       lastTapUpAtMs = null
+      tapCount = 0
       return EntryGesture.DRAG_END
     }
     if (longPressFired) {
@@ -112,11 +116,13 @@ internal class OverlayGestureRouter(
       return EntryGesture.NONE
     }
     val last = lastTapUpAtMs
-    if (last != null && atMs >= last && atMs - last <= doubleTapTimeoutMs) {
-      // 双击成立：两枚单击都已被消费掉，不得再留一个待定单击。
+    tapCount = if (last != null && atMs - last in 0..doubleTapTimeoutMs) tapCount + 1 else 1
+    if (tapCount >= (if (tripleTapEnabled) 3 else 2)) {
+      val result = if (tripleTapEnabled) EntryGesture.TRIPLE_TAP else EntryGesture.DOUBLE_TAP
       pendingTap = false
       lastTapUpAtMs = null
-      return EntryGesture.DOUBLE_TAP
+      tapCount = 0
+      return result
     }
     lastTapUpAtMs = atMs
     pendingTap = true
@@ -138,6 +144,7 @@ internal class OverlayGestureRouter(
     // 长按已消费本次手势：清掉单击候选，避免窗口到期后再补发一次 TAP。
     pendingTap = false
     lastTapUpAtMs = null
+    tapCount = 0
     return EntryGesture.LONG_PRESS
   }
 
@@ -151,9 +158,11 @@ internal class OverlayGestureRouter(
     val last = lastTapUpAtMs
     if (!pendingTap || last == null) return EntryGesture.NONE
     if (atMs - last < doubleTapTimeoutMs) return EntryGesture.NONE
+    val result = if (tapCount == 2) EntryGesture.DOUBLE_TAP else EntryGesture.TAP
     pendingTap = false
     lastTapUpAtMs = null
-    return EntryGesture.TAP
+    tapCount = 0
+    return result
   }
 
   /** 当前手势是否处于拖动中（用于渲染层决定是否跟随位移）。 */
@@ -171,6 +180,7 @@ internal class OverlayGestureRouter(
     downActive = false
     downAtMs = 0L
     lastTapUpAtMs = null
+    tapCount = 0
     pendingTap = false
   }
 

@@ -207,6 +207,10 @@ internal object OverlayWindowFrames {
   fun stripWindowWidthPx(density: Float): Int =
     dpPx(ENTRY_STRIP_VISUAL_WIDTH_DP, density).coerceAtLeast(1)
 
+  /** Extra transparent touch area. The painted ball and strip keep their original dimensions. */
+  fun ballHitSizePx(density: Float): Int = dpPx(48f, density).coerceAtLeast(1)
+  fun stripHitWidthPx(density: Float): Int = dpPx(28f, density).coerceAtLeast(1)
+
   /** 细条窗口高（px）：88dp 的纵向命中区，可视仍只画 64dp。 */
   fun stripWindowHeightPx(density: Float): Int =
     dpPx(ENTRY_STRIP_WINDOW_HEIGHT_DP, density).coerceAtLeast(1)
@@ -227,15 +231,15 @@ internal object OverlayWindowFrames {
     rightSide: Boolean,
     y: Int,
     windowHeightPx: Int,
+    windowWidthPx: Int = stripWindowWidthPx(screen.density),
   ): Pair<Int, Int> {
-    val windowWidth = stripWindowWidthPx(screen.density)
-    val x = if (rightSide) (screen.widthPx - windowWidth).coerceAtLeast(0) else 0
+    val x = if (rightSide) (screen.widthPx - windowWidthPx).coerceAtLeast(0) else 0
     return x to clampStripY(y, windowHeightPx, screen)
   }
 
   /** Recover on the same side, centered vertically on the strip and inset for a new touch. */
   fun restoredEntryBallPlacement(screen: OverlayScreen, rightSide: Boolean, stripY: Int, stripHeight: Int): Pair<Int, Int> {
-    val ball = dpPx(ENTRY_BALL_DP, screen.density)
+    val ball = ballHitSizePx(screen.density)
     val maxLeft = (screen.widthPx - ball).coerceAtLeast(0)
     val margin = dpPx(32f, screen.density).coerceAtMost(maxLeft / 2)
     val x = if (rightSide) maxLeft - margin else margin
