@@ -24,6 +24,21 @@
  * 不按「对话」「轨迹」文字匹配 —— 视图标签由 conversation.view 插槽注册，文案可变可增。
  */
 export const TOP_BAR_FOLD_CSS: string = `
+html[data-dsh-mobile-form] [data-dsh-session-mode-source] {
+  display: none !important;
+}
+
+html[data-dsh-mobile-form] [data-dsh-session-menu-mode] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  margin-block-end: 3px;
+  border-bottom: 1px solid var(--dsw-alias-border-l3, rgba(128, 128, 128, .35));
+  color: var(--dsw-alias-label-secondary, inherit);
+  overflow-wrap: anywhere;
+}
+
 /* 关闭态：座位内容整体离场，顶栏只剩标题、两个侧边栏按钮与三点菜单。 */
 html[data-dsh-mobile-form] [data-dsh-topbar-fold='closed'] {
   display: none !important;

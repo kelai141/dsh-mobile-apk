@@ -38,6 +38,7 @@ import { TOP_BAR_FOLD_CSS } from '../src/client/mobile/top-bar-fold.css.ts'
 const ACTIONS_SELECTOR = 'div[data-slot="conversation.session.header.actions"]'
 const ARROW_ATTR = 'data-dsh-topbar-fold-arrow'
 const FOLD_ATTR = 'data-dsh-topbar-fold'
+const MODE_ROW = '[data-dsh-session-menu-mode]'
 
 let fold: TopBarFold
 
@@ -128,6 +129,37 @@ function buildHeader(plugins: number, withTabs = true, withMoreMenu = true): voi
   }
   document.body.appendChild(header)
 }
+
+it('shows the preset in the session ellipsis and only keeps the separate fold for other contributions', async () => {
+  document.body.replaceChildren()
+  buildHeader(0)
+  const seat = document.querySelector(ACTIONS_SELECTOR)!
+  seat.innerHTML = '<span title="Current mode"><svg data-icon="dsw-icon-agent-preset-outline-regular"></svg>标准模式</span>'
+  const button = document.createElement('button')
+  button.className = 'hash_headerMenuButton'
+  button.setAttribute('data-context-menu-trigger', '')
+  button.setAttribute('aria-expanded', 'false')
+  document.querySelector('.titleRow')!.append(button)
+  document.body.insertAdjacentHTML('beforeend', '<div data-context-menu role="menu"><div role="presentation"><button role="menuitem">下载 Session 日志</button></div></div>')
+  fold.attach()
+  await flush()
+  expect(state().arrow).toBeNull()
+  expect(document.querySelector(MODE_ROW)).toBeNull()
+
+  button.setAttribute('aria-expanded', 'true')
+  await flush()
+  expect(document.querySelector(MODE_ROW)?.textContent).toBe('标准模式')
+  expect(document.querySelector('[role="menuitem"]')?.textContent).toBe('下载 Session 日志')
+
+  seat.append(document.createElement('button'))
+  await flush()
+  expect(state().arrow).not.toBeNull()
+  expect(document.querySelectorAll(MODE_ROW)).toHaveLength(1)
+  button.setAttribute('aria-expanded', 'false')
+  await flush()
+  expect(document.querySelector(MODE_ROW)).toBeNull()
+  expect(seat.firstElementChild?.textContent).toBe('标准模式')
+})
 
 /** 折叠相关的可观测状态。 */
 function state(): { seat: HTMLElement; arrow: HTMLElement | null; fold: string | null; titleUncontained: boolean } {
