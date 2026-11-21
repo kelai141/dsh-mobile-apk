@@ -303,6 +303,8 @@
 相关壳侧改动：`AndroidBridge.a11yStatus()/openA11ySettings()/unlockRestrictedSettings()`；`AdbState.unlockRestrictedSettings()`（appops 一键解锁）；`MainActivity.openAccessibilitySettings()`；`EngineManager.snapshotSettingsBackup()`（换树前 settings 备份，issue #126 P1 兜底）。
 能力面/权限面全量参考：`docs/AGENTS/ACCESSIBILITY-API.md`。
 
+手机控制 WebUI 的状态来自原生桥。面板可见时以单一定时器交错安排 2 秒和 3 秒刷新，离开面板或退到后台时取消定时器。重新可见立即回读，操作完成后定向回读对应状态。
+
 已知缺口：Root UID 0 与 privileged shell 的完整迁移尚未完成。`ShellOps`、`RootGrant`/`RootAccess`、`RootExecutionFence`/`RootMaintenanceLease` 与 Shizuku 低层执行仍在，但手机工具面（`plugins/dsh-android-phone-control`）当前不注册 `shExec/shPull/shPush/shRemove`。`virtual-only` 下仅靠 Shizuku 完成真实屏文本输入的执行与回读也仍缺设备证据。
 
 ## 0.14.0-preview 新增模块（通知分级与通知内应答，计划 §6）

@@ -13,7 +13,10 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-export interface ShellStateOptions {
+export interface ShellStateOptions<T = unknown> {
+  /** The containing panel owns focus, visibility and polling. */
+  managed?: boolean
+  equal?: (previous: T, next: T) => boolean
   /** 可见时的轮询间隔（毫秒）；缺省不轮询（只靠 visibilitychange/focus 重读）。 */
   pollMs?: number
 }
@@ -23,9 +26,11 @@ export interface ShellStateOptions {
  * @param options - 可选轮询间隔。
  * @returns `[当前值, refresh]`：refresh 立即重读真源（供写后回读），失败保留上一次值。
  */
-export function useShellState<T>(getter: () => T, options: ShellStateOptions = {}): readonly [T, () => void] {
+export function useShellState<T>(getter: () => T, options: ShellStateOptions<T> = {}): readonly [T, () => void] {
   const getterRef = useRef(getter)
   getterRef.current = getter
+  const equalRef = useRef(options.equal ?? Object.is)
+  equalRef.current = options.equal ?? Object.is
   const [value, setValue] = useState<T>(() => {
     try {
       return getter()
@@ -42,11 +47,12 @@ export function useShellState<T>(getter: () => T, options: ShellStateOptions = {
     } catch {
       return // 读失败保留上一次值：绝不把状态打成 undefined 或旧值清零
     }
-    setValue((prev) => (Object.is(prev, next) ? prev : next))
+    setValue((prev) => (equalRef.current(prev, next) ? prev : next))
   }, [])
 
-  const pollMs = options.pollMs
+  const { managed, pollMs } = options
   useEffect(() => {
+    if (managed) return
     const onVisible = (): void => {
       if (document.visibilityState === 'visible') refresh()
     }
@@ -58,7 +64,7 @@ export function useShellState<T>(getter: () => T, options: ShellStateOptions = {
       window.removeEventListener('focus', onVisible)
       if (timer !== undefined) window.clearInterval(timer)
     }
-  }, [refresh, pollMs])
+  }, [refresh, managed, pollMs])
 
   return [value, refresh] as const
 }

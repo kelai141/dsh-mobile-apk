@@ -22,6 +22,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { SUBLAYER_POP_EVENT } from '../mobile/back-stack.ts'
 import { useShellState } from '../mobile/use-shell-state.ts'
+import { phoneStateOptions, watchPhoneControlPanel } from './phone-control-poll.ts'
 import { describeCallReason } from '../user-copy.ts'
 import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { observeDocumentLanguage, tr } from '../i18n.ts'
@@ -810,16 +811,14 @@ export function readNativeControlDiagnostics(): string | undefined {
 export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
   const [, setLanguageTick] = useState(0)
   const languageMountedRef = useRef(false)
-  const [scopeRead, refreshScope] = useShellState<ShellRead<ScreenScope>>(readScope)
-  const [vdisplay, refreshVdisplay] = useShellState<VdisplayStatus>(readVdisplay, { pollMs: 2_000 })
-  const [shizuku, refreshShizuku] = useShellState<ShizukuStatus>(readShizuku, { pollMs: 2_000 })
-  const [scaleRead, refreshScale] = useShellState<ShellRead<number>>(readScale)
-  const [floatRead, refreshFloat] = useShellState<ShellRead<boolean>>(readFloat)
-  const [a11y, refreshA11y] = useShellState<A11yStatus>(readA11y, { pollMs: 3_000 })
-  // issue #262：root 授权面（2s 轮询与 Shizuku 面同拍——开关资格取决于通道身份，二者必须同源同拍）。
-  const [rootGrant, refreshRootGrant] = useShellState<RootGrantStatus>(readRootGrant, { pollMs: 2_000 })
-  // 2026-09-30 主人定例：应用级 root 授权面（2s 同拍——开关资格与授权状态必须同源同拍）。
-  const [rootAccess, refreshRootAccess] = useShellState<RootAccessStatus>(readRootAccess, { pollMs: 2_000 })
+  const [scopeRead, refreshScope] = useShellState(readScope, phoneStateOptions)
+  const [vdisplay, refreshVdisplay] = useShellState(readVdisplay, phoneStateOptions)
+  const [shizuku, refreshShizuku] = useShellState(readShizuku, phoneStateOptions)
+  const [scaleRead, refreshScale] = useShellState(readScale, phoneStateOptions)
+  const [floatRead, refreshFloat] = useShellState(readFloat, phoneStateOptions)
+  const [a11y, refreshA11y] = useShellState(readA11y, phoneStateOptions)
+  const [rootGrant, refreshRootGrant] = useShellState(readRootGrant, phoneStateOptions)
+  const [rootAccess, refreshRootAccess] = useShellState(readRootAccess, phoneStateOptions)
   /** 用户尝试开启开关但 root 未授权：壳侧已弹授权框，授权一到就自动续开（见下方 effect）。 */
   const [pendingEnable, setPendingEnable] = useState(false)
   const [rootMsg, setRootMsg] = useState<string | null>(null)
@@ -1300,6 +1299,17 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
    * 契约因此改成事件：容器只管说「退一层」，怎么退由本页自己决定。
    */
   const sublayer = useRef<HTMLDivElement>(null)
+  const homePanel = useRef<HTMLElement>(null)
+  useEffect(() => {
+    const panel = view === 'home' ? homePanel.current : sublayer.current
+    if (!panel) return
+    return watchPhoneControlPanel(panel, {
+      fast: () => { refreshVdisplay(); refreshShizuku(); refreshRootGrant(); refreshRootAccess() },
+      accessibility: refreshA11y,
+      onReturn: () => { refreshScope(); refreshScale(); refreshFloat() },
+    })
+  }, [view, refreshVdisplay, refreshShizuku, refreshRootGrant, refreshRootAccess,
+    refreshA11y, refreshScope, refreshScale, refreshFloat])
   useLayoutEffect(() => {
     const node = sublayer.current
     if (node === null) return
@@ -1726,6 +1736,7 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
 
   return (
     <section
+      ref={homePanel}
       data-plugin="dev-phone-control"
       data-native-control-protected=""
       aria-labelledby="dsh-phone-control-title"
