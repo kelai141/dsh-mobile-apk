@@ -464,15 +464,20 @@ jobs:
           # 分辨哪个文件来自哪次构建。concurrency 只挡并发，挡不住串行重跑。
           # 现在：已存在且**不是 draft** ⇒ 立即失败并要求人工删/改版本号；--clobber 只对 draft 保留
           # （draft 是同一轮未发布产物，重跑覆盖它是预期行为）。
-          if gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft,tagName >/dev/null 2>&1; then
-            IS_DRAFT=$(gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft --jq '.isDraft')
+          if existing=$(gh release view "$TAG" --repo "${{ github.repository }}" \
+            --json isDraft,targetCommitish --jq '[.isDraft,.targetCommitish] | @tsv' 2>/dev/null); then
+            IFS=$'\t' read -r IS_DRAFT TARGET_COMMITISH <<< "$existing"
             if [ "$IS_DRAFT" != "true" ]; then
               echo "::error::release $TAG 已存在且**已转正**（isDraft=$IS_DRAFT）——拒绝覆盖线上资产。先人工删除该 Release 或换一个 version 再派发。"
               exit 1
             fi
+            if [ "$TARGET_COMMITISH" != "$GITHUB_SHA" ]; then
+              echo "::error::草稿 $TAG 对应的是另一个构建提交，无法用本次 APK 覆盖"
+              exit 1
+            fi
             echo "release $TAG 已存在且为 draft，复用（同一轮未发布产物，重跑覆盖是预期行为）"
           else
-            gh release create "$TAG" --repo "${{ github.repository }}" --draft \
+            gh release create "$TAG" --repo "${{ github.repository }}" --draft --target "$GITHUB_SHA" \
               --title "dsh-mobile $TAG" --notes-file "release/v${VER}/notes.md"
           fi
           for f in release/v${VER}/apk/*.apk release/v${VER}/snapshot/*.tar.xz release/v${VER}/plugins/*.tgz release/v${VER}/provenance/*.json release/v${VER}/MANIFEST.txt release/v${VER}/notes.md; do
