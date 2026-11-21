@@ -122,17 +122,42 @@ export function LinuxTerminal({ onBack }: { onBack?(): void }) {
     }
     const onInput = terminal.onData(sendInput)
     sendKey.current = sendInput
-    const size = terminal.onResize(({ rows, cols }) => {
-      if (id && running && rows >= 2 && cols >= 2) void terminalRequest({ action: 'resize', id, rows, cols }).catch(fail)
-    })
+    type Dimensions = ReturnType<typeof dimensions>
+    let pendingSize: Dimensions | undefined
+    let sentSize: Dimensions | undefined
+    let resizing = false
+    const flushSize = async (): Promise<void> => {
+      const session = id
+      if (resizing || !active || !session || !running) return
+      resizing = true
+      try {
+        while (active && running && pendingSize) {
+          const next = pendingSize
+          pendingSize = undefined
+          if (sentSize?.rows === next.rows && sentSize.cols === next.cols) continue
+          await terminalRequest({ action: 'resize', id: session, ...next })
+          sentSize = next
+        }
+      } catch (error) {
+        fail(error)
+      } finally {
+        resizing = false
+      }
+    }
+    const queueSize = (next: Dimensions): void => {
+      if (next.rows < 2 || next.cols < 2) return
+      pendingSize = next
+      void flushSize()
+    }
+    const size = terminal.onResize(queueSize)
     const observer = new ResizeObserver(() => { if (active && element.offsetHeight) fit.fit() })
     observer.observe(element)
     void terminalRequest({ action: attempt.restart ? 'restart' : 'open', ...dimensions() }).then(async update => {
       if (!active) return
       id = update.id
-      if (update.running) await terminalRequest({ action: 'resize', id, ...dimensions() })
+      await consume(update)
       if (active) {
-        await consume(update)
+        if (running) queueSize(dimensions())
         schedulePoll(more ? 0 : pollDelay)
       }
     }).catch(fail)
