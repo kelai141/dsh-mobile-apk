@@ -693,9 +693,15 @@ describe('E. max = 0.88 * innerHeight', () => {
     expect(Math.abs(maxPx() - 880)).toBeLessThanOrEqual(1)
     expect(panelEl().style.getPropertyValue('--dsh-sheet-bottom')).toBe('')
 
+    const root = document.documentElement
+    root.setAttribute('data-dsh-ime', '')
     viewport.height = 1000
     viewport.dispatchEvent(new Event('resize'))
-    expect(backdrop.hasAttribute(pending)).toBe(false)
+    expect(backdrop.hasAttribute(pending)).toBe(true)
+    root.removeAttribute('data-dsh-ime')
+    window.dispatchEvent(new Event('dsh-page-ime-change'))
+    expect(backdrop.hasAttribute(pending)).toBe(true)
+    await vi.waitFor(() => { expect(backdrop.hasAttribute(pending)).toBe(false) })
     expect(getComputedStyle(panelEl()).bottom).toBe('0px')
     expect(getComputedStyle(panelEl()).position).toBe('absolute')
     expect(getComputedStyle(backdrop).zIndex).toBe('2147483647')
@@ -721,7 +727,9 @@ describe('E. max = 0.88 * innerHeight', () => {
 
       viewport.height = 1000
       viewport.dispatchEvent(new Event('resize'))
-      expect(backdrop.hasAttribute('data-dsh-composer-sheet-waiting-ime')).toBe(false)
+      await vi.waitFor(() => {
+        expect(backdrop.hasAttribute('data-dsh-composer-sheet-waiting-ime')).toBe(false)
+      })
       expect(document.activeElement).toBe(editor)
       document.querySelector('[role="listbox"]')!.append(option('Command'))
       await vi.waitFor(() => { expect(document.querySelector(ROW)).not.toBeNull() })

@@ -67,6 +67,34 @@ html [data-conversation-content][data-content-phase='hero'] > [data-conversation
   overflow-y: auto;
 }
 
+/* The @ and / lists are anchored above the card and need to paint outside the
+   seat. Bound the scrollable draft against the conversation viewport instead. */
+@supports (height: 1cqh) {
+  [data-conversation-scroll]:has([data-composer-seat] [data-input-scroll]) {
+    container-type: size;
+    container-name: dsh-conversation-scroll;
+  }
+
+  [data-composer-seat]:has([data-composer-card] > [data-input-scroll]) {
+    overflow: visible;
+  }
+
+  @container dsh-conversation-scroll (min-height: 0px) {
+    [data-composer-seat] [data-input-scroll] {
+      max-height: clamp(36px, calc(100cqh - 108px), min(336px, 52cqh));
+    }
+
+    [data-content-phase='hero'] [data-composer-seat] [data-input-scroll] {
+      max-height: clamp(36px, calc(100cqh - 176px), min(336px, 52cqh));
+    }
+  }
+}
+
+[data-composer-seat] [data-input-scroll] {
+  overscroll-behavior-y: contain;
+  touch-action: pan-y;
+}
+
 html[data-dsh-ime] {
   --dsh-visible-ime-overlap: var(--dsh-android-page-ime-overlap, 0px);
 }
