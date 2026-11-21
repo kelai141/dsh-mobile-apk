@@ -79,6 +79,47 @@ describe('手机顶栏内的后台任务浮窗', () => {
     expect(list.style.getPropertyValue('position')).toBe('')
   })
 
+  it('keeps session and turn statistic dialogs anchored during message scroll', async () => {
+    const scroller = document.createElement('div')
+    const owner = document.createElement('span')
+    owner.style.anchorName = '--dsh-stat-fixture'
+    const trigger = document.createElement('button')
+    trigger.setAttribute('aria-haspopup', 'dialog')
+    trigger.setAttribute('aria-expanded', 'true')
+    owner.append(trigger)
+    scroller.append(owner)
+    const panel = document.createElement('div')
+    panel.setAttribute('role', 'dialog')
+    panel.style.positionAnchor = '--dsh-stat-fixture'
+    const unrelated = document.createElement('div')
+    unrelated.setAttribute('role', 'dialog')
+    document.body.append(scroller, panel, unrelated)
+    const anchorRect = vi.spyOn(trigger, 'getBoundingClientRect')
+      .mockReturnValue({ left: 30, top: 550, bottom: 574 } as DOMRect)
+    const viewport = Object.assign(new EventTarget(), { width: 420, height: 600, offsetTop: 0, offsetLeft: 0 })
+    vi.stubGlobal('visualViewport', viewport)
+    popup = new HeaderPopups()
+    try {
+      popup.attach()
+      await flush()
+      const initialBottom = panel.style.bottom
+      expect(initialBottom).toBe(window.innerHeight - 545 + 'px')
+      scroller.dispatchEvent(new Event('scroll'))
+      await flush()
+      expect(panel.style.bottom).toBe(initialBottom)
+      anchorRect.mockReturnValue({ left: 30, top: 460, bottom: 484 } as DOMRect)
+      scroller.dispatchEvent(new Event('scroll'))
+      await flush()
+      expect(panel.style.bottom).toBe(window.innerHeight - 455 + 'px')
+      expect(unrelated.style.bottom).toBe('')
+      panel.remove()
+      await flush()
+      expect(panel.style.bottom).toBe('')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('bounds the portaled subagent catalog to the visible viewport and tracks IME changes', async () => {
     const anchor = document.createElement('div')
     anchor.setAttribute('data-subagent-action', '')

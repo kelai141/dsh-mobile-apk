@@ -21,6 +21,8 @@ const MARKER = 'data-dsh-header-popup'
 const OWNED_STYLES = ['position', 'top', 'left', 'right', 'width', 'max-width', 'max-height', 'overflow-y', 'z-index'] as const
 const VIEWPORT_MARGIN = 12
 const POPUP_GAP = 5
+const STAT_ANCHOR_PREFIX = '--dsh-stat-'
+const STAT_TRIGGER = 'button[aria-haspopup="dialog"][aria-expanded="true"]'
 const ANCHORED_STYLES = [
   'top', 'bottom', 'left', 'right', 'width', 'max-width', 'max-height', 'position-try-fallbacks',
 ] as const
@@ -38,6 +40,11 @@ interface StyleSnapshot {
   readonly priority: string
 }
 
+function statAnchor(element: HTMLElement, property: 'anchorName' | 'positionAnchor'): string | undefined {
+  const style = element.style as CSSStyleDeclaration & Partial<Record<'anchorName' | 'positionAnchor', string>>
+  return style[property]
+}
+
 export function sessionHeaderMenu(trigger: Element | null | undefined): HTMLElement | null {
   if (trigger?.getAttribute('aria-expanded') !== 'true') return null
   const id = trigger.getAttribute('aria-controls')
@@ -52,6 +59,8 @@ export class HeaderPopups {
   private catalog: HTMLElement | null = null
   private viewOptions: HTMLElement | null = null
   private sessionMenu: HTMLElement | null = null
+  private statDialog: HTMLElement | null = null
+  private statTrigger: HTMLElement | null = null
   private original = new Map<string, StyleSnapshot>()
   private attached = false
   private scheduled = false
@@ -60,7 +69,7 @@ export class HeaderPopups {
 
   private readonly onViewportChange = (): void => { this.schedule() }
   private readonly onImeChange = (): void => {
-    if (this.active !== null || this.catalog !== null || this.viewOptions !== null || this.sessionMenu !== null) {
+    if (this.active !== null || this.catalog !== null || this.viewOptions !== null || this.sessionMenu !== null || this.statDialog !== null) {
       this.schedule()
     }
   }
@@ -76,7 +85,7 @@ export class HeaderPopups {
   private readonly onScroll = (event: Event): void => {
     const affects = (panel: HTMLElement | null): boolean =>
       panel !== null && !(event.target instanceof Node && panel.contains(event.target))
-    if (this.active !== null || affects(this.catalog) || affects(this.viewOptions) || affects(this.sessionMenu)) {
+    if (this.active !== null || affects(this.catalog) || affects(this.viewOptions) || affects(this.sessionMenu) || affects(this.statDialog)) {
       this.schedule()
     }
   }
@@ -117,9 +126,12 @@ export class HeaderPopups {
     this.clearAnchoredStyles(this.catalog)
     this.clearAnchoredStyles(this.viewOptions)
     this.clearAnchoredStyles(this.sessionMenu)
+    this.clearAnchoredStyles(this.statDialog)
     this.catalog = null
     this.viewOptions = null
     this.sessionMenu = null
+    this.statDialog = null
+    this.statTrigger = null
   }
 
   private schedule(): void {
@@ -134,6 +146,7 @@ export class HeaderPopups {
       this.syncCatalog()
       this.syncViewOptions()
       this.syncSessionMenu()
+      this.syncStatDialog()
     })
   }
 
@@ -226,9 +239,31 @@ export class HeaderPopups {
     this.sessionMenu = this.syncAnchoredPopup(this.sessionMenu, panel, trigger, 240, true)
   }
 
+  private syncStatDialog(): void {
+    // Session and turn statistics share the upstream anchor identity and body portal.
+    const panel = [...document.body.children].find((child): child is HTMLElement =>
+      child instanceof HTMLElement && child.getAttribute('role') === 'dialog' &&
+      statAnchor(child, 'positionAnchor')?.startsWith(STAT_ANCHOR_PREFIX) === true,
+    ) ?? null
+    const anchorName = panel ? statAnchor(panel, 'positionAnchor') : undefined
+    if (panel && panel === this.statDialog && this.statTrigger?.isConnected &&
+      this.statTrigger.getAttribute('aria-expanded') === 'true') {
+      this.syncAnchoredPopup(panel, panel, this.statTrigger, 440, false, true)
+      return
+    }
+    const trigger = anchorName ? [...document.querySelectorAll<HTMLElement>(STAT_TRIGGER)].find(button => {
+      for (let owner = button.parentElement; owner && owner !== document.body; owner = owner.parentElement) {
+        if (statAnchor(owner, 'anchorName') === anchorName) return true
+      }
+      return false
+    }) : null
+    this.statTrigger = trigger ?? null
+    this.statDialog = this.syncAnchoredPopup(this.statDialog, panel, trigger, 440, false, true)
+  }
+
   private syncAnchoredPopup(
     previous: HTMLElement | null, panel: HTMLElement | null, trigger: Element | null | undefined,
-    preferredWidth: number, alignEnd: boolean,
+    preferredWidth: number, alignEnd: boolean, naturalWidth = false,
   ): HTMLElement | null {
     if (panel !== previous) this.clearAnchoredStyles(previous)
     if (panel === null) return null
@@ -256,7 +291,9 @@ export class HeaderPopups {
       (visual?.offsetLeft ?? 0) + (visual?.width || window.innerWidth),
       window.innerWidth - inset('--dsh-android-system-right'),
     ) - VIEWPORT_MARGIN
-    const width = Math.max(1, Math.min(preferredWidth, rightEdge - leftEdge))
+    const availableWidth = Math.max(1, rightEdge - leftEdge)
+    const measuredWidth = naturalWidth && panel.offsetWidth > 0 ? panel.offsetWidth : preferredWidth
+    const width = Math.min(measuredWidth, availableWidth)
     const anchorLeft = alignEnd ? anchor.right - width : anchor.left
     const left = Math.max(leftEdge, Math.min(anchorLeft, rightEdge - width))
 
@@ -266,8 +303,8 @@ export class HeaderPopups {
     panel.style.setProperty('bottom', opensDown ? 'auto' : `${window.innerHeight - bottom}px`, 'important')
     panel.style.setProperty('left', `${left}px`, 'important')
     panel.style.setProperty('right', 'auto', 'important')
-    panel.style.setProperty('width', `${width}px`, 'important')
-    panel.style.setProperty('max-width', `${width}px`, 'important')
+    if (!naturalWidth) panel.style.setProperty('width', `${width}px`, 'important')
+    panel.style.setProperty('max-width', `${naturalWidth ? Math.min(preferredWidth, availableWidth) : width}px`, 'important')
     panel.style.setProperty('max-height', `${Math.max(1, Math.min(560, Math.max(below, above)))}px`, 'important')
     return panel
   }
