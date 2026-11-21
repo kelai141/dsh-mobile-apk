@@ -385,7 +385,7 @@ class OverlayV2ViewContractTest {
     assertTrue(
       "有加号卡片时空白先收卡片、不收起输入",
       sheetDismiss >= 0 && composerHide > sheetDismiss &&
-        outside.substring(sheetDismiss, composerHide).contains("drawerMode = DrawerMode.NONE")
+        outside.substring(sheetDismiss, composerHide).contains("closeDrawer(animated = true)")
     )
     assertTrue(outside.contains("hideComposer()"))
     assertFalse("空白只收输入，不能顺手收顶部记录", outside.contains("hideCard()"))
