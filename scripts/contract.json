@@ -178,7 +178,9 @@
       "sidebar.right.tab.menu.item",
       "android.dock.conversation",
       "settings.models.provider-card",
-      "sidebar.right.tab.document.unpreviewable"
+      "sidebar.right.tab.document.unpreviewable",
+      "sidebar.panellist",
+      "main"
     ],
     "rowId": "ui-layout",
     "enabledRow": "ui-layout",
@@ -239,6 +241,20 @@
         "kind": "keyed",
         "scope": "root",
         "why": "模型提供商卡片的扩展座位，承载「列表来自内置目录」提示（#976/#960 文案止损）。上游实测 kind=keyed + scope=root（按卡片所属 provider 键控）。它是 slots 里已消费但此前未进 declarations 的一条：上游若改 kind/scope，提示会挂错卡片或整块落空，而界面只是少一行小字、§4b 声明面也盯不住它；本登记即为该事故的判据。"
+      },
+      {
+        "slot": "sidebar.panellist",
+        "file": "packages/client/ui-sidebar/src/client/contract/slots.ts",
+        "kind": "list",
+        "scope": "root",
+        "why": "Linux 环境入口与其他全局面板入口并列注册。"
+      },
+      {
+        "slot": "main",
+        "file": "packages/client/ui-layout/src/client/index.ts",
+        "kind": "keyed",
+        "scope": "root",
+        "why": "布局按全局面板键渲染 Linux 环境，并在退出后恢复原主界面。"
       },
       {
         "slot": "sidebar.right.tab.document.unpreviewable",
