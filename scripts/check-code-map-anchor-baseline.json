@@ -43,7 +43,7 @@
     "app/src/main/res/xml/file_paths.xml:3": 1,
     "app/src/main/java/com/dsharnessmobile/shell/ShizukuProbe.kt:71": 1,
     "browser-tab.tsx:54": 1,
-    "MainActivity.kt:578": 1,
+    "MainActivity.kt:581": 1,
     "BrowserHostNavigationPolicy.kt:87": 1,
     "docs/AGENTS/ARCHITECTURE.md:18": 2,
     "dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts:20": 2,
@@ -224,13 +224,13 @@
     "LogCollector.kt:405": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:427": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:68": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:92": 1,
     "app/src/main/java/com/dsharnessmobile/shell/DownloadSaver.kt:101": 1,
     "app/src/main/java/com/dsharnessmobile/shell/PublicRepoProvision.kt:1": 1,
-    "MainActivity.kt:353": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:159": 1,
+    "MainActivity.kt:356": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:162": 1,
     "scripts/check-bridge-symmetry.mjs:1": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:205": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:208": 1,
     "dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts:61": 3,
     "plugins/dsh-android-browser/src/contract.ts:42": 1,
     "app/src/test/java/com/dsharnessmobile/shell/BrowserHostCleartextConsistencyTest.kt:12": 1,
@@ -661,10 +661,10 @@
     "LogCollector.kt:795": [
       "internal fun describeEngineLogState(filesDir: File): String {"
     ],
-    "MainActivity.kt:353": [
+    "MainActivity.kt:356": [
       "\"无法保存重试状态，请重试。\", \"Could not save retry state. Please try again.\"))"
     ],
-    "MainActivity.kt:578": [
+    "MainActivity.kt:581": [
       "// issue #945：覆盖安装后先把**上一版的**起动意图归一，再读开关。"
     ],
     "MobileChrome.tsx:35": [
@@ -997,13 +997,13 @@
     "app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt:468": [
       ""
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:159": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:162": [
       "* `force` 只由「启动引擎」按钮使用：一次冷启动最多自动播一次，用户手动再启动时可以重播。"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:205": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:208": [
       "@Volatile"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:92": [
       "/** 目录选择桥鉴权 token（进程级共享：MainActivity 重建/看门狗重启不更换，"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyActionReceiver.kt:51": [

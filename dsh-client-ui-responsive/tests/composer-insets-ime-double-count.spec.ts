@@ -22,7 +22,14 @@ it('composer 底部 padding 不叠加键盘高度', () => {
 })
 
 it('只按剩余 IME 遮挡缩短页面外框，旧壳没有遮挡变量时保持原高', () => {
-  expect(COMPOSER_INSETS_CSS).toMatch(/html\[data-dsh-ime\] \[data-dsh-frame\]\s*\{\s*height: max\(0px, calc\(100% - var\(--dsh-android-page-ime-overlap, 0px\)\)\)/)
+  expect(COMPOSER_INSETS_CSS).toContain('--dsh-visible-ime-overlap: var(--dsh-android-page-ime-overlap, 0px)')
+  expect(COMPOSER_INSETS_CSS).toMatch(/\[data-dsh-frame\]\s*\{\s*height: max\(0px, calc\(100% - var\(--dsh-visible-ime-overlap, 0px\)\)\)/)
+})
+
+it('开合期间使用动画控制器持有的布局高度，并裁剪会话内容', () => {
+  expect(COMPOSER_INSETS_CSS).toMatch(/html\[data-dsh-ime-transition\]\s*\{[^}]*var\(--dsh-page-ime-layout, var\(--dsh-android-page-ime-target, 0px\)\)/)
+  expect(COMPOSER_INSETS_CSS).toContain('html:is([data-dsh-ime], [data-dsh-ime-transition]) [data-dsh-frame]')
+  expect(COMPOSER_INSETS_CSS).toMatch(/\[data-dsh-ime-motion\]\s*\{[^}]*clip-path: inset\(0\)/)
 })
 
 it('欢迎区的上下留白按同一比例随可视区收放', () => {

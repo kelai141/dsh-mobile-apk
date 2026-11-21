@@ -83,7 +83,12 @@ export interface VisibleViewport {
  */
 export function visibleViewport(): VisibleViewport | null {
   const layout = Number(window.innerHeight)
-  const overlap = parseFloat(document.documentElement.style.getPropertyValue('--dsh-android-page-ime-overlap')) || 0
+  const style = document.documentElement.style
+  // While the layout animates, protect popups from both the current and incoming keyboard area.
+  const overlap = Math.max(
+    parseFloat(style.getPropertyValue('--dsh-android-page-ime-overlap')) || 0,
+    parseFloat(style.getPropertyValue('--dsh-android-page-ime-target')) || 0,
+  )
   const imeBottom = layout > 0 && overlap > 0 ? layout - overlap : Infinity
   const viewport = window.visualViewport
   if (viewport !== null && viewport !== undefined) {

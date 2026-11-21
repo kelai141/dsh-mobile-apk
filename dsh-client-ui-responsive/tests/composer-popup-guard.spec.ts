@@ -92,6 +92,24 @@ describe('visibleViewport', () => {
     expect(visibleViewport()).toEqual({ top: 0, height: window.innerHeight })
   })
 
+  it('protects the keyboard area during both directions of the page transition', () => {
+    stubVisualViewport(window.innerHeight)
+    const style = document.documentElement.style
+    const overlap = '--dsh-android-page-ime-overlap'
+    const target = '--dsh-android-page-ime-target'
+    try {
+      style.setProperty(overlap, '50px')
+      style.setProperty(target, '250px')
+      expect(visibleViewport()?.height).toBe(window.innerHeight - 250)
+      style.setProperty(overlap, '180px')
+      style.setProperty(target, '0px')
+      expect(visibleViewport()?.height).toBe(window.innerHeight - 180)
+    } finally {
+      style.removeProperty(overlap)
+      style.removeProperty(target)
+    }
+  })
+
   it('returns null when the host reports no measurable viewport (jsdom)', () => {
     const inner = Object.getOwnPropertyDescriptor(window, 'innerHeight')
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 0 })

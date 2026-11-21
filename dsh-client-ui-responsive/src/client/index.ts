@@ -43,6 +43,7 @@ import { PreviewExternalAction } from './mobile/PreviewExternalAction.tsx'
 import { zh as previewExternalZh, en as previewExternalEn } from './mobile/preview-external.locales.ts'
 import { COMPOSER_ROW_CSS } from './composer-row.css.ts'
 import { COMPOSER_INSETS_CSS } from './composer-insets.css.ts'
+import { ComposerImeMotion } from './composer-ime-motion.ts'
 import { SUBAGENT_POPUP_CSS } from './mobile/header-popups.ts'
 import { TO_BOTTOM_GUTTER_CSS } from './to-bottom-gutter.css.ts'
 import { TRAJECTORY_DETAILS_CSS } from './trajectory-details.css.ts'
@@ -247,6 +248,7 @@ export function apply(ctx: ClientContext): void {
 
   // Composer insets adaptation: pad composer seat with system bottom / IME bottom.
   ctx.effect(() => injectStyle('composer-insets', COMPOSER_INSETS_CSS), 'ui-responsive: composer insets adaptation')
+  ctx.effect(() => new ComposerImeMotion().attach(), 'ui-responsive: composer keyboard motion')
   ctx.effect(() => injectStyle('subagent-popup', SUBAGENT_POPUP_CSS), 'ui-responsive: subagent catalog scrolling')
   ctx.effect(() => injectStyle('to-bottom-gutter', TO_BOTTOM_GUTTER_CSS), 'ui-responsive: sticky return-to-bottom action')
 

@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import android.os.Bundle
 import android.os.PowerManager
 import android.util.Log
@@ -81,6 +82,8 @@ class MainActivity : ComponentActivity() {
   private var webSystemTopInset = 0
   private var webImeBottomInset = 0
   private var webImeLayoutInset = 0
+  private var webImeTargetInset: Int? = null
+  private var webImeTransitionMs = 0L
   /** apk #182-2：横屏 + 侧边挖孔（short edge = 左右）时页面需要左右 inset 才能避让。 */
   private var webSystemLeftInset = 0
   private var webSystemRightInset = 0
@@ -703,6 +706,18 @@ class MainActivity : ComponentActivity() {
     val imeType = WindowInsetsCompat.Type.ime()
     val imeAnimations = mutableSetOf<WindowInsetsAnimationCompat>()
     var lastImeBottom = 0
+    var lastImeTargetBottom = 0
+    fun updateWebImeTarget(bottom: Int, durationMs: Long = 0) {
+      if (Build.VERSION.SDK_INT < 30) return
+      lastImeTargetBottom = bottom
+      val target = pxToCssPx(imeLayout.overlap(bottom), resources.displayMetrics.density)
+      if (webImeTargetInset == target) return
+      webImeTargetInset = target
+      val scale = Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        .takeIf { it.isFinite() && it >= 0f } ?: 1f
+      webImeTransitionMs = ((if (durationMs < 0) 200L else durationMs) * scale).toLong()
+      scheduleWebInsetsPush()
+    }
     fun updateWebIme(bottom: Int) {
       lastImeBottom = bottom
       val density = resources.displayMetrics.density
@@ -717,6 +732,7 @@ class MainActivity : ComponentActivity() {
       if (left != oldLeft || top != oldTop || right != oldRight || bottom != oldBottom) {
         imeLayout.refreshWindowBounds()
         updateWebIme(lastImeBottom)
+        updateWebImeTarget(lastImeTargetBottom, imeAnimations.lastOrNull()?.durationMillis ?: 0)
       }
     }
     // The DOM frame handles the overlap. Keep Chromium from applying it a second time.
@@ -743,6 +759,8 @@ class MainActivity : ComponentActivity() {
       webSystemLeftInset = pxToCssPx(maxOf(bars.left, cutout.left), density)
       webSystemRightInset = pxToCssPx(maxOf(bars.right, cutout.right), density)
       // onApply receives the destination before the first animation frame.
+      // Send that destination once so Chromium can interpolate even when IME samples arrive late.
+      updateWebImeTarget(ime, imeAnimations.lastOrNull()?.durationMillis ?: 0)
       if (imeAnimations.isEmpty()) updateWebIme(ime)
       scheduleWebInsetsPush()
       if (guideViewReady) {
@@ -776,7 +794,9 @@ class MainActivity : ComponentActivity() {
         override fun onEnd(animation: WindowInsetsAnimationCompat) {
           if (!imeAnimations.remove(animation) || imeAnimations.isNotEmpty()) return
           val settled = ViewCompat.getRootWindowInsets(root) ?: return
-          updateWebIme(settled.getInsets(imeType).bottom)
+          val ime = settled.getInsets(imeType).bottom
+          updateWebImeTarget(ime, animation.durationMillis)
+          updateWebIme(ime)
         }
       },
     )
@@ -2173,7 +2193,9 @@ class MainActivity : ComponentActivity() {
           "px';var navbar='" + webNavBarBottomInset +
           "px';var ime='" + webImeBottomInset +
           "px';var overlap='" + webImeLayoutInset +
-          "px';var left='" + webSystemLeftInset +
+          "px';var target=" + (webImeTargetInset?.let { "'${it}px'" } ?: "null") +
+          ";var duration='" + webImeTransitionMs +
+          "ms';var left='" + webSystemLeftInset +
           "px';var right='" + webSystemRightInset +
           "px';var style=root.style;function set(name,value){" +
           "if(style.getPropertyValue(name)!==value)style.setProperty(name,value);}" +
@@ -2181,8 +2203,12 @@ class MainActivity : ComponentActivity() {
           "set('--dsh-android-navbar-bottom',navbar);set('--dsh-android-ime-bottom',ime);" +
           "set('--dsh-android-system-left',left);set('--dsh-android-system-right',right);" +
           "root.toggleAttribute('data-dsh-ime',parseFloat(ime)>0);" +
-          "if(style.getPropertyValue('--dsh-android-page-ime-overlap')!==overlap){" +
+          "var changed=style.getPropertyValue('--dsh-android-page-ime-overlap')!==overlap;" +
           "set('--dsh-android-page-ime-overlap',overlap);" +
+          "if(target!==null&&style.getPropertyValue('--dsh-android-page-ime-target')!==target){" +
+          "set('--dsh-android-page-ime-duration',duration);set('--dsh-android-page-ime-target',target);" +
+          "root.setAttribute('data-dsh-ime-transition','');changed=true;}" +
+          "if(changed){" +
           "window.dispatchEvent(new Event('dsh-page-ime-change'));}" +
           "})()"
       view.evaluateJavascript(insetsScript, null)
