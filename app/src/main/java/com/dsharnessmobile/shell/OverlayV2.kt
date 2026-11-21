@@ -114,6 +114,7 @@ internal class OverlayV2(private val svc: OverlayService) {
 
   private var model = OverlayCardModel()
   private var pageState: OverlayPageHost.PageState? = null
+  private var pageSessionBeforeNewConversation: String? = null
   private var pageCommands: List<OverlayPageHost.PageCommand> = emptyList()
   private var drawerMode = DrawerMode.NONE
   /** 选择器异步加载态：空列表不等于「没有内容」，先区分加载中/失败/真空。 */
@@ -1702,6 +1703,7 @@ internal class OverlayV2(private val svc: OverlayService) {
               if (!ok) svc.flashStatus(t("无法新建会话", "Could not start a new conversation"))
               else if (drawerMode == DrawerMode.SESSIONS && drawerRetryToken == requestEpoch) {
                 closeDrawer(animated = false)
+                pageSessionBeforeNewConversation = svc.activeSessionId.takeIf(String::isNotEmpty)
                 svc.adoptPageSession("")
               }
             }
@@ -1715,6 +1717,7 @@ internal class OverlayV2(private val svc: OverlayService) {
         if (OverlayPageHost.available()) {
           OverlayPageHost.openSession(name) { ok ->
             if (ok) {
+              pageSessionBeforeNewConversation = null
               svc.onTargetSessionChanged(name)
               refreshPageState()
             } else {
@@ -2219,7 +2222,11 @@ internal class OverlayV2(private val svc: OverlayService) {
       if (destroyed || generation != pageReadGeneration) return@state
       if (s != null) {
         pageState = s
-        if (s.sessionId.isNotEmpty() && s.sessionId != svc.activeSessionId) svc.adoptPageSession(s.sessionId)
+        // Navigation can acknowledge a new conversation before the old page marker is removed.
+        if (s.sessionId != pageSessionBeforeNewConversation) {
+          pageSessionBeforeNewConversation = null
+          if (s.sessionId.isNotEmpty() && s.sessionId != svc.activeSessionId) svc.adoptPageSession(s.sessionId)
+        }
       } else {
         pageState = null
       }
