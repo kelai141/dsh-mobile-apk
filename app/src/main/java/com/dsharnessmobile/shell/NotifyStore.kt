@@ -68,6 +68,7 @@ object NotifyStore {
   @Volatile
   private var started = false
   private var watcher: FileObserver? = null
+  @Volatile private var overlayFileEvents: ((Int, String?) -> Unit)? = null
 
   /** application Context（`latestReportLine()` 的签名必须保持无参——文件回落靠它取路径）。 */
   @Volatile
@@ -214,12 +215,30 @@ object NotifyStore {
    * 为什么要记「任意路径」的事件：心跳探针要靠它回答「文件在长、事件不来」——即 watcher 是否失聪。
    * 只记命中路径的话，watcher 死了与「这段时间真的没有事件」在探针里长得一模一样。
    */
+  @Synchronized
+  internal fun watchOverlayFiles(context: Context, listener: (Int, String?) -> Unit): AutoCloseable {
+    overlayFileEvents = listener
+    start(context)
+    return AutoCloseable { removeOverlayFileListener(listener) }
+  }
+
+  @Synchronized
+  private fun removeOverlayFileListener(listener: (Int, String?) -> Unit) {
+    if (overlayFileEvents === listener) overlayFileEvents = null
+  }
+
   private fun watching(app: Context, d: File) {
     try {
       watcher = object : FileObserver(d.absolutePath, WATCH_MASK) {
         override fun onEvent(event: Int, path: String?) {
           lastWatchEventAt = System.currentTimeMillis()
           watchEvents++
+          // Android shares the inotify descriptor for this directory. Dispatch both consumers here.
+          try {
+            overlayFileEvents?.invoke(event, path)
+          } catch (e: Exception) {
+            LogCollector.log(TAG, "overlay file event failed: " + e.javaClass.simpleName)
+          }
           if (shouldConsumeOnEvent(event, path)) drain(app, TRIGGER_WATCH + (path ?: "-"))
         }
       }.apply { startWatching() }

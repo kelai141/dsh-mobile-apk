@@ -15,22 +15,24 @@ class OverlayLiveFeed(private val svc: OverlayService) {
     private const val LIVE_READ_CAP_BYTES = 256 * 1024
   }
 
-  private var watcher: FileObserver? = null
+  private var watchSubscription: AutoCloseable? = null
   private var readOffset = 0L
 
-  /** 服务 onDestroy 联动（原 watcher?.stopWatching()）。 */
+  /** 只退出悬浮窗订阅，通知仍使用同一个目录监听。 */
   fun stopWatcher() {
-    watcher?.stopWatching()
+    watchSubscription?.close()
+    watchSubscription = null
   }
 
   private fun liveFile(): File = File(File(svc.filesDir, "home/.dsh"), ".live.ndjson")
 
+  @Synchronized
   fun startWatcher() {
-    val dir = File(svc.filesDir, "home/.dsh")
-    if (!dir.exists()) dir.mkdirs()
+    if (watchSubscription != null) return
+    val dir = NotifyStore.dir(svc)
     readOffset = liveFile().takeIf { it.exists() }?.length() ?: 0L
-    watcher = object : FileObserver(dir.absolutePath, FileObserver.MODIFY or FileObserver.CREATE) {
-      override fun onEvent(event: Int, path: String?) {
+    watchSubscription = NotifyStore.watchOverlayFiles(svc) { event, path ->
+      if (event and (FileObserver.MODIFY or FileObserver.CREATE or FileObserver.MOVED_TO) != 0) {
         if (path == ".live.ndjson") drainLive()
         else if (path == ".overlay-test-pending" &&
           (svc.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
@@ -56,7 +58,7 @@ class OverlayLiveFeed(private val svc: OverlayService) {
           } catch (_: Exception) {}
         }
       }
-    }.apply { startWatching() }
+    }
     drainLive()
   }
 
@@ -66,6 +68,7 @@ class OverlayLiveFeed(private val svc: OverlayService) {
    * 多字节截断与半行随「找不到换行就不推进」自然消失。CAP 提为具名常量并写明契约
    * （生产者 bridge 每行一次 appendFileSync、行长硬上限 240/160 字符）。
    */
+  @Synchronized
   private fun drainLive() {
     val f = liveFile()
     if (!f.exists()) return
@@ -78,10 +81,9 @@ class OverlayLiveFeed(private val svc: OverlayService) {
           raf.seek(readOffset)
           val buf = ByteArray((len - readOffset).toInt().coerceAtMost(LIVE_READ_CAP_BYTES))
           raf.readFully(buf)
-          val text = String(buf, Charsets.UTF_8)
-          val lastNewline = text.lastIndexOf('\n')
+          val lastNewline = buf.lastIndexOf('\n'.code.toByte())
           if (lastNewline < 0) return // 半行：等下次补齐，偏移不动
-          val consumable = text.substring(0, lastNewline)
+          val consumable = String(buf, 0, lastNewline, Charsets.UTF_8)
           readOffset += lastNewline + 1 // 只推进到已消费边界（非 len）
           for (line in consumable.split("\n")) {
             val t = line.trim()
@@ -94,6 +96,7 @@ class OverlayLiveFeed(private val svc: OverlayService) {
     }
     if (lines.isEmpty()) return
     svc.main.post {
+      if (watchSubscription == null) return@post
       var changed = false
       for (line in lines) {
         try {
