@@ -552,6 +552,37 @@ describe('LinuxEnvironmentSection', () => {
     }
   }, 20000)
 
+  it('keeps the completed operation state when an older background read finishes late', async () => {
+    const previous = STATUS_INSTALLED
+    const updated = { ...previous, version: '1.3.0' }
+    const reply = (body: typeof previous) => ({ ok: true, status: 200, json: async () => body })
+    let lateRead: (() => void) | undefined
+    let reads = 0
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.endsWith('/check')) return reply(previous)
+      if (url.endsWith('/reinstall')) return reply(updated)
+      if (url.endsWith('/status')) {
+        reads += 1
+        if (reads === 2) return await new Promise<ReturnType<typeof reply>>(resolve => {
+          lateRead = () => resolve(reply(previous))
+        })
+        return reply(reads === 1 ? previous : updated)
+      }
+      throw new Error('unexpected fetch: ' + url)
+    }))
+
+    const element = await render()
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+    expect(lateRead).toBeDefined()
+    await act(async () => { element.querySelector<HTMLButtonElement>('[data-linux-action="settings"]')!.click() })
+    await act(async () => { element.querySelector<HTMLButtonElement>('[data-linux-action="reinstall"]')!.click() })
+    expect(reads).toBe(3)
+    expect(element.textContent).toContain('1.3.0')
+    await act(async () => { lateRead!() })
+    expect(element.textContent).toContain('1.3.0')
+    expect(element.textContent).not.toContain('1.2.0')
+  })
+
   it('keeps existing controls operable in zh and en when the automatic check fails offline', async () => {
     for (const [lang, expectedHint] of [['zh', '自动查询上游更新失败'], ['en', 'Automatic update check failed']] as const) {
       document.documentElement.lang = lang
