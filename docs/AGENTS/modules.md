@@ -357,3 +357,5 @@ LinuxRootfsArchiveCache keeps one compressed rootfs in Android cache storage. Ea
 LinuxArchiveFileIO implements Android directory checks, exclusive file creation and descriptor-based permissions for LinuxAssetExtractor.
 
 LinuxRootfsBlocks.kt reconstructs changed multi-block XZ assets using the private cache and byte ranges from the verified release origin.
+
+悬浮窗输入区按发送时的会话和草稿结算。系统取件期间保存原输入视图与选区，附件回执按原请求归属更新。会话和工作区选择器对齐可见区域内的输入条与标签。顶部卡片优先预览可见答复，完成并空闲后收成胶囊。

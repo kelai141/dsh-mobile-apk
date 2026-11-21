@@ -96,7 +96,7 @@ class OverlayPickerInteractionTest {
         WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE, alpha = yielded.alpha), yielded)
       assertTrue("yield opacity must never exceed original opacity or a conservative per-window cap",
         yielded.alpha <= minOf(original.alpha, .2f))
-      assertTrue("picker must not hide an originally visible window", yielded.alpha > 0f)
+      assertEquals("system picker owns the display while preserving the existing view", 0f, yielded.alpha)
       transparency *= 1.0 - yielded.alpha
     }
     assertTrue("all registered overlapping untrusted slots must pass Android 12 opacity policy", 1.0 - transparency < .8)

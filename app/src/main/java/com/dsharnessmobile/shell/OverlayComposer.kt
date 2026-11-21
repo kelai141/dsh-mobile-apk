@@ -183,7 +183,7 @@ internal class OverlayComposer(
     isClickable = true
     setOnClickListener {
       // 与按钮形态严格一致：只有"运行中且没字"才是停止，其余都是发送（含运行中插话）。
-      if (busy && inputText().isBlank()) listener.onComposerStop() else listener.onComposerSend(inputText())
+      if (busy && !hasSendableDraft()) listener.onComposerStop() else listener.onComposerSend(inputText())
     }
   }
 
@@ -374,6 +374,7 @@ internal class OverlayComposer(
   private var busy = false
   private var sendEnabled = false
   private var attachmentSignature = ""
+  private var hasReadyAttachments = false
 
   /**
    * 幂等渲染。
@@ -391,7 +392,8 @@ internal class OverlayComposer(
     workspaceChip.contentDescription = workspaceChip.text
     sessionChip.contentDescription = sessionChip.text
 
-    val signature = data.attachments.joinToString("\u0001") { it.id + "\u0002" + it.kind + "\u0002" + it.name + "\u0002" + it.thumbnail }
+    hasReadyAttachments = data.attachments.any { !it.pending }
+    val signature = data.attachments.joinToString("\u0001") { it.id + "\u0002" + it.kind + "\u0002" + it.name + "\u0002" + it.thumbnail + "\u0002" + it.pending }
     if (signature != attachmentSignature) {
       attachmentSignature = signature
       renderAttachments(data.attachments)
@@ -588,7 +590,7 @@ internal class OverlayComposer(
     pendingImeShow = null
   }
 
-  fun isEditing(): Boolean = input.hasFocus() && view.hasWindowFocus()
+  fun isEditing(): Boolean = (input.hasFocus() && view.hasWindowFocus()) || drawer.isSearchEditing()
 
   /** Show the IME once the window has an input connection. */
   fun focusInput(canFocus: () -> Boolean = { true }) {
@@ -616,14 +618,16 @@ internal class OverlayComposer(
     }
   }
 
+  private fun hasSendableDraft(): Boolean = inputText().isNotBlank() || hasReadyAttachments
+
   private fun applyActionButton() {
     // 形态语义（用户 2026-11-14 明确纠正，不要自行推导）：
     //   1. 引擎空闲 —— 一直是"发送"（箭头）；
     //   2. 引擎运行 —— "方块"，表示可以随时暂停；
     //   3. 引擎运行 + 输入框有文字 —— 切回"发送"（箭头），用来插话。
     // 换句话说：只有「运行中且没字」才是方块。把空闲也算成方块会让人以为一直在跑。
-    val hasText = inputText().isNotBlank()
-    val showStop = busy && !hasText
+    val hasDraft = hasSendableDraft()
+    val showStop = busy && !hasDraft
     actionButton.setGlyph(
       if (showStop) OverlayActionGlyphView.Glyph.STOP else OverlayActionGlyphView.Glyph.SEND,
     )
@@ -634,7 +638,7 @@ internal class OverlayComposer(
     }
     // 空闲且没字时没有可发的东西，但按钮保持实色可见（只是不可点）：
     // 设计稿的蓝是实色，靠半透明表达 disable 会变成另一种灰蓝，看起来像坏了。
-    actionButton.isEnabled = showStop || hasText
+    actionButton.isEnabled = showStop || (sendEnabled && hasDraft)
     actionButton.alpha = 1f
   }
 
@@ -713,7 +717,7 @@ internal class OverlayComposer(
         } else name.text = UiText.t(context, "图片（预览不可用）：", "Image (preview unavailable): ") + name.text
       }
       addView(name, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(4) })
-      addView(remove, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginStart = dp(2) })
+      if (!item.pending) addView(remove, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginStart = dp(2) })
     }
   }
 

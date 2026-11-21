@@ -147,6 +147,20 @@ class OverlayV2RecreationTest {
     assertTrue(source().contains("\"attachment-pending\" -> t("))
   }
 
+  @Test fun ordinarySendAndPendingAttachmentKeepTheirOwnSettlementIdentity() {
+    val sending = body("private fun sendText(", "private fun startAttachment(")
+    assertTrue(sending.contains("var admittedGeneration = sentGeneration"))
+    assertTrue(sending.contains("sessionGeneration == admittedGeneration"))
+    assertTrue(sending.contains("composer?.inputText() == sentDraft"))
+    val restore = body("private fun restoreAttachmentInteraction(", "private fun onAttachmentReceipt(")
+    assertFalse("returning from picker must leave the delivery identity live", restore.contains("attachmentRequestIds"))
+    val receipt = body("private fun onAttachmentReceipt(", "private fun onAttachmentResult(")
+    val pending = receipt.indexOf("""receipt.error == "attachment-pending"""")
+    val consume = receipt.indexOf("ids.remove(receipt.requestId)")
+    assertTrue(pending >= 0 && consume > pending)
+    assertTrue(receipt.substring(pending, consume).contains("return"))
+  }
+
   @Test fun repeatedProbeDoesNotScheduleAnIdleRenderButFirstOfflineAndRecoveryStillDo() {
     val probe = body("internal fun onEngineRunning(", "internal fun onPendingChanged()")
     val guard = "if (engineRunningCache == running && model.engineOnline == running) return"
