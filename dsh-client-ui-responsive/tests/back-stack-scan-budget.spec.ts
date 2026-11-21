@@ -81,10 +81,10 @@ afterEach(() => {
 })
 
 describe('back-stack 检测扫描预算', () => {
-  it('① 每批提交的全文档查询 ≤ 2 次', async () => {
+  it('① 普通会话流式批次不扫全篇', async () => {
     const perBatch = await streamBatches(1_200, 20)
     console.log('① per_batch_queries=' + perBatch.toFixed(2))
-    expect(perBatch, '每批提交的全文档查询次数（修复前 10.00）').toBeLessThanOrEqual(2)
+    expect(perBatch, '每批无层级变化的全文档查询次数').toBe(0)
   }, 120_000)
 
   it('② 反证：三个「属性在创建时写好」的层仍靠 childList 进场，深度=3', async () => {
@@ -135,7 +135,7 @@ describe('back-stack 检测扫描预算', () => {
     await settle()
     // 第一个 trigger-menu 没有 nav（只有 listbox），第二个有 nav。旧的关系查询
     // [data-trigger-menu] nav 命中的是**第二个**菜单里的 nav；新实现按文档序取第一个含 nav
-    // 的菜单，必须得到同一个元素，不能误配到菜单之外的 nav。
+    // 的测试，确保每个菜单只关联自己的面包屑。
     const outside = commitLayer(document.body, 'nav', {})
     expect(outside.parentElement, '夹具：先放一个菜单之外的 nav').toBe(document.body)
     const withoutNav = commitLayer(document.body, 'div', { 'data-trigger-menu': '' })
@@ -144,6 +144,6 @@ describe('back-stack 检测扫描预算', () => {
     commitLayer(withNav, 'nav', {})
     await settle()
     const kinds = (window as unknown as { __dshBackKinds?: string[] }).__dshBackKinds ?? []
-    expect(kinds, '菜单 + drill 两层（外部的 nav 不算 drill）').toEqual(['menu', 'menu-drill'])
+    expect(kinds).toEqual(['menu', 'menu', 'menu-drill'])
   }, 60_000)
 })

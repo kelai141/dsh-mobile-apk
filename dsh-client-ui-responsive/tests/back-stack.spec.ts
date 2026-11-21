@@ -470,3 +470,102 @@ describe('Android model menu portal', () => {
     expect(window.__dshBackKinds).toEqual([])
   })
 })
+
+describe('navigation controller regression paths', () => {
+  it('counts the ARIA drawer once and dispatches through layout', () => {
+    setPhoneForm(true)
+    const frame = buildFrame(false)
+    const drawer = document.createElement('div')
+    drawer.setAttribute('role', 'dialog')
+    drawer.setAttribute('aria-modal', 'true')
+    drawer.setAttribute('data-shortcut-modal', 'sidebar')
+    frame.append(drawer)
+    signal.attach()
+    expect(signal.currentKinds()).toEqual(['drawer'])
+    expect(signal.requestBack('android')).toBe('handled')
+    expect(toggleSidebar).toHaveBeenCalledOnce()
+  })
+
+  it('uses the current DOM before the deferred observer runs', () => {
+    signal.attach()
+    const modal = buildDialog({ mask: false, closeButton: true })
+    modal.querySelector('button')?.addEventListener('click', () => modal.remove())
+    expect(window.__dshNavigationBack?.('android')).toBe('handled')
+    expect(window.__dshNavigationBack?.('android')).toBe('root')
+  })
+
+  it('closes only the top modal and excludes a hidden, mounted modal', () => {
+    const parent = buildDialog({ mask: false, closeButton: true })
+    const child = buildDialog({ mask: false, closeButton: true })
+    const hidden = buildDialog({ mask: false, closeButton: true })
+    hidden.hidden = true
+    parent.querySelector('button')?.addEventListener('click', () => parent.remove())
+    child.querySelector('button')?.addEventListener('click', () => child.remove())
+    signal.attach()
+
+    expect(signal.requestBack('android')).toBe('handled')
+    expect(child.isConnected).toBe(false)
+    expect(parent.isConnected).toBe(true)
+    expect(signal.requestBack('control')).toBe('handled')
+    expect(parent.isConnected).toBe(false)
+    expect(signal.requestBack('android')).toBe('root')
+  })
+
+  it.each(['terminal', 'toolchains'])('returns from Linux %s to the panel before returning to chat', (name) => {
+    activePanelId = 'android-linux-environment'
+    const panel = document.createElement('div')
+    panel.setAttribute('data-dsh-linux-environment-panel', '')
+    const child = document.createElement('section')
+    child.setAttribute('data-dsh-settings-sublayer', name)
+    child.addEventListener('dsh-settings-sublayer-pop', event => {
+      event.preventDefault()
+      child.remove()
+    })
+    panel.append(child)
+    document.body.append(panel)
+    leaveMainPanel.mockImplementation(() => { activePanelId = null; panel.remove() })
+    signal.attach()
+
+    expect(signal.currentKinds()).toEqual(['main-panel', 'main-panel-detail'])
+    expect(signal.requestBack('android')).toBe('handled')
+    expect(leaveMainPanel).not.toHaveBeenCalled()
+    expect(panel.contains(child)).toBe(false)
+    expect(signal.requestBack('control')).toBe('handled')
+    expect(leaveMainPanel).toHaveBeenCalledOnce()
+  })
+
+  it('handles browser history below modal UI and above right-panel dismissal', () => {
+    const pane = document.createElement('div')
+    pane.dataset.sidebarRightOpen = ''
+    pane.dataset.sidebarRightPanel = 'fullscreen'
+    pane.innerHTML = '<button data-dsh-browser-history-back></button><button data-sidebar-right-mode></button>'
+    document.body.append(pane)
+    const [back, collapse] = [...pane.querySelectorAll('button')]
+    const actions: string[] = []
+    back?.addEventListener('click', () => { actions.push('history'); back.disabled = true })
+    collapse?.addEventListener('click', () => { actions.push('collapse') })
+    const dialog = buildDialog({ mask: false, closeButton: true })
+    dialog.querySelector('button')?.addEventListener('click', () => { actions.push('dialog'); dialog.remove() })
+    signal.attach()
+    for (let press = 0; press < 3; press += 1) expect(signal.requestBack('android')).toBe('handled')
+    expect(actions).toEqual(['dialog', 'history', 'collapse'])
+  })
+
+  it('leaves browser Back and Forward history entries untouched on popstate', () => {
+    const dialog = buildDialog({ mask: false, closeButton: true })
+    const closed = vi.fn()
+    dialog.querySelector('button')?.addEventListener('click', closed)
+    signal.attach()
+    const replace = vi.spyOn(history, 'replaceState')
+    const push = vi.spyOn(history, 'pushState')
+    try {
+      window.dispatchEvent(new PopStateEvent('popstate'))
+      expect(closed).not.toHaveBeenCalled()
+      expect(push).not.toHaveBeenCalled()
+      expect(replace).not.toHaveBeenCalled()
+    } finally {
+      push.mockRestore()
+      replace.mockRestore()
+    }
+  })
+})

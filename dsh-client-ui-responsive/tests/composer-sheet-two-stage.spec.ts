@@ -1,3 +1,4 @@
+import { COMPOSER_BACK_EVENT } from '../src/client/mobile/back-stack.ts'
 // @vitest-environment jsdom
 // 竖屏底部 sheet 的**两段式手势**（peek <-> expanded）契约用例。
 //
@@ -13,7 +14,7 @@
 //      不写进 peek 就会被瓦片压住。
 //      判据按「面板内容高度之和」取：把手怎么表达（内联高度 / 外边距 / 折进 padding）都认，
 //      只要 peek 等于真实内容高度。其余项与阈值一个字没动。
-//   3. max = 0.88 * (visualViewport.height || innerHeight)，且 max >= peek。
+//   3. max = 0.88 * innerHeight，且 max >= peek。
 //   4. 方向锁 8px：前 8px 不改高度、不判定归属；归属 = rows.scrollTop>0 归列表（高度不变），
 //      scrollTop===0 上滑归 sheet（height = min(max, startH + (-dy))，1:1），
 //      scrollTop===0 下滑且 startH>peek 时 height = max(peek, startH - dy)。
@@ -22,9 +23,9 @@
 //      否则回到 peek。
 //   7. 松手吸附：按最终高度与 (peek+max)/2 比较变 peek|expanded 并写回 style.height；
 //      prefers-reduced-motion: reduce 下不加过渡。
-//   8. 三条关闭路径（下拉超阈值 / 点遮罩 / popstate）共用同一个 close()：
+//   8. 三条关闭路径（下拉超阈值 / 点遮罩 / navigation back）共用同一个 close()：
 //      backdrop 先挂 data-dsh-composer-sheet-leaving 再移除。
-//   9. 层级与事件：backdrop z-index 2147483100 高于页面内容；backdrop 与 panel 的
+//   9. 层级与事件：backdrop z-index 2147483647 高于页面内容；backdrop 与 panel 的
 //      pointer-events 都不是 none；行列表 overflow-y: auto。
 //
 // ## 度量夹具（jsdom 没有布局引擎，这里定义唯一的输入通道）
@@ -408,9 +409,7 @@ function expectedPeek(): number {
 
 /** 契约里的 max 公式。 */
 function expectedMax(): number {
-  const viewport = (window as unknown as { visualViewport?: { height?: number } }).visualViewport
-  const height = viewport?.height ?? 0
-  return 0.88 * (height > 0 ? height : window.innerHeight)
+  return 0.88 * window.innerHeight
 }
 
 // ---------------------------------------------------------------------------
@@ -673,7 +672,7 @@ describe('D. peek = padTop + handleH + tilesH + gap + 3.5*rowH + padBottom + saf
 // E. max 几何
 // ---------------------------------------------------------------------------
 
-describe('E. max = 0.88 * (visualViewport.height || innerHeight)', () => {
+describe('E. max = 0.88 * innerHeight', () => {
   it('10 没有 visualViewport 时用 innerHeight（1000 -> 880），且 max >= peek', async () => {
     buildComposer()
     await openSheet()
@@ -682,24 +681,25 @@ describe('E. max = 0.88 * (visualViewport.height || innerHeight)', () => {
     expect(maxPx()).toBeGreaterThanOrEqual(peekPx())
   })
 
-  it('11 有 visualViewport 时用它的高度（800 -> 704），不看 innerHeight', async () => {
-    // 真机的 visualViewport 是事件目标：实现会往它上面挂 resize/scroll。jsdom 没有它，
-    // 桩必须连 addEventListener/removeEventListener 一起给（否则 detach 会抛，属夹具缺口）。
-    Object.defineProperty(window, 'visualViewport', {
-      configurable: true,
-      value: {
-        height: 800,
-        offsetTop: 0,
-        addEventListener: () => {},
-        removeEventListener: () => {},
-      },
-    })
+  it('11 等 IME 收起后从布局视口底边入场，键盘不改变展开上限', async () => {
+    const viewport = Object.assign(new EventTarget(), { height: 800, offsetTop: 0 })
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: viewport })
     buildComposer()
     await openSheet()
-    expect(expectedMax()).toBe(704)
-    expect(Math.abs(maxPx() - 704)).toBeLessThanOrEqual(1)
-    expect(maxPx()).toBeLessThan(Math.round(0.88 * window.innerHeight))
-    expect(maxPx()).toBeGreaterThanOrEqual(peekPx())
+    const backdrop = document.querySelector<HTMLElement>(BACKDROP)!
+    const pending = 'data-dsh-composer-sheet-waiting-ime'
+    expect(backdrop.hasAttribute(pending)).toBe(true)
+    expect(getComputedStyle(panelEl()).visibility).toBe('hidden')
+    expect(Math.abs(maxPx() - 880)).toBeLessThanOrEqual(1)
+    expect(panelEl().style.getPropertyValue('--dsh-sheet-bottom')).toBe('')
+
+    viewport.height = 1000
+    viewport.dispatchEvent(new Event('resize'))
+    expect(backdrop.hasAttribute(pending)).toBe(false)
+    expect(getComputedStyle(panelEl()).bottom).toBe('0px')
+    expect(getComputedStyle(panelEl()).position).toBe('absolute')
+    expect(getComputedStyle(backdrop).zIndex).toBe('2147483647')
+    expect(maxPx()).toBe(880)
   })
 })
 
@@ -963,11 +963,12 @@ describe('J. 三条关闭路径同一 close()：先挂 leaving 再移除', () =>
     expect(document.querySelector(BACKDROP)).toBeNull()
   })
 
-  it('27 popstate：leaving 先于移除', async () => {
+  it('27 navigation back：leaving 先于移除', async () => {
     buildComposer()
     await openSheet()
     const probe = probeLeaving(backdropEl())
-    window.dispatchEvent(new PopStateEvent('popstate'))
+    document.querySelector('[data-dsh-composer-sheet-backdrop]')!
+      .dispatchEvent(new Event(COMPOSER_BACK_EVENT, { cancelable: true }))
     expect(probe.calls).toBe(1)
     expect(probe.sawLeaving).toBe(true)
     expect(document.querySelector(BACKDROP)).toBeNull()
@@ -979,7 +980,7 @@ describe('J. 三条关闭路径同一 close()：先挂 leaving 再移除', () =>
 // ---------------------------------------------------------------------------
 
 describe('K. 层级与事件', () => {
-  it('28 backdrop z-index 2147483100 高于页面内容，且 backdrop 与 panel 都接事件', async () => {
+  it('28 backdrop z-index 2147483647 高于页面内容，且 backdrop 与 panel 都接事件', async () => {
     const page = document.createElement('div')
     page.style.zIndex = '10'
     document.body.append(page)
@@ -987,7 +988,7 @@ describe('K. 层级与事件', () => {
     await openSheet()
     const backdrop = backdropEl()
     const zIndex = Number.parseFloat(getComputedStyle(backdrop).zIndex) || 0
-    expect(zIndex).toBe(2147483100)
+    expect(zIndex).toBe(2147483647)
     expect(zIndex).toBeGreaterThan(Number.parseFloat(getComputedStyle(page).zIndex) || 0)
     expect(getComputedStyle(backdrop).pointerEvents).not.toBe('none')
     expect(getComputedStyle(panelEl()).pointerEvents).not.toBe('none')

@@ -134,7 +134,7 @@
 | VdisplayController.kt | VirtualDisplay 创建/销毁、Settings launch 探针、`input -d` 回退探针、viewer Surface attach/detach；`nativeDisplayAllocations()` 提供同源的别名、Android Display 与私有分配身份，不续空闲租期 | MainActivity、VdisplayHost、DeviceControlService、NativePlatformFacts |
 | VdisplayHost.kt | 原生 viewer SurfaceView 宿主：把可信 Files stage 几何映射到根 FrameLayout 并 attach 到 controller | MainActivity |
 | VirtualDisplayProbe.kt | 建屏 flags 探针（本地位值常量，不引用 @hide 常量；金丝雀/无泄漏断言） | 调试验收（device probe） |
-| BackGate.kt | 返回网关决策器（页内层栈可用性 → 消费/退出）+ `BackGateBridge`（setAvailable/getBackAvailable 2 个 @JavascriptInterface） | MainActivity（OnBackPressedCallback 接线） |
+| BackGate.kt | 返回网关（当前文档回执 → 消费、WebView 历史或 Activity 默认返回）。详见 [WebUI 导航](WEBUI-NAVIGATION.md)+ `BackGateBridge`（setAvailable/getBackAvailable 2 个 @JavascriptInterface） | MainActivity（OnBackPressedCallback 接线） |
 
 ### 5.1 0.14.3 依赖与线程边界
 

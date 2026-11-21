@@ -37,6 +37,9 @@ export function LinuxTerminal({ onBack }: { onBack?(): void }) {
     let id: string | undefined
     let cursor = 0
     let running = false
+    let more = false
+    let reading = false
+    let pollDelay = 120
     let timer: ReturnType<typeof setTimeout> | undefined
     let input = Promise.resolve()
     const terminal = new Terminal({
@@ -72,20 +75,37 @@ export function LinuxTerminal({ onBack }: { onBack?(): void }) {
       if (update.output) await new Promise<void>(resolve => terminal.write(update.output, resolve))
       cursor = update.next
       running = update.running
+      more = update.more === true
+      pollDelay = update.output ? 120 : Math.min(pollDelay * 2, 800)
       if (!active) return
       setState(running ? 'running' : 'exited')
       if (!running && update.outcome?.exitCode != null) {
         setMessage(tr('退出码 ', 'Exit code ') + update.outcome.exitCode)
       }
-      if (running || update.more) timer = setTimeout(() => { void poll() }, update.more ? 0 : 120)
+    }
+    const schedulePoll = (delay: number) => {
+      clearTimeout(timer)
+      if (active && id && !reading && (running || more) && document.visibilityState === 'visible') {
+        timer = setTimeout(() => { void poll() }, delay)
+      }
     }
     const poll = async () => {
-      if (!active || !id) return
+      if (!active || !id || reading || document.visibilityState !== 'visible') return
+      reading = true
       try {
         const update = await terminalRequest({ action: 'read', id, after: cursor })
         if (active) await consume(update)
-      } catch (error) { fail(error) }
+      } catch (error) {
+        running = false
+        more = false
+        fail(error)
+      } finally {
+        reading = false
+        schedulePoll(more ? 0 : pollDelay)
+      }
     }
+    const onVisibility = () => { schedulePoll(0) }
+    document.addEventListener('visibilitychange', onVisibility)
     const sendInput = (data: string) => {
       const session = id
       if (!session || !running) return
@@ -96,6 +116,8 @@ export function LinuxTerminal({ onBack }: { onBack?(): void }) {
           await terminalRequest({ action: 'write', id: session, data: data.slice(offset, end) })
           offset = end
         }
+        pollDelay = 120
+        schedulePoll(0)
       }).catch(error => { if (running) fail(error) })
     }
     const onInput = terminal.onData(sendInput)
@@ -109,7 +131,10 @@ export function LinuxTerminal({ onBack }: { onBack?(): void }) {
       if (!active) return
       id = update.id
       if (update.running) await terminalRequest({ action: 'resize', id, ...dimensions() })
-      if (active) await consume(update)
+      if (active) {
+        await consume(update)
+        schedulePoll(more ? 0 : pollDelay)
+      }
     }).catch(fail)
     stop.current = () => {
       if (id && running) void terminalRequest({ action: 'stop', id }).catch(fail)
@@ -117,6 +142,7 @@ export function LinuxTerminal({ onBack }: { onBack?(): void }) {
     return () => {
       active = false
       clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisibility)
       stop.current = () => {}
       sendKey.current = () => {}
       observer.disconnect()

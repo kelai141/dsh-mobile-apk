@@ -1,3 +1,4 @@
+import { COMPOSER_BACKDROP_SELECTOR } from './composer-sheet.css.ts'
 /** Position one native tab over only the official BrowserBody viewport. */
 import type { BrowserPresentation } from './upstream-browser/view/BrowserPresentation.ts'
 import type {} from '../android-bridge.ts'
@@ -26,7 +27,7 @@ const BUBBLES_SELECTOR = '[data-dsh-sidebar-bubbles="open"], [data-dsh-sidebar-b
 /** 工作区拖动期间的指针标记（拖动时原生页不能压在拖动指示上）。 */
 const POINTER_SELECTOR = '[data-dockkit-pointer]'
 /** 上面两个「在场即让位」判据合一个选择器：只有这些节点进出才要重算在场状态。 */
-const PRESENCE_SELECTOR = POINTER_SELECTOR + ', [data-dsh-sidebar-bubbles]'
+const PRESENCE_SELECTOR = [POINTER_SELECTOR, '[data-dsh-sidebar-bubbles]', COMPOSER_BACKDROP_SELECTOR].join(', ')
 /**
  * 主观察者关心的属性：几何、显隐与布局驱动。
  *
@@ -90,6 +91,7 @@ export class NativeBrowserPresentation implements BrowserPresentation {
     let candidates: HTMLElement[] = []
     let pointer = false
     let bubbles = false
+    let composerSheet = false
 
     /** 把一串节点里匹配选择器的后代收集出来（只查这一小块，不查全文档）。 */
     const collect = (node: Node, selector: string): HTMLElement[] => {
@@ -104,6 +106,7 @@ export class NativeBrowserPresentation implements BrowserPresentation {
     const recomputePresence = (): void => {
       pointer = document.querySelector(POINTER_SELECTOR) !== null
       bubbles = document.querySelector(BUBBLES_SELECTOR) !== null
+      composerSheet = document.querySelector(COMPOSER_BACKDROP_SELECTOR) !== null
     }
 
     /**
@@ -237,7 +240,7 @@ export class NativeBrowserPresentation implements BrowserPresentation {
         }
       }
       // Android native views are above DOM portals; hide while app menus/dialogs own input.
-      const occluded = bubbles || pointer || (candidates.length > 0 && candidates.some(covers))
+      const occluded = composerSheet || bubbles || pointer || (candidates.length > 0 && candidates.some(covers))
       const stageVisible = displayed && !occluded && right - left > 1 && bottom - top > 1
       const payload = JSON.stringify({ session: this.options.session, tabId, uiTabId: this.options.uiTabId,
         left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top),

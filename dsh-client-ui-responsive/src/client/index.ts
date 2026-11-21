@@ -436,7 +436,10 @@ export function apply(ctx: ClientContext): void {
     label: () => tr('Linux环境', 'Linux environment'),
   }, LinuxPanelIcon))
   ctx.slots.inject('main', () => ctx.slots.register({
-    name: 'main', key: 'android-linux-environment', inject: () => ({ close: () => ctx.layout.selectPanel(null) }),
+    name: 'main', key: 'android-linux-environment', inject: () => ({ close: () => {
+      const result = window.__dshNavigationBack?.('control')
+      if (result === undefined || result === 'root') ctx.layout.selectPanel(null)
+    } }),
   }, LinuxEnvironmentPanel))
 
   // Android general-settings rows (issue #59): immersive status-bar toggle.
@@ -754,11 +757,8 @@ export function apply(ctx: ClientContext): void {
     return () => { action.detach() }
   }, 'ui-responsive: settings document action takeover')
 
-  // System back (plan §5.1): the upstream frame keeps its multi-level surfaces in
-  // memory, so the shell's back callback — which must decide synchronously —
-  // needs a page-side stack signal. This module owns that stack and the
-  // `window.__dshBack` entry the shell calls; the shell keeps the cross-document
-  // history branch (`canGoBack()`) ahead of it.
+  // Reuse the current layout and overlay state for the Android dispatch and
+  // mobile back controls. WebView history remains the shell's root fallback.
   ctx.effect(() => {
     const backStack = new BackStackSignal({
       toggleSidebar: () => { ctx.layout.toggleSidebar() },
@@ -982,7 +982,10 @@ export function apply(ctx: ClientContext): void {
   // mount injects the missing control at the list root. Upstream stays unpatched.
   ctx.effect(() => {
     const disposeStyle = injectStyle('main-panel-back', MAIN_PANEL_BACK_CSS)
-    const mount = new MainPanelBackMount(() => { ctx.layout.selectPanel(null) })
+    const mount = new MainPanelBackMount(() => {
+      const result = window.__dshNavigationBack?.('control')
+      if (result === undefined || result === 'root') ctx.layout.selectPanel(null)
+    })
     mount.attach()
     return () => {
       mount.detach()
@@ -1053,14 +1056,12 @@ export function apply(ctx: ClientContext): void {
       runtime,
     )
     const poll = (): void => { void consumer.poll() }
-    const timer = window.setInterval(() => {
-      poll()
-    }, 4000)
     const onVisible = (): void => { if (document.visibilityState === 'visible') poll() }
+    const timer = window.setInterval(onVisible, 4000)
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('focus', onVisible)
     window.addEventListener('dsh:overlay-incoming', poll)
-    poll()
+    onVisible()
     return () => {
       window.clearInterval(timer)
       runtime.dispose?.()

@@ -184,8 +184,7 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 .dsh-linux-back:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-linux-back:focus-visible { outline: 2px solid var(--dsw-alias-link); }
 
-[data-dsh-settings-depth='1'] .dsh-linux-back,
-html[data-dsh-mobile-form] [data-dsh-settings-dialog] [data-linux-action='back'] {
+[data-dsh-settings-depth='1'] .dsh-linux-back {
   display: none;
 }
 

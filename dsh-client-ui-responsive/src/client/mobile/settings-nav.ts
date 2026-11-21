@@ -24,6 +24,7 @@
  */
 
 import { forwardControlClick } from './activation-guard.ts'
+import { popSectionLayer, SETTINGS_BACK_EVENT } from './back-stack.ts'
 
 /** 手机形态标记（`mobile/form-marker.ts` 写在 `<html>` 上，判据同上游 768px 断点）。 */
 const MOBILE_FORM_ATTR = 'data-dsh-mobile-form'
@@ -46,8 +47,6 @@ const LEVEL_DETAIL = 'detail'
  */
 /** 三级页深度：0 = 停在二级页，1 = 分区内部还有一层（系统返回先弹这一层）。 */
 const SUBDEPTH_ATTR = 'data-dsh-settings-depth'
-/** 分层容器请分区退出下级层的事件名（分区监听并 preventDefault，见 popSublayer）。 */
-const SUBLAYER_POP_EVENT = 'dsh-settings-sublayer-pop'
 /** 分区登记下级层的三个钩子（由分区自己渲染，见 dev-section/phone-control.tsx 的 subhead）。 */
 const SUBLAYER_ATTR = 'data-dsh-settings-sublayer'
 const SUBLAYER_TITLE_ATTR = 'data-dsh-settings-sublayer-title'
@@ -346,7 +345,7 @@ export class MobileSettingsNav {
   /** 当前二级页对应的分区名（上游 aria-current 的事实）。 */
   private currentLabel: string | null = null
   /** 上一个二级页分区名：返回键据此回到「上一页」而不是一路退回列表。 */
-  private previousLabel: string | null = null
+  private readonly sectionHistory: string[] = []
   /**
    * 当前详情页是否已经「落定」：`aria-current` 追上了用户点的那一行。
    *
@@ -368,6 +367,7 @@ export class MobileSettingsNav {
     this.attached = true
     document.addEventListener('click', this.onClick, true)
     document.addEventListener('keydown', this.onKeyDown, true)
+    document.addEventListener(SETTINGS_BACK_EVENT, this.onBackRequest)
     try {
       this.observer = new MutationObserver(() => { this.schedule() })
       // childList 覆盖面板与 nav 行的出现/重建；`aria-current` 是「当前分区」这一上游事实的
@@ -392,6 +392,7 @@ export class MobileSettingsNav {
     clearTimeout(this.detailTimer)
     document.removeEventListener('click', this.onClick, true)
     document.removeEventListener('keydown', this.onKeyDown, true)
+    document.removeEventListener(SETTINGS_BACK_EVENT, this.onBackRequest)
     this.observer?.disconnect()
     this.observer = null
     this.scheduled = false
@@ -425,7 +426,9 @@ export class MobileSettingsNav {
       if (target.closest('[' + BACK_ATTR + ']') !== null) {
         event.preventDefault()
         event.stopPropagation()
-        this.goBack(panel)
+        if (window.__dshNavigationBack?.('control') === 'root' || window.__dshNavigationBack === undefined) {
+          this.goBack(panel)
+        }
         return
       }
 
@@ -471,6 +474,14 @@ export class MobileSettingsNav {
     }
   }
 
+  private readonly onBackRequest = (event: Event): void => {
+    const panel = event.target
+    if (!(panel instanceof HTMLElement) || !panel.matches(PANEL_SELECTOR) ||
+      !document.documentElement.hasAttribute(MOBILE_FORM_ATTR)) return
+    event.preventDefault()
+    this.goBack(panel)
+  }
+
   /**
    * Escape 在二级页里按「上一页」回退（没有上一页才回首页）。
    *
@@ -479,30 +490,32 @@ export class MobileSettingsNav {
    */
   private readonly onKeyDown = (event: KeyboardEvent): void => {
     if (event.key !== 'Escape' || this.level !== LEVEL_DETAIL) return
+    // A targeted Escape dispatched to another popup belongs to that popup.
+    if (!event.isTrusted && window.__dshNavigationBack !== undefined) return
     const panel = document.querySelector<HTMLElement>(PANEL_SELECTOR)
     if (panel === null) return
     event.preventDefault()
     event.stopPropagation()
-    this.goBack(panel)
+    if (window.__dshNavigationBack?.('control') === 'root' || window.__dshNavigationBack === undefined) {
+      this.goBack(panel)
+    }
   }
 
   /** 返回键：三级页先弹回二级页；二级页先回「上一页」，没有再回首页；首页关设置。 */
   private goBack(panel: HTMLElement): void {
     // 三级页的判据是 [inSublayer]（由分区登记的 DOM 事实推出），不是 [level]：
     // level 只表达首页/二级页两级，第三层是**二级页内部**再往下的一层。
-    if (this.inSublayer) {
+    if (this.level === LEVEL_DETAIL && resolveSublayer(panel) !== null) {
       this.popSublayer(panel)
       return
     }
     if (this.level === LEVEL_DETAIL) {
       // 分区之间也能跳（如「通用 → 关于」），返回应回到跳转前那一页而不是直接回列表。
-      const previous = this.previousLabel
-      if (previous !== null) {
+      for (let previous = this.sectionHistory.pop(); previous !== undefined; previous = this.sectionHistory.pop()) {
         const row = [...panel.querySelectorAll('nav button')].find(button => rowLabel(button) === previous)
         if (row !== undefined) {
           // 先把记账改成目标分区再点：否则这次「从 B 切回 A」会被记成新的历史，导致
           // 再按一次返回又跳回 B（往返循环，永远回不到列表）。
-          this.previousLabel = null
           this.currentLabel = previous
           this.settled = true
           this.pendingTitle = previous
@@ -532,16 +545,7 @@ export class MobileSettingsNav {
    */
   private popSublayer(panel: HTMLElement): void {
     const layer = panel.querySelector<HTMLElement>('[' + SUBLAYER_ATTR + ']')
-    if (layer !== null) {
-      const request = new CustomEvent(SUBLAYER_POP_EVENT, { bubbles: true, cancelable: true })
-      layer.dispatchEvent(request)
-      if (request.defaultPrevented) return
-    }
-    const back = panel.querySelector<HTMLElement>('[' + SUBLAYER_BACK_ATTR + ']')
-    if (back !== null) {
-      back.click()
-      return
-    }
+    if (layer !== null && popSectionLayer(layer)) return
     this.inSublayer = false
     this.focusTarget = 'back'
     this.sync()
@@ -560,7 +564,7 @@ export class MobileSettingsNav {
     // 不这么做的话，关闭设置再打开时会带着上一次的分区名，第一次切换就记出假历史，
     // 返回键会跳到用户根本没去过的分区。
     this.currentLabel = label
-    this.previousLabel = null
+    this.sectionHistory.length = 0
     this.settled = false
     this.level = LEVEL_DETAIL
     this.focusTarget = 'back'
@@ -570,7 +574,7 @@ export class MobileSettingsNav {
   private backToHome(panel: HTMLElement): void {
     this.level = LEVEL_HOME
     this.pendingTitle = null
-    this.previousLabel = null
+    this.sectionHistory.length = 0
     this.settled = false
     this.focusTarget = 'row'
     this.sync()
@@ -879,7 +883,7 @@ export class MobileSettingsNav {
       if (!this.settled) {
         if (activeLabel === this.currentLabel) this.settled = true
       } else if (activeLabel !== this.currentLabel) {
-        this.previousLabel = this.currentLabel
+        if (this.currentLabel !== null) this.sectionHistory.push(this.currentLabel)
         this.currentLabel = activeLabel
       }
     }

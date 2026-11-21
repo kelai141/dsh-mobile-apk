@@ -3,74 +3,36 @@ package com.dsharnessmobile.shell
 import android.webkit.JavascriptInterface
 import android.util.Log
 
-/**
- * 系统返回策略的纯逻辑面（计划 §5.1 方案 1；源诊断 §6）。
- *
- * 拆分理由：handleOnBackPressed() 必须**同步**决定是否消费，而这条判定只有三个输入
- * （跨文档历史 / 页面层栈缓存 / 都没有），把它抽成不依赖 Android 框架的纯函数后即可用
- * JVM 单测覆盖三个分支（BackGateTest），MainActivity 只保留接线与副作用。
- *
- * 硬约束（文档已核实，违反即返工）：
- * - 不得在返回回调里 evaluateJavascript 现问页面（异步 API；判定必须同步）；
- * - 跨文档历史优先于页面层栈（canGoBack() 不认 same-document 条目，故它只能当历史腿）；
- * - 层穷尽后才允许 finish；「观测不到/关不掉的层」一律消费，不得误退应用。
- */
+/** Native fallback after the visible WebUI has handled the press or reported its root. */
 enum class BackDecision {
-  /** 浏览器历史可退（跨文档）：交给 WebView.goBack()。 */
+  CONSUME,
   GO_BACK_HISTORY,
-
-  /** 页面层栈非空：JS 侧执行关闭，壳侧消费本次返回。 */
-  DISPATCH_PAGE_STACK,
-
-  /** 无历史、无层：交回 Activity 默认行为（finish）。 */
   FINISH_ACTIVITY,
 }
 
-/** 返回决策与两条页面脚本契约。 */
 object BackGate {
-  /** 返回策略日志标签（设备侧断言 adb logcat -d | grep dsh-back）。 */
   const val TAG: String = "dsh-back"
 
-  /**
-   * 页面层栈入口脚本（JS 侧 window.__dshBack() 关最上层并返回是否命中）。
-   * && 短路保证通道缺席时求值为 undefined 而不抛错。
-   */
-  const val DISPATCH_SCRIPT: String = "window.__dshBack && window.__dshBack()"
+  // Old snapshots expose a boolean entry. Re-read their depth in the same JS turn so a
+  // failed dismissal protects the Activity without relying on the observer's cached signal.
+  const val DISPATCH_SCRIPT: String =
+    """(() => {
+      if (typeof window.__dshNavigationBack === 'function') return window.__dshNavigationBack('android');
+      if (typeof window.__dshBack !== 'function') return 'unavailable';
+      const handled = window.__dshBack();
+      return handled ? 'handled' : window.__dshBackDepth > 0 ? 'blocked' : 'root';
+    })()"""
 
-  /**
-   * 页面层数回读脚本（onPageFinished 拉平缓存；|0 让 undefined/null 归零）。
-   * 返回数字，evaluateJavascript 结果按 JSON 文本解析见 parseDepth。
-   */
   const val READ_DEPTH_SCRIPT: String = "window.__dshBackDepth|0"
 
-  /**
-   * 三输入判定（单一职责：只回答「这次返回该走哪条腿」）。
-   * @param canGoBack - WebView.canGoBack()，只代表跨文档历史。
-   * @param pageStackAvailable - 页面通过桥主动推送的「层栈非空」同步缓存。
-   * @returns 本次返回的处理分支。
-   */
-  fun decide(canGoBack: Boolean, pageStackAvailable: Boolean): BackDecision = when {
-    canGoBack -> BackDecision.GO_BACK_HISTORY
-    pageStackAvailable -> BackDecision.DISPATCH_PAGE_STACK
-    else -> BackDecision.FINISH_ACTIVITY
-  }
+  fun parseDepth(raw: String?): Int = raw?.trim()?.trim('"')?.toIntOrNull()?.coerceAtLeast(0) ?: 0
 
-  /**
-   * 本次返回是否被应用消费（消费 = 不退到桌面）。
-   * @param decision - decide 的结果。
-   * @returns true 表示消费（历史回退或页面层栈），false 表示必须 finish。
-   */
-  fun consumed(decision: BackDecision): Boolean = decision != BackDecision.FINISH_ACTIVITY
-
-  /**
-   * 解析 evaluateJavascript 的层数回读结果。
-   * @param raw - JSON 文本（"2" / null / 空串 / 任意非数字）。
-   * @returns 非负层数；无法解析一律 0（缓存宁可退回「无层」，与「观测不到不消费」同向）。
-   */
-  fun parseDepth(raw: String?): Int {
-    val text = raw?.trim()?.trim('"') ?: return 0
-    return text.toIntOrNull()?.coerceAtLeast(0) ?: 0
-  }
+  fun decide(canGoBack: Boolean, pageResult: String?, legacyAvailable: Boolean = false): BackDecision =
+    when {
+      pageResult == "\"root\"" || (pageResult == "\"unavailable\"" && !legacyAvailable) ->
+        if (canGoBack) BackDecision.GO_BACK_HISTORY else BackDecision.FINISH_ACTIVITY
+      else -> BackDecision.CONSUME
+    }
 }
 
 /**
@@ -80,7 +42,7 @@ object BackGate {
  * 因此两个字段都是 @Volatile；本类不持有任何视图引用，避免跨线程触碰 UI。
  */
 class BackGateState {
-  /** 「页面层栈非空」的同步缓存；返回回调只读它，绝不等待页面。 */
+  /** 旧客户端兼容信号，仅在入口缺席时保护已有层。 */
   @Volatile
   var pageStackAvailable: Boolean = false
     private set

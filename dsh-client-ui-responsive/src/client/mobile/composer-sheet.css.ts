@@ -1,13 +1,12 @@
-/** 输入行「+」面板：三块瓦片 + 自动映射上游「+」菜单的行。
- *
- * 两种形态（横屏 / 竖屏）共用**同一套居中卡片**：外观固定、位置固定（视口居中），
- * 不再随输入框里「+」的位置漂移。几何全部交给 CSS，脚本不写任何内联定位。
- */
+/** Shared presence signal for native surfaces that cover the WebView. */
+export const COMPOSER_BACKDROP_SELECTOR = '[data-dsh-composer-sheet-backdrop]'
+
+/** The mobile sheet rises from the viewport bottom. The wide card stays centered. */
 export const COMPOSER_SHEET_CSS = `
 [data-dsh-composer-sheet-backdrop] {
   position: fixed;
   inset: 0;
-  z-index: 2147483100;
+  z-index: 2147483647;
   /* 全屏黑色遮罩约 55%，不模糊；必须接收点击（点遮罩关闭）。
      若把它关成不接事件，点击会穿透到背后页面，panel.contains(target) 看不到，卡片关不掉。 */
   background: rgba(0, 0, 0, 0.55);
@@ -255,6 +254,7 @@ export const COMPOSER_SHEET_CSS = `
 /* 遮罩改成普通块层：居中网格只属于横屏卡片。遮罩继续接收点击（点遮罩关闭）。 */
 html[data-dsh-mobile-form] [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-form='sheet'] {
   display: block;
+  overflow: hidden;
   background: rgba(0, 0, 0, 0.55);
   overscroll-behavior: contain;
   pointer-events: auto;
@@ -263,11 +263,10 @@ html[data-dsh-mobile-form] [data-dsh-composer-sheet-backdrop][data-dsh-composer-
 
 /* 面板贴底，只有上方两角是圆角。高度/位移由脚本逐帧写内联值。 */
 html[data-dsh-mobile-form] [data-dsh-composer-sheet-form='sheet'] > [data-dsh-composer-sheet-panel] {
-  position: fixed;
+  position: absolute;
   left: 0;
   right: 0;
-  /* 软键盘（visualViewport）抬起的距离：脚本写 --dsh-sheet-bottom。 */
-  bottom: var(--dsh-sheet-bottom, 0px);
+  bottom: 0;
   width: auto;
   max-width: none;
   max-height: none;
@@ -285,6 +284,14 @@ html[data-dsh-mobile-form] [data-dsh-composer-sheet-form='sheet'] > [data-dsh-co
      恒为 0，壳侧 MainActivity 推的 --dsh-android-system-bottom 才是真值，两者取大。 */
   --dsh-sheet-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--dsh-android-system-bottom, 0px));
   animation: dsh-composer-sheet-in 200ms cubic-bezier(0.215, 0.61, 0.355, 1);
+}
+
+/* While the native IME is closing, keep the panel parked offscreen.
+   Removing this marker starts the actual entry animation at the bottom. */
+html[data-dsh-mobile-form] [data-dsh-composer-sheet-waiting-ime] > [data-dsh-composer-sheet-panel] {
+  visibility: hidden;
+  animation: none;
+  transform: translateY(100%);
 }
 
 /* 吸附：脚本只在松手后挂 settling，曲线/时长由手感档写进自定义属性。 */
