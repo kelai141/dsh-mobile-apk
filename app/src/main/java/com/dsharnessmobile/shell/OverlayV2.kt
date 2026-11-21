@@ -835,7 +835,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     // Android redacts cross-UID outside coordinates. A redacted event cannot
     // tell a keyboard tap from a tap on the other app, so let window focus
     // and Back control the editing session in that case.
-    if (event.rawX == 0f && event.rawY == 0f && composer?.isEditing() == true) return
+    if (event.rawX == 0f && event.rawY == 0f && (pickerOpen() || composer?.isEditing() == true)) return
     // 一次点击会向每个浮窗各发一次 OUTSIDE；按 downTime 去重，否则同一击会先收 sheet 再收输入区。
     if (event.downTime == outsideHandledDownTime) return
     outsideHandledDownTime = event.downTime
@@ -1807,15 +1807,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     drawerLoading = false
     drawerError = message
     renderComposer()
-    val mode = drawerMode
-    val token = drawerRetryToken
-    main.postDelayed({
-      if (destroyed || mode == DrawerMode.NONE || drawerMode != mode || drawerRetryToken != token) return@postDelayed
-      toast(message)
-      drawerMode = DrawerMode.NONE
-      renderComposer()
-      hideDrawer(true)
-    }, 1200L)
+    // Keep the failure visible inside the selector. Its owner, Back or a real outside tap can dismiss it.
   }
 
   private var sessionChoices: List<OverlayPageHost.PageSession> = emptyList()
