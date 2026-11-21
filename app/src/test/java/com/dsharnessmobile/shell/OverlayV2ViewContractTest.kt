@@ -138,8 +138,11 @@ class OverlayV2ViewContractTest {
     val v2 = source("OverlayV2.kt")
     val sync = v2.substringAfter("private fun syncDrawerWindow()").substringBefore("private fun hideDrawer(")
     assertTrue("选择卡片必须交给独立窗口而非撑高输入根", sync.contains("windows.add(OverlayWindows.Slot.DRAWER, c.drawerView, lp)"))
-    assertTrue(sync.contains("c.measureDrawerHeightPx(OverlayWindowFrames.composerWidthPx(screen))"))
-    assertTrue(sync.contains("OverlayWindowFrames.availableHeightPx(screen) * .4f"))
+    assertTrue(sync.contains("c.measureDrawerHeightPx(contentWidth)"))
+    assertTrue(sync.contains("OverlayWindowFrames.availableHeightPx(screen) * if (picker) .55f else .4f"))
+    assertTrue(sync.contains("lp.height = h.coerceAtMost((chipRowTop - gapPx - screen.statusBarPx)"))
+    assertTrue(sync.contains("if (picker) (224f * screen.density).toInt()"))
+    assertTrue(v2.contains("(360f * screen.density).toInt().coerceIn(1, available)"))
   }
 
   @Test
@@ -382,7 +385,7 @@ class OverlayV2ViewContractTest {
     assertTrue(
       "有加号卡片时空白先收卡片、不收起输入",
       sheetDismiss >= 0 && composerHide > sheetDismiss &&
-        outside.substring(sheetDismiss, composerHide).contains("drawerMode = DrawerMode.NONE")
+        outside.substring(sheetDismiss, composerHide).contains("closeDrawer(animated = true)")
     )
     assertTrue(outside.contains("hideComposer()"))
     assertFalse("空白只收输入，不能顺手收顶部记录", outside.contains("hideCard()"))

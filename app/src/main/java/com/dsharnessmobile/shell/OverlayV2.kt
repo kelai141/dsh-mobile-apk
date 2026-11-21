@@ -114,6 +114,7 @@ internal class OverlayV2(private val svc: OverlayService) {
 
   private var model = OverlayCardModel()
   private var pageState: OverlayPageHost.PageState? = null
+  private var pageSessionBeforeNewConversation: String? = null
   private var pageCommands: List<OverlayPageHost.PageCommand> = emptyList()
   private var drawerMode = DrawerMode.NONE
   /** 选择器异步加载态：空列表不等于「没有内容」，先区分加载中/失败/真空。 */
@@ -123,6 +124,11 @@ internal class OverlayV2(private val svc: OverlayService) {
   /** 会话选择器里「新建会话」行的稳定 id，不会与真实会话 id 冲突。 */
   private val newConversationItemId = "__dsh_new_conversation__"
   private var cardExpanded = false
+  private var cardAutoCollapseQueued = false
+  private val cardAutoCollapse = Runnable {
+    cardAutoCollapseQueued = false
+    if (canAutoCollapseCard()) collapseToPill()
+  }
   /** 收卡片时的窗口代次与进行中标记：淡出期间不得让迟到的移除回调收掉新卡片。 */
   private var cardWindowGeneration = 0
   private var cardClosing = false
@@ -579,6 +585,8 @@ internal class OverlayV2(private val svc: OverlayService) {
   internal fun hideCard() { hideCard(animated = true) }
 
   internal fun hideCard(animated: Boolean) {
+    main.removeCallbacks(cardAutoCollapse)
+    cardAutoCollapseQueued = false
     if (!cardVisible()) return
     stopClock()
     val c = card
@@ -870,9 +878,9 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (attachmentInteraction != null) return
     if (event.actionMasked != MotionEvent.ACTION_OUTSIDE) return
     // Android redacts cross-UID outside coordinates. A redacted event cannot
-    // tell a keyboard tap from a tap on the other app, so let window focus
-    // and Back control the editing session in that case.
-    if (event.rawX == 0f && event.rawY == 0f && composer?.isEditing() == true) return
+    // tell a keyboard tap from a tap on the other app while the IME is shown.
+    // The input can keep focus after Back or a picker round trip hides the IME.
+    if (event.rawX == 0f && event.rawY == 0f && (pickerOpen() || composerImeVisible())) return
     // 一次点击会向每个浮窗各发一次 OUTSIDE；按 downTime 去重，否则同一击会先收 sheet 再收输入区。
     if (event.downTime == outsideHandledDownTime) return
     outsideHandledDownTime = event.downTime
@@ -887,17 +895,28 @@ internal class OverlayV2(private val svc: OverlayService) {
       OverlayWindows.Slot.DRAWER,
       OverlayWindows.Slot.COMPOSER,
     )
+    if (pickerOpen() && containsTouch(OverlayWindows.Slot.COMPOSER, x, y)) {
+      closeDrawer(animated = false)
+      return
+    }
     if (others.any { containsTouch(it, x, y) }) return
     // 有加号卡片（sheet）开着时，空白先收卡片，输入区与草稿都保留 —— 用户基线明确要求
     // 「在有加号卡片的情况下点空白区不会导致输入框收起」。
     if (drawerMode != DrawerMode.NONE) {
-      // 顺序不可交换：animateDrawerOut 里会看 drawerOpen，而 drawerOpen 由 drawerMode 推导。
-      // 先收窗再改模式，会让「已打开」判据仍然为真，收起动画直接被跳过、sheet 永远留在屏上。
-      drawerMode = DrawerMode.NONE
-      hideDrawer(true)
+      closeDrawer(animated = true)
       return
     }
     hideComposer()
+  }
+
+  private fun composerImeVisible(): Boolean {
+    val c = composer ?: return false
+    if (android.os.Build.VERSION.SDK_INT >= 30) {
+      c.view.rootWindowInsets?.let { return it.isVisible(android.view.WindowInsets.Type.ime()) }
+    }
+    if (!c.isEditing()) return false
+    val s = screen()
+    return pickerVisibleBottom(c, s) < s.heightPx - s.navBarPx
   }
 
   /** 某个槽位的窗口是否覆盖这个屏幕坐标（用于区分「点到空白」与「点到别的浮窗」）。 */
@@ -939,6 +958,15 @@ internal class OverlayV2(private val svc: OverlayService) {
       } else {
         false
       }
+    }
+    c.drawerView.setOnApplyWindowInsetsListener { view, insets ->
+      view.post {
+        if (composer === c && pickerOpen() && attachmentInteraction == null) {
+          syncChipWindows()
+          syncDrawerWindow()
+        }
+      }
+      insets
     }
     root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
       main.removeCallbacks(syncAttachedChips)
@@ -1097,6 +1125,7 @@ internal class OverlayV2(private val svc: OverlayService) {
    * 3) 结果未知（UNKNOWN）时既不清空也不回填：此时没有任何证据说明消息已受理。
    */
   private fun sendText(text: String) {
+    if (sending) return
     val trimmed = text.trim()
     val sentSession = svc.activeSessionId
     var admittedSession = sentSession
@@ -1105,6 +1134,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (trimmed.isEmpty() && attachments.isEmpty()) return
     val sentDraft = composer?.inputText().orEmpty()
     val sentGeneration = sessionGeneration
+    var admittedGeneration = sentGeneration
     // 附件还在认领中：此时页面草稿里还没有这条附件，直接发会把它静默丢掉。
     // 让用户等一下，并把认领重新催一遍（页面认领有轮询延迟）。
     val attachmentsPending = OverlayAttachmentBus.pending(sentSession)
@@ -1124,20 +1154,24 @@ internal class OverlayV2(private val svc: OverlayService) {
     // 所有「这条能不能发」的判定都过了才进入在飞状态：先标记再校验，用户会看到
     // 发送按钮闪一下又弹回来。
     sending = true
+    scheduleRender()
     // 清空守卫只在「这条确实发出去了」之后才有意义，所以它定义在准入判定之后：
     // 每一项都对应一种会吞掉用户输入的真实情形 —— 界面已销毁、结果是否决、会话已被换掉、
     // 代次已推进（有新的会话/发送事件）、或输入框内容已被用户改写。
     val settled: (Boolean) -> Unit = { ok ->
+      sending = false
       if (!destroyed && ok && svc.activeSessionId == admittedSession && sessionGeneration == admittedGeneration && composer?.inputText() == sentDraft) {
         composer?.setInputText("")
+        sessionDrafts.remove(admittedSession)
+        closeDrawer(animated = false)
       }
+      scheduleRender()
     }
     // 页面草稿只属于它自己的会话：切走之后不能拿旧页面的附件去提交新会话的消息。
     if (attachments.isNotEmpty() && OverlayPageHost.available()) {
       // 附件在页面草稿里（file-incoming 管线由页面认领），所以整条消息也必须由页面提交，
       // 否则附件会被留在草稿里发不出去（design.md §8.3 的附件口径）。
       OverlayPageHost.send(trimmed, sentSession) { ok ->
-        sending = false
         settled(ok)
         if (ok) {
           svc.markBusyOptimistic()
@@ -1151,7 +1185,9 @@ internal class OverlayV2(private val svc: OverlayService) {
       return
     }
     svc.sendTextFromOverlay(trimmed, settled, { message ->
-      // 结果未知：保留草稿，只提示；不触发清空/回填。
+      // 结果未知时保留草稿，允许用户用原发送动作复核同一请求。
+      sending = false
+      scheduleRender()
       svc.flashStatus(message)
     }, { created ->
       // 引擎为这条消息新建了会话。只有「同一条在飞发送、且当前没有别的会话被选中」时才迁移：
@@ -1167,9 +1203,7 @@ internal class OverlayV2(private val svc: OverlayService) {
   /**
    * 起系统取件（相机/相册/文件）。
    *
-   * 同窗保稿的关键纪律：取件期间**只让出触摸权**（yieldInteraction 把 flags 降级、alpha 压低），
-   * 绝不 hide/remove 任何窗口，也绝不碰输入框文本与选区 —— 一旦移除输入窗，系统会连带回收
-   * 输入法会话，用户回来时草稿和光标就没了。
+   * 系统取件独占屏幕和触摸。保留原输入视图、草稿与选区，关闭已完成选择的附件菜单。
    */
   private fun startAttachment(kind: String) {
     val mapped = when (kind) {
@@ -1182,10 +1216,16 @@ internal class OverlayV2(private val svc: OverlayService) {
       toast(t("会话尚未就绪，请稍后再试", "Session not ready, try again"))
       return
     }
+    if (OverlayAttachmentBus.existing(sid, mapped) != null) {
+      OverlayAttachmentBus.recheckPending(sid)
+      toast(t("前一个附件仍在处理", "The previous attachment is still processing"))
+      return
+    }
     val requestId = java.util.UUID.randomUUID().toString()
-    // 登记必须早于 Activity 启动：同步失败路径也会带着这个 id 回执。
-    attachmentRequestIds.getOrPut(sid) { LinkedHashSet() }.add(requestId)
     if (!prepareAttachmentUi(sid, mapped, requestId)) return
+    // 取件菜单已经完成选择。保留输入窗及草稿，收起菜单再让系统接管。
+    closeDrawer(animated = false)
+    attachmentRequestIds.getOrPut(sid) { LinkedHashSet() }.add(requestId)
     OverlayAttachProxyActivity.start(svc, mapped, sid, requestId)
   }
 
@@ -1196,7 +1236,7 @@ internal class OverlayV2(private val svc: OverlayService) {
    * 也没有任何窗口被动过，用户看到的界面保持原样。
    */
   private fun prepareAttachmentUi(sessionId: String, kind: String, requestId: String): Boolean {
-    if (destroyed) return false
+    if (destroyed || attachmentInteraction != null) return false
     // 任何在飞的过渡都必须先把界面稳定下来再起取件。
     if (cardHandleDragging || morphAnimator?.isRunning == true || drawerClosing || composerClosing) {
       toast(t("界面正在切换，请稍后再试", "Still animating, try again"))
@@ -1230,8 +1270,6 @@ internal class OverlayV2(private val svc: OverlayService) {
     attachmentInteractionSession = ""
     attachmentInteractionRequestId = ""
     attachmentRestoreAttempts = 0
-    attachmentRequestIds[sessionId]?.remove(requestId)
-    if (attachmentRequestIds[sessionId].isNullOrEmpty()) attachmentRequestIds.remove(sessionId)
   }
 
   /**
@@ -1245,9 +1283,26 @@ internal class OverlayV2(private val svc: OverlayService) {
    */
   private fun onAttachmentReceipt(receipt: OverlayAttachmentBus.Receipt) {
     restoreAttachmentInteraction(receipt.sessionId, receipt.requestId)
-    if (receipt.sessionId != svc.activeSessionId) return
-    val ids = attachmentRequestIds[receipt.sessionId].orEmpty()
+    val ids = attachmentRequestIds[receipt.sessionId] ?: return
     if (receipt.requestId !in ids) return
+    if (receipt.error == "attachment-pending") {
+      scheduleRender()
+      val attempts = attachmentRecheckAttempts[receipt.requestId] ?: 0
+      if (attempts < 3) {
+        attachmentRecheckAttempts[receipt.requestId] = attempts + 1
+        main.postDelayed({
+          if (!destroyed && attachmentRequestIds[receipt.sessionId]?.contains(receipt.requestId) == true) {
+            OverlayAttachmentBus.recheckPending(receipt.sessionId)
+          }
+        }, 1_500L * (attempts + 1))
+      }
+      return
+    }
+    attachmentRecheckAttempts.remove(receipt.requestId)
+    ids.remove(receipt.requestId)
+    if (ids.isEmpty()) attachmentRequestIds.remove(receipt.sessionId)
+    if (receipt.sessionId != svc.activeSessionId) return
+    scheduleRender()
     onAttachmentResult(receipt.kind, receipt.path, receipt.error)
   }
 
@@ -1286,39 +1341,25 @@ internal class OverlayV2(private val svc: OverlayService) {
   }
 
 
-  /** 「＋」切换抽屉：命令 → 会话 → 工作区 → 收起，循环一格。 */
+  /** Each opener toggles its own surface. Back returns from the active surface to the input. */
   private fun toggleDrawer() {
-    hapticConfirm(composer?.view)
     if (!composerVisible()) return
-    when (drawerMode) {
-      DrawerMode.NONE -> {
-        drawerMode = DrawerMode.COMMANDS
-        refreshCommands()
-        renderComposer()
-        // 只改 drawerMode 不会让 sheet 出现：sheet 是独立窗口，必须显式同步一次。
-        syncDrawerWindow()
-      }
-      DrawerMode.COMMANDS -> openSessionPicker()
-      DrawerMode.SESSIONS -> openWorkspacePicker()
-      DrawerMode.WORKSPACES -> {
-        drawerMode = DrawerMode.NONE
-        renderComposer()
-        hideDrawer(true)
-      }
-    }
-  }
-
-  /** 返回键三段式：先收抽屉，再收输入窗；不发送、不停止后台任务。 */
-  private fun onComposerBackPressed() {
-
-    // 答题态下按返回 = 放弃回答：把进入前留档的消息草稿还回去，不能吞掉用户写了一半的话。
-    if (messageDraftBeforeAnswer != null) {
-      leaveQuestionAnswer(false)
+    hapticConfirm(composer?.view)
+    if (drawerMode == DrawerMode.COMMANDS) {
+      closeDrawer(animated = true)
       return
     }
-    if (drawerMode != DrawerMode.NONE) {
-      drawerMode = DrawerMode.NONE
-      renderComposer()
+    if (pickerOpen()) closeDrawer(animated = false)
+    drawerMode = DrawerMode.COMMANDS
+    refreshCommands()
+    renderComposer()
+    syncDrawerWindow()
+  }
+
+  private fun onComposerBackPressed() {
+    if (closeDrawer(animated = true)) return
+    if (messageDraftBeforeAnswer != null) {
+      leaveQuestionAnswer(false)
       return
     }
     hideComposer()
@@ -1343,11 +1384,12 @@ internal class OverlayV2(private val svc: OverlayService) {
     }
     val s = screen()
     val sizes = c.chipSizesPx(OverlayWindowFrames.composerWidthPx(s))
+    syncComposerWithPicker(c, s)
     val location = IntArray(2)
     c.view.getLocationOnScreen(location)
     // 物理 top 由「输入窗实际屏幕坐标」推出来，不用状态栏高度推算：状态栏隐藏/显示时
     // 后者会让 chip 跳一下，前者始终贴着药丸走。
-    val top = (location[1] - sizes.first.second - c.chipGapPx).coerceAtLeast(0)
+    val top = chipRowTop(c, s, location[1], sizes.first.second)
     fun place(slot: OverlayWindows.Slot, view: View, size: Pair<Int, Int>, x: Int) {
       val actual = IntArray(2)
       view.getLocationOnScreen(actual)
@@ -1378,14 +1420,69 @@ internal class OverlayV2(private val svc: OverlayService) {
   }
 
   /**
-   * 把底部 sheet 摆成一个独立窗口（Slot.DRAWER），覆盖在输入区上方。
-   *
-   * 用户基线原文：「＋打开独立底部sheet，覆盖其它app及input，input原位置/尺寸不变」。
-   * 因此这里绝不碰 composerParams、不做 translationY、不 MATCH_PARENT 撑高输入区。
+   * 把抽屉悬放在输入区和入口按钮上方。输入区保留原窗口和草稿，入口可以原路关闭。
    *
    * drawerWindowGeneration 是「迟到关闭回调」的护栏：每次开/关都自增，回调只在自己那一代
    * 仍然是最新时才真正 remove，否则会把用户刚重新打开的 sheet 误收掉。
    */
+  private fun pickerOpen(): Boolean = drawerMode == DrawerMode.SESSIONS || drawerMode == DrawerMode.WORKSPACES
+
+  private fun closeDrawer(animated: Boolean): Boolean {
+    if (drawerMode == DrawerMode.NONE) return false
+    val wasPicker = pickerOpen()
+    drawerRetryToken++
+    drawerMode = DrawerMode.NONE
+    drawerLoading = false
+    drawerError = ""
+    if (wasPicker) {
+      val c = composer
+      val imm = svc.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+      imm?.hideSoftInputFromWindow(c?.drawerView?.windowToken, 0)
+      hideDrawer(false)
+      c?.let { syncComposerWithPicker(it, screen()) }
+    } else {
+      hideDrawer(animated)
+    }
+    renderComposer()
+    return true
+  }
+
+  private fun pickerVisibleBottom(composer: OverlayComposer, screen: OverlayScreen): Int {
+    val view = if (composer.drawerView.isAttachedToWindow) composer.drawerView else composer.view
+    val rect = android.graphics.Rect()
+    view.getWindowVisibleDisplayFrame(rect)
+    val safeBottom = (screen.heightPx - screen.navBarPx).coerceAtLeast(screen.statusBarPx)
+    if (android.os.Build.VERSION.SDK_INT >= 30) {
+      val insets = view.rootWindowInsets
+      if (insets?.isVisible(android.view.WindowInsets.Type.ime()) == true) {
+        return (screen.heightPx - insets.getInsets(android.view.WindowInsets.Type.ime()).bottom)
+          .coerceIn(screen.statusBarPx, safeBottom)
+      }
+    }
+    return rect.bottom.takeIf { it in (screen.statusBarPx + 1)..safeBottom } ?: safeBottom
+  }
+
+  private fun syncComposerWithPicker(composer: OverlayComposer, screen: OverlayScreen) {
+    val lp = composerParams ?: return
+    val picker = pickerOpen()
+    val base = OverlayWindowFrames.composerBottomPx(screen)
+    val keyboardOffset = if (picker) (screen.heightPx - screen.navBarPx - pickerVisibleBottom(composer, screen)).coerceAtLeast(0) else 0
+    val target = base + keyboardOffset
+    val mode = if (picker) WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+      else WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
+    if (target != lp.y || lp.softInputMode != mode) {
+      lp.y = target
+      lp.softInputMode = mode
+      windows.update(OverlayWindows.Slot.COMPOSER, lp)
+    }
+  }
+
+  private fun chipRowTop(composer: OverlayComposer, screen: OverlayScreen, locationY: Int, chipHeight: Int): Int {
+    val composerTop = if (pickerOpen()) minOf(locationY, pickerVisibleBottom(composer, screen) - composer.view.height)
+      else locationY
+    return (composerTop - chipHeight - composer.chipGapPx).coerceAtLeast(screen.statusBarPx)
+  }
+
   private fun syncDrawerWindow() {
     val c = composer ?: return
     if (drawerClosing) { c.fadeDrawerIn(); drawerClosing = false }
@@ -1393,27 +1490,17 @@ internal class OverlayV2(private val svc: OverlayService) {
     // 任何一次几何同步（转屏、键盘高度变化、chip 重排）都会把 remove 回调变成空操作，
     // sheet 就永远留在屏上，用户点空白也关不掉。
     val screen = screen()
-    c.setMaxDrawerHeightPx((OverlayWindowFrames.availableHeightPx(screen) * .4f).toInt())
-    // sheet 必须把「输入区 + chip 行」整块盖住，否则用户会看到输入框从 sheet 底下露出来。
-    // coverBottomControls 用输入窗实际高度加 chip 行高与间距，再加 24dp 视觉余量。
-    val coverBottomControls = c.view.height + c.chipSizesPx(
-      OverlayWindowFrames.composerWidthPx(screen),
-    ).first.second + c.chipGapPx + (24f * screen.density).toInt()
-    // 选择器模式（会话/工作区）是"气泡"：宽度贴着被点的 chip，不铺满整行。
-    // 命令/附件仍用原来的通栏 sheet —— 那里是三个并排瓦片加命令列表，缩窄反而放不下。
-    val picker = drawerMode == DrawerMode.SESSIONS || drawerMode == DrawerMode.WORKSPACES
+    val picker = pickerOpen()
+    val maxHeight = (OverlayWindowFrames.availableHeightPx(screen) * if (picker) .55f else .4f)
+      .toInt().coerceAtLeast(1)
+    c.setMaxDrawerHeightPx(maxHeight)
+    // Both standalone surfaces leave the original opener accessible below them.
     c.setPickerMode(picker)
-    // 选择器是浮起的气泡（四角全圆、离底有间隙）；命令/附件仍是接底通栏（只圆上两角）。
     c.setDrawerFloating(picker)
-    // 选择器是"向上浮起的气泡"：高度按内容收紧，不撑到盖住输入区，底部留出间隙。
-    // 命令/附件才需要 coverBottomControls 去盖住输入区（它们是从输入行长出来的通栏）。
-    val h = if (picker) {
-      c.measureDrawerHeightPx(bubbleWidthPx(screen))
-        .coerceIn(1, (OverlayWindowFrames.availableHeightPx(screen) * .4f).toInt().coerceAtLeast(1))
-    } else {
-      maxOf(c.measureDrawerHeightPx(OverlayWindowFrames.composerWidthPx(screen)), coverBottomControls)
-        .coerceIn(1, (OverlayWindowFrames.availableHeightPx(screen) * .4f).toInt().coerceAtLeast(1))
-    }
+    val contentWidth = if (picker) bubbleWidthPx(screen) else OverlayWindowFrames.composerWidthPx(screen)
+    val contentHeight = c.measureDrawerHeightPx(contentWidth)
+    val minimumHeight = if (picker) (224f * screen.density).toInt() else 0
+    val h = maxOf(contentHeight, minimumHeight).coerceIn(1, maxHeight)
     if (h <= 0) return
     val lp = drawerParams ?: WindowManager.LayoutParams(
       OverlayWindowFrames.composerWidthPx(screen), h,
@@ -1430,7 +1517,10 @@ internal class OverlayV2(private val svc: OverlayService) {
       x = (OverlayWindowFrames.COMPOSER_SIDE_MARGIN_DP * screen.density).toInt()
       y = screen.navBarPx
     }
+    val previousGeometry = listOf(lp.width, lp.height, lp.x, lp.y, lp.flags)
     drawerParams = lp
+    lp.flags = if (picker) lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+      else lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
     lp.width = OverlayWindowFrames.composerWidthPx(screen)
     lp.height = h
     lp.x = (OverlayWindowFrames.COMPOSER_SIDE_MARGIN_DP * screen.density).toInt()
@@ -1441,33 +1531,20 @@ internal class OverlayV2(private val svc: OverlayService) {
       val bubbleWidth = bubbleWidthPx(screen)
       lp.width = bubbleWidth
       lp.x = bubbleAnchorX(screen, bubbleWidth).coerceIn(margin, (rightLimit - bubbleWidth).coerceAtLeast(margin))
-      // 关键 1：气泡不能贴底。贴底就是"接地的 sheet"，用户要的是"向上飘起"。
-      // 关键 2：用 gravity=BOTTOM **锚住底边**，而不是用 gravity=TOP 把顶边摆到一个
-      // 由"测量高度"推出来的位置。后者两次实测都被内容撑破：横屏 chip 行顶 726、
-      // gap 15px，按测量高 114 算出的 y=597 看着对，但窗口实际高 138 ⇒ 底边落到 735，
-      // 把 chip 顶部压掉 9px（竖屏同样压 9px：底边 1435 vs chip 顶 1426）。
-      // 测量值比实际矮 24px 是常态（气泡表面还有内边距/边框不参与测量），所以
-      // 高度只能当**期望值**，位置必须由真实底边定：y 是"窗口底边距屏幕底部"的距离，
-      // 令底边 = chipRowTop - gapPx ⇒ y = screenHeightPx - chipRowTop + gapPx。
-      // 这样不管内容把窗口撑多高，气泡永远悬在 chip 上方，两种朝向都不会压到它。
-      lp.gravity = Gravity.BOTTOM or Gravity.START
-      // chip 行的顶边**直接读它自己的窗口坐标**（那个窗口是 gr=TOP，y 就是屏幕 y）。
-      // 别用「composer 位置 - chip 高 - gap」反推：横屏实测反推值 750、真实值 726，
-      // 差 24px，气泡底边就压进 chip 9px（竖屏同样压 9px：底边 1435 vs chip 顶 1426）。
-      // 反推依赖 composer 内部布局（chip 行在药丸上方还是内嵌、间距算不算进窗口），
-      // 任一变动都会让这个差值漂移，而窗口坐标没有这层假设。
-      val chipRowTop = windows.params(OverlayWindows.Slot.WORKSPACE)?.y
-        ?: run {
-          val location = IntArray(2)
-          c.view.getLocationOnScreen(location)
-          location[1] - c.chipSizesPx(OverlayWindowFrames.composerWidthPx(screen)).first.second
-        }
-      val gapPx = (10f * screen.density).toInt()
-      lp.y = (screen.heightPx - chipRowTop + gapPx).coerceAtLeast(margin)
-    } else {
-      lp.gravity = Gravity.BOTTOM or Gravity.START
-      lp.y = screen.navBarPx
     }
+    lp.gravity = Gravity.BOTTOM or Gravity.START
+    val location = IntArray(2)
+    c.view.getLocationOnScreen(location)
+    val chipHeight = c.chipSizesPx(OverlayWindowFrames.composerWidthPx(screen)).first.second
+    val boundedAnchor = chipRowTop(c, screen, location[1], chipHeight)
+    val actualChipTop = windows.view(OverlayWindows.Slot.WORKSPACE)
+      ?.takeIf { it.isAttachedToWindow && it.height > 0 }
+      ?.let { chip -> chip.getLocationOnScreen(location); location[1] }
+      ?: windows.params(OverlayWindows.Slot.WORKSPACE)?.y
+    val chipRowTop = minOf(actualChipTop ?: boundedAnchor, boundedAnchor)
+    val gapPx = (10f * screen.density).toInt()
+    lp.y = (screen.heightPx - chipRowTop + gapPx).coerceAtLeast(0)
+    lp.height = h.coerceAtMost((chipRowTop - gapPx - screen.statusBarPx).coerceAtLeast(1))
     // sheet 是独立窗口，它自己也要把 outside 转给同一处处理逻辑：
     // 盖住输入区之后，屏幕中部/上方的空白点击只会发给 sheet（composer 收不到）。
     // 每次都重设 listener：drawerView 实例会被反复复用，只在首次挂会在重开后失效。
@@ -1484,23 +1561,19 @@ internal class OverlayV2(private val svc: OverlayService) {
       val parent = c.drawerView.parent as? android.view.ViewGroup
       parent?.removeView(c.drawerView)
       windows.add(OverlayWindows.Slot.DRAWER, c.drawerView, lp)
-    } else {
+    } else if (previousGeometry != listOf(lp.width, lp.height, lp.x, lp.y, lp.flags)) {
       windows.update(OverlayWindows.Slot.DRAWER, lp)
     }
   }
 
   /**
-   * 选择器气泡的宽度：贴着被点的 chip，但至少 240dp，且不超出输入区右界。
+   * 选择器在窄屏用同一侧边距，宽屏保持紧凑，留足空间识别会话标题。
    *
    * 为什么不对齐到屏幕中：气泡盖住它自己的锚点会让用户看不出"这是从哪打开的"。
    */
   private fun bubbleWidthPx(screen: OverlayScreen): Int {
-    val c = composer ?: return (240f * screen.density).toInt()
-    val margin = (OverlayWindowFrames.COMPOSER_SIDE_MARGIN_DP * screen.density).toInt()
-    val sizes = c.chipSizesPx(OverlayWindowFrames.composerWidthPx(screen))
-    val chipWidth = if (drawerMode == DrawerMode.WORKSPACES) sizes.first.first else sizes.second.first
-    val minBubble = (240f * screen.density).toInt()
-    return maxOf(minBubble, chipWidth).coerceAtMost(screen.widthPx - 2 * margin)
+    val available = OverlayWindowFrames.composerWidthPx(screen).coerceAtLeast(1)
+    return (360f * screen.density).toInt().coerceIn(1, available)
   }
 
   /** 气泡左边界：对齐被点的那个 chip 的左边缘。 */
@@ -1669,8 +1742,14 @@ internal class OverlayV2(private val svc: OverlayService) {
         if (name == newConversationItemId) {
           hapticConfirm(composer?.view)
           if (OverlayPageHost.available()) {
+            val requestEpoch = drawerRetryToken
             OverlayPageHost.newSession { ok ->
               if (!ok) svc.flashStatus(t("无法新建会话", "Could not start a new conversation"))
+              else if (drawerMode == DrawerMode.SESSIONS && drawerRetryToken == requestEpoch) {
+                closeDrawer(animated = false)
+                pageSessionBeforeNewConversation = svc.activeSessionId.takeIf(String::isNotEmpty)
+                svc.adoptPageSession("")
+              }
             }
           } else {
             svc.flashStatus(t("新建会话需要主界面在线", "Start a conversation in the main app"))
@@ -1678,10 +1757,11 @@ internal class OverlayV2(private val svc: OverlayService) {
           renderComposer()
           return
         }
-        drawerMode = DrawerMode.NONE
+        closeDrawer(animated = false)
         if (OverlayPageHost.available()) {
           OverlayPageHost.openSession(name) { ok ->
             if (ok) {
+              pageSessionBeforeNewConversation = null
               svc.onTargetSessionChanged(name)
               refreshPageState()
             } else {
@@ -1694,7 +1774,7 @@ internal class OverlayV2(private val svc: OverlayService) {
         }
       }
       DrawerMode.WORKSPACES -> {
-        drawerMode = DrawerMode.NONE
+        closeDrawer(animated = false)
         svc.targetWorkspaceIdOverride = name
         refreshPageState()
         svc.flashStatus(t("新会话将使用该工作区", "New sessions will use this workspace"))
@@ -1702,8 +1782,12 @@ internal class OverlayV2(private val svc: OverlayService) {
       else -> {
         // 命令：走页面真源执行（不硬编码任何命令清单）
         if (OverlayPageHost.available()) {
+          val requestEpoch = drawerRetryToken
           OverlayPageHost.execute(name) { ok ->
-            if (ok) toast(t("已执行", "Command sent")) else svc.flashStatus(t("命令执行失败", "Command failed"))
+            if (ok) {
+              if (drawerMode == DrawerMode.COMMANDS && drawerRetryToken == requestEpoch) closeDrawer(animated = true)
+              toast(t("已执行", "Command sent"))
+            } else svc.flashStatus(t("命令执行失败", "Command failed"))
           }
         } else {
           toast(t("命令需要主界面在线", "Commands need the main app"))
@@ -1714,6 +1798,8 @@ internal class OverlayV2(private val svc: OverlayService) {
   }
 
   private fun openSessionPicker() {
+    if (drawerMode == DrawerMode.SESSIONS) { closeDrawer(animated = false); return }
+    if (drawerMode != DrawerMode.NONE) closeDrawer(animated = false)
     drawerMode = DrawerMode.SESSIONS
     drawerLoading = true
     drawerError = ""
@@ -1759,14 +1845,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     drawerLoading = false
     drawerError = message
     renderComposer()
-    val mode = drawerMode
-    main.postDelayed({
-      if (destroyed || mode == DrawerMode.NONE || drawerMode != mode) return@postDelayed
-      toast(message)
-      drawerMode = DrawerMode.NONE
-      renderComposer()
-      hideDrawer(true)
-    }, 1200L)
+    // Keep the failure visible inside the selector. Its owner, Back or a real outside tap can dismiss it.
   }
 
   private var sessionChoices: List<OverlayPageHost.PageSession> = emptyList()
@@ -1809,6 +1888,8 @@ internal class OverlayV2(private val svc: OverlayService) {
   }
 
   private fun openWorkspacePicker() {
+    if (drawerMode == DrawerMode.WORKSPACES) { closeDrawer(animated = false); return }
+    if (drawerMode != DrawerMode.NONE) closeDrawer(animated = false)
     drawerMode = DrawerMode.WORKSPACES
     drawerLoading = true
     drawerError = ""
@@ -1848,7 +1929,7 @@ internal class OverlayV2(private val svc: OverlayService) {
   internal fun onLiveEvent(event: LiveEvent) {
     if (destroyed) return
     val at = event.atMs
-    val sessionMatches = svc.activeSessionId.isEmpty() || event.sessionId.isEmpty() || event.sessionId == svc.activeSessionId
+    val sessionMatches = event.sessionId.isEmpty() || event.sessionId == svc.activeSessionId
     if (!sessionMatches) return
     model = when (event.kind) {
       LiveEvent.KIND_TOOL_CALL -> {
@@ -1912,15 +1993,19 @@ internal class OverlayV2(private val svc: OverlayService) {
   internal fun onSessionChanged() {
     if (destroyed) return
     val previousSession = previousSessionId
-    if (previousSession.isNotEmpty() && previousSession != svc.activeSessionId) {
-      val previousDraft = exportDraftSnapshot()
-      sessionDrafts[previousSession] = previousDraft.copy(sessionId = previousSession)
-    }
+    if (previousSession == svc.activeSessionId) return
+    model = OverlayCardModel(engineOnline = model.engineOnline)
+    val previousDraft = exportDraftSnapshot()
+    sessionDrafts[previousSession] = previousDraft.copy(sessionId = previousSession)
     previousSessionId = svc.activeSessionId
     val migrated = createdDraftMigration?.takeIf { it.sessionId == svc.activeSessionId }
     createdDraftMigration = null
+    if (migrated != null) sessionDrafts.remove(previousSession)
     val restoredDraft = migrated ?: sessionDrafts[svc.activeSessionId]
-    if (restoredDraft != null) restoreDraftSnapshot(restoredDraft)
+    composer?.let { c ->
+      if (restoredDraft != null) applyDraftToComposer(c, restoredDraft)
+      else c.setInputText("")
+    }
     sessionGeneration++
     refreshPageState()
     scheduleRender()
@@ -1993,13 +2078,28 @@ internal class OverlayV2(private val svc: OverlayService) {
       renderPending = false
       if (destroyed) return@postDelayed
       if (cardVisible()) renderCard()
-      if (pillVisible()) pill?.render(OverlayUiModel.pillOf(model, UiText.isEnglish(svc)).text, toneOf(OverlayUiModel.pillOf(model, UiText.isEnglish(svc)).tone))
+      if (pillVisible()) renderPill()
       if (composerVisible()) renderComposer()
     }, 100)
   }
 
   // ── 渲染 ────────────────────────────────────────────────────────────────
 
+
+  private fun canAutoCollapseCard(): Boolean =
+    !destroyed && !uiSuspended && !hostForeground && cardVisible() &&
+      !cardExpanded && !cardHandleDragging && attachmentInteraction == null &&
+      model.completionKind == "completed" && !model.turnActive && model.pending.isEmpty() && svc.autoCollapseOnDone()
+
+  private fun updateCardAutoCollapse() {
+    if (!canAutoCollapseCard()) {
+      main.removeCallbacks(cardAutoCollapse)
+      cardAutoCollapseQueued = false
+    } else if (!cardAutoCollapseQueued) {
+      cardAutoCollapseQueued = true
+      main.postDelayed(cardAutoCollapse, 8_000L)
+    }
+  }
 
   private fun renderCard() {
     val c = card ?: return
@@ -2040,23 +2140,20 @@ internal class OverlayV2(private val svc: OverlayService) {
         pendingActions.add(OverlayPendingAction(p.eventId, "question", t("回答", "Answer") + "：" + p.title))
       }
     }
-    val footer = when {
-      model.completionLabel.isNotEmpty() -> model.completionLabel
-      model.headline.isNotEmpty() -> ""
-      else -> ""
-    }
     c.render(
       OverlayCardData(
         stateLabel = stateLabel,
-        thinkingLine = model.thinkingLine,
+        thinkingLine = if (model.turnActive && model.headline.isBlank()) model.thinkingLine else "",
+        answerLine = model.headline,
         toolCount = model.toolCount,
         rows = rows,
-        footerLine = footer,
+        footerLine = "",
         pending = pendingActions,
         running = model.agent == OverlayAgentState.RUNNING,
       ),
     )
     resizeCardIfNeeded()
+    updateCardAutoCollapse()
   }
 
   private fun renderComposer() {
@@ -2071,17 +2168,26 @@ internal class OverlayV2(private val svc: OverlayService) {
       else -> t("工作区", "Workspace")
     }
     val sessionLabel = when {
-      state != null && state.sessionTitle.isNotBlank() -> state.sessionTitle
-      state != null && state.sessionId.isNotBlank() -> state.sessionId.take(8)
-      svc.activeSessionId.isNotBlank() -> svc.activeSessionId.take(8)
+      state != null && state.sessionId == svc.activeSessionId && state.sessionTitle.isNotBlank() -> state.sessionTitle
+      svc.activeSessionId.isNotBlank() -> untitledSession(svc.activeSessionId)
       else -> t("新会话", "New session")
     }
-    val attachments = state?.attachments?.map { OverlayAttachmentChip(it.name, it.kind) } ?: emptyList()
+    val attachments = attachmentsForSend().map { OverlayAttachmentChip(it.name, it.kind, it.id, it.thumbnail) } +
+      OverlayAttachmentBus.pending(svc.activeSessionId)
+        .filter { it.error == "attachment-pending" && it.path.isNotBlank() }
+        .map { item ->
+          val name = item.path.substringAfterLast('/') + " · " + t("添加中", "Adding")
+          val kind = if (item.kind == "camera" || item.kind == "photo") "image" else "file"
+          OverlayAttachmentChip(name, kind, item.requestId, pending = true)
+        }
     val items = when (drawerMode) {
       DrawerMode.SESSIONS -> buildList {
         // 会话选择器永远保留「新建会话」：没有它，零会话时只剩一个空菜单。
-        add(OverlayCommandItem(newConversationItemId, t("新建会话", "New conversation"), ""))
-        addAll(sessionChoices.map { OverlayCommandItem(it.id, it.title, it.id.take(8)) })
+        if (!drawerLoading) add(OverlayCommandItem(newConversationItemId, t("新建会话", "New conversation"), ""))
+        addAll(sessionChoices.map {
+          val title = if (it.title.isBlank() || it.title == it.id || it.title == it.id.take(8)) untitledSession(it.id) else it.title
+          OverlayCommandItem(it.id, title, it.id.removePrefix("session-").take(8))
+        })
       }
       DrawerMode.WORKSPACES -> (state?.workspaces ?: emptyList()).map { OverlayCommandItem(it.id, it.title, "") }
       else -> pageCommands.map { OverlayCommandItem(it.name, it.label, it.description) }
@@ -2091,7 +2197,8 @@ internal class OverlayV2(private val svc: OverlayService) {
       DrawerMode.SESSIONS, DrawerMode.WORKSPACES -> when {
         drawerLoading -> t("加载中…", "Loading…")
         drawerError.isNotEmpty() -> drawerError
-        else -> ""
+        drawerMode == DrawerMode.WORKSPACES -> t("暂无工作区", "No workspaces")
+        else -> t("没有匹配的会话", "No matching sessions")
       }
       else -> ""
     }
@@ -2105,10 +2212,14 @@ internal class OverlayV2(private val svc: OverlayService) {
         pendingHint = pendingHint,
         busy = svc.sessionBusy,
         drawerEmptyLabel = drawerEmptyLabel,
-        sendEnabled = true,
+        sendEnabled = !sending,
       ),
     )
     c.setDrawerOpen(drawerMode != DrawerMode.NONE)
+    if (pickerOpen() && attachmentInteraction == null && windows.contains(OverlayWindows.Slot.DRAWER)) {
+      syncChipWindows()
+      syncDrawerWindow()
+    }
     if (composerVisible() && composerParams?.width != OverlayWindowFrames.composerWidthPx(s)) {
       composerParams?.let { lp ->
         lp.width = OverlayWindowFrames.composerWidthPx(s)
@@ -2116,6 +2227,9 @@ internal class OverlayV2(private val svc: OverlayService) {
       }
     }
   }
+
+  private fun untitledSession(id: String): String =
+    t("未命名会话", "Untitled session") + " · " + id.removePrefix("session-").take(8)
 
   private fun workspaceNameOf(id: String): String? =
     pageState?.workspaces?.firstOrNull { it.id == id }?.title
@@ -2155,7 +2269,11 @@ internal class OverlayV2(private val svc: OverlayService) {
       if (destroyed || generation != pageReadGeneration) return@state
       if (s != null) {
         pageState = s
-        if (s.sessionId.isNotEmpty() && s.sessionId != svc.activeSessionId) svc.adoptPageSession(s.sessionId)
+        // Navigation can acknowledge a new conversation before the old page marker is removed.
+        if (s.sessionId != pageSessionBeforeNewConversation) {
+          pageSessionBeforeNewConversation = null
+          if (s.sessionId.isNotEmpty() && s.sessionId != svc.activeSessionId) svc.adoptPageSession(s.sessionId)
+        }
       } else {
         pageState = null
       }
@@ -2332,14 +2450,14 @@ internal class OverlayV2(private val svc: OverlayService) {
   // 会话代次：每次会话切换自增，用来判「迟到回执是否还属于当前会话」。
   private var sessionGeneration = 0
   // 上一次观察到的会话 id（用于把草稿存回它真正归属的那个会话）。
-  private var previousSessionId = ""
+  private var previousSessionId = svc.activeSessionId
   // 上一条发送已获准的代次（建会话路径会 +1，让迁移后的状态被认领）。
-  private var admittedGeneration = 0
   // 引擎为当前发送新建会话时暂存的草稿，等 onSessionChanged 认领后置空。
   private var createdDraftMigration: OverlayV2DraftSnapshot? = null
   // 每个会话的草稿快照：切走时存，切回时取，避免来回切换丢字。
   private val sessionDrafts = HashMap<String, OverlayV2DraftSnapshot>()
   // 取件期间让出的触摸权租约：非空即表示「系统取件占着触摸」，chip/drawer 同步都要让路。
+  private val attachmentRecheckAttempts = HashMap<String, Int>()
   private var attachmentInteraction: OverlayWindows.InteractionLease? = null
   private var attachmentInteractionSession = ""
   private var attachmentInteractionRequestId = ""
@@ -2372,11 +2490,15 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (destroyed || !snapshot.matchesSession(svc.activeSessionId)) return false
     showComposer(focusInput = false)
     val c = composer ?: return false
+    applyDraftToComposer(c, snapshot)
+    return true
+  }
+
+  private fun applyDraftToComposer(c: OverlayComposer, snapshot: OverlayV2DraftSnapshot) {
     c.setInputText(snapshot.text)
     val input = c.view.findViewWithTag<android.widget.EditText>("overlay-composer-input")
     val selection = snapshot.selection()
     input?.setSelection(selection.first, selection.second)
-    return true
   }
 
   /** 仅暂挂 UI；保留同一个动作观察者与草稿对象，供 Service 原对象回滚复用。 */

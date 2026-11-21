@@ -310,12 +310,11 @@ class OverlayV2IntegrationTest {
     val restore = method("restoreMorphTouch")
     assertTrue(restore.contains("lp.flags = flags; lp.alpha = morphInteractionAlpha"))
     val sheet = method("syncDrawerWindow")
-    assertTrue(sheet.contains("val coverBottomControls = c.view.height + c.chipSizesPx("))
-    assertTrue(sheet.contains(".first.second + c.chipGapPx + (24f * screen.density).toInt()"))
-    assertTrue("sheet must cover input+chips without moving them",
-      sheet.contains("maxOf(c.measureDrawerHeightPx(OverlayWindowFrames.composerWidthPx(screen)), coverBottomControls)"))
-    assertTrue("coverage cannot violate the 40% available-height hard cap",
-      sheet.contains(".coerceIn(1, (OverlayWindowFrames.availableHeightPx(screen) * .4f).toInt().coerceAtLeast(1))"))
+    assertTrue(sheet.contains("val contentHeight = c.measureDrawerHeightPx(contentWidth)"))
+    assertTrue("picker may grow to 55%; commands retain their 40% cap",
+      sheet.contains("OverlayWindowFrames.availableHeightPx(screen) * if (picker) .55f else .4f"))
+    assertTrue(sheet.contains("maxOf(contentHeight, minimumHeight).coerceIn(1, maxHeight)"))
+    assertTrue("drawer bottom must stay above the openers", sheet.contains("screen.heightPx - chipRowTop + gapPx"))
     assertFalse(sheet.contains("composerParams?.y ="))
   }
 
@@ -332,10 +331,9 @@ class OverlayV2IntegrationTest {
       text.replace(fallback, "if (morphProgress > 0f && c.updateMorphTouchableRegion()) yieldMorphTouch()"),
       text.replace("    morphProgress = progress.coerceIn(0f, 1f)", "    yieldMorphTouch()\n    morphProgress = progress.coerceIn(0f, 1f)"),
       text.replace("      c.applyMorph(", "      c.updateMorphTouchableRegion()\n      c.applyMorph("),
-      text.replace(" + c.chipGapPx + (24f * screen.density).toInt()", " + c.chipGapPx"),
-      text.replace("maxOf(c.measureDrawerHeightPx(OverlayWindowFrames.composerWidthPx(screen)), coverBottomControls)",
-        "c.measureDrawerHeightPx(OverlayWindowFrames.composerWidthPx(screen))"),
-      text.replace(".coerceIn(1, (OverlayWindowFrames.availableHeightPx(screen) * .4f).toInt().coerceAtLeast(1))", ""),
+      text.replace("screen.heightPx - chipRowTop + gapPx", "screen.heightPx - chipRowTop - gapPx"),
+      text.replace("maxOf(contentHeight, minimumHeight).coerceIn(1, maxHeight)", "contentHeight"),
+      text.replace("if (picker) .55f else .4f", ".55f"),
     )
     for (mutated in mutants) {
       assertNotEquals("negative must alter actual region/coverage wiring", text, mutated)
@@ -343,6 +341,23 @@ class OverlayV2IntegrationTest {
       try { assertModernMorphRegionAndSheetCoverage(mutated) } catch (_: AssertionError) { rejected = true }
       assertTrue("must reject flat NOT_TOUCHABLE fallback, stale shape or bad sheet coverage", rejected)
     }
+  }
+
+  @Test fun overlayOpenersAndBackCloseTheSameSurface() {
+    val source = source("OverlayV2.kt")
+    val plus = source.substringAfter("private fun toggleDrawer()").substringBefore("private fun onComposerBackPressed()")
+    assertTrue(plus.indexOf("closeDrawer(animated = true)") in 0 until plus.indexOf("drawerMode = DrawerMode.COMMANDS"))
+    assertFalse(plus.contains("openSessionPicker()") || plus.contains("openWorkspacePicker()"))
+    val back = source.substringAfter("private fun onComposerBackPressed()").substringBefore("private fun syncChipWindows()")
+    assertTrue(back.indexOf("closeDrawer(animated = true)") in 0 until back.indexOf("hideComposer()"))
+    val close = source.substringAfter("private fun closeDrawer(").substringBefore("private fun pickerVisibleBottom(")
+    assertTrue(close.indexOf("drawerRetryToken++") in 0 until close.indexOf("drawerMode = DrawerMode.NONE"))
+    assertTrue(close.contains("hideSoftInputFromWindow"))
+    assertTrue(close.contains("syncComposerWithPicker"))
+    val renderState = source("OverlayComposer.kt").substringAfter("fun setDrawerOpen(open: Boolean)")
+      .substringBefore("fun prepareEnter()")
+    assertTrue(renderState.contains("if (open) cancelDrawerAnimation()"))
+    assertFalse(renderState.contains("\n    cancelDrawerAnimation()"))
   }
 
   @Test fun rpcTransportRequiresTheExactResponseIdentity() {

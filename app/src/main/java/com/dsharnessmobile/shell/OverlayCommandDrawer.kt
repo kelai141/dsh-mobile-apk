@@ -105,12 +105,10 @@ internal class OverlayCommandDrawer(
     minHeight = dp(MIN_TOUCH_TARGET_DP)
     gravity = Gravity.CENTER_VERTICAL
     setPadding(dp(12), dp(8), dp(12), dp(8))
-    // 搜索框底色必须和气泡表面拉开一档：夜间 colorChip(#2C2C2E) 与 surface(#1C1C1E) 几乎同色，
-    // 只有 1dp 描边区分，实测看上去就像"气泡里什么都没有"。改用 muted + 更亮的描边。
     background = GradientDrawable().apply {
-      cornerRadius = dp(12).toFloat()
-      setColor(colorSurfaceMuted)
-      setStroke(dp(1), colorTextSecondary)
+      cornerRadius = context.resources.getDimension(R.dimen.ds_radius_pill)
+      setColor(colorChip)
+      setStroke(dp(1), colorBorder)
     }
     // 注意：这里不能设为 GONE。可见性由 searchRow 统一控制；EditText 自己保持 VISIBLE，
     // 否则 setPickerMode 只让行可见、输入框仍是 GONE，气泡里就永远看不到搜索框（设备实测空白）。
@@ -237,6 +235,8 @@ internal class OverlayCommandDrawer(
     lastSignature = signature
     rebuildRows()
   }
+
+  fun isSearchEditing(): Boolean = searchInput.hasFocus() && searchInput.hasWindowFocus()
 
   /**
    * 是否进入「选择器模式」（会话 / 工作区）。

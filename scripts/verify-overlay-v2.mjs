@@ -397,11 +397,10 @@ export async function runVerification(options, { adb, write, settle = ms => new 
       for (const slot of Object.keys(before.windows)) sameWindow(before, slot)
       assertNativePreserved(before.native, current.native, { restoreFlags: true })
       const c = current.windows.composer.frame, d = current.windows.drawer.frame
-      requireThat(Math.max(c.left, d.left) < Math.min(c.right, d.right) && Math.max(c.top, d.top) < Math.min(c.bottom, d.bottom), 'Sheet does not overlap original composer frame')
-      report.checks.push('F35 actual composer/chip frames/Windows/Views/editor unchanged; independent sheet overlaps input')
-      const pickerBefore = current
+      requireThat(d.bottom <= c.top && d.bottom <= (current.windows.workspace?.frame.top ?? c.top), 'Drawer must leave its original controls touchable')
+      report.checks.push('F35 composer/chip frames and draft are unchanged; drawer leaves its own opener touchable')
       await tapNode('overlay-drawer-attach-file', 'drawer', 'file-picker-open')
-      expected(['entry', 'card', 'composer', 'drawer'], ['pill'])
+      expected(['entry', 'card', 'composer'], ['drawer', 'pill'])
       for (let attempt = 0; attempt < 6 && current.native?.pickerActive && !current.pickerReady; attempt++) {
         await settle(300) // Bounded UI readiness samples, never synthesize focus or treat lease as launch proof.
         snapshot('file-picker-readiness-' + attempt)
@@ -409,18 +408,20 @@ export async function runVerification(options, { adb, write, settle = ms => new 
       requireThat(current.native?.pickerActive === true, 'File picker interaction lease not observed; do not infer from tap alone')
       prerequisite(current.focusedComponent && /(?:^|\.)documentsui\/.*(?:PickActivity|DocumentsActivity)$/.test(current.focusedComponent), 'Need observed focused DocumentsUI file picker; lease alone is not proof. OEM chooser/permission screen needs manual confirmation before cancellation')
       prerequisite(current.pickerReady, 'DocumentsUI resumed/focused but no actual display 0 shown HAS_DRAWN picker Window within bounded readiness samples')
-      for (const slot of Object.keys(pickerBefore.windows)) sameWindow(pickerBefore, slot)
-      assertNativePreserved(pickerBefore.native, current.native)
-      for (const slot of Object.keys(pickerBefore.native.views)) requireThat((current.native.views[slot]?.flags & 0x18) === 0x18, slot + ': did not yield focus/touch to system picker')
+      for (const slot of Object.keys(before.windows)) sameWindow(before, slot)
+      assertNativePreserved(before.native, current.native)
+      for (const slot of Object.keys(before.native.views)) {
+        requireThat((current.native.views[slot]?.flags & 0x18) === 0x18, slot + ': did not yield focus/touch to system picker')
+        requireThat(current.native.views[slot]?.alpha === 0, slot + ': overlay still visible above system picker')
+      }
       report.checks.push('F33 picker active with same attached native Views, draft/selection/session/refs and actual frames')
       await input(['keyevent', 'KEYCODE_BACK'], 'file-picker-cancel', 900)
       requireThat(current.native?.pickerActive === false, 'Picker cancellation not observed after BACK')
-      expected(['entry', 'card', 'composer', 'drawer'], ['pill'])
+      expected(['entry', 'card', 'composer'], ['drawer', 'pill'])
       requireThat(!current.focusedComponent || !/(?:^|\.)documentsui\//.test(current.focusedComponent), 'System file picker still focused after cancellation')
-      for (const slot of Object.keys(pickerBefore.windows)) sameWindow(pickerBefore, slot)
-      assertNativePreserved(pickerBefore.native, current.native, { restoreFlags: true })
+      for (const slot of Object.keys(before.windows)) sameWindow(before, slot)
+      assertNativePreserved(before.native, current.native, { restoreFlags: true })
       report.checks.push('F33 cancellation preserves original draft and restores original per-window flags/alpha')
-      // All observed pre-picker windows (including sheet) must retain their original identities.
       await tap(outsidePoint(current.windows, current.screen), 'outside-bottom-only')
       expected(['entry', 'card'], ['composer', 'drawer', 'pill'])
       sameWindow(before, 'card')

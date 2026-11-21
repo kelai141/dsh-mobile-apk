@@ -477,6 +477,16 @@ class OverlayUiModelTest {
   }
 
   @Test
+  fun `pillOf 输出和收起后保留答复摘要`() {
+    val running = OverlayUiModel.onText(OverlayUiModel.onTurnStart(OverlayCardModel(), 1L), "Visible reply", 2L)
+    assertEquals("Visible reply", OverlayUiModel.pillOf(running, english = true).text)
+    val completed = OverlayUiModel.onTurnEnd(running, "completed", 3L, english = false)
+    assertEquals(OverlayPillModel("Visible reply", OverlayTone.IDLE), OverlayUiModel.pillOf(completed, english = true))
+    assertEquals("Completed", OverlayUiModel.pillOf(completed.copy(headline = ""), english = true).text)
+    assertEquals("Working", OverlayUiModel.pillOf(OverlayUiModel.onTurnStart(completed, 4L), english = true).text)
+  }
+
+  @Test
   fun `headline 英文兜底与失败工具逐条双语`() {
     val failed = OverlayCardModel(toolRows = listOf(OverlayToolRow("c1", "", "x", running = false, failed = true)))
     assertEquals("缺省保留中文", "失败 工具 · x", OverlayUiModel.headlineOf(failed))

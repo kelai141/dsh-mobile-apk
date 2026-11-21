@@ -706,7 +706,7 @@ class OverlayService : Service() {
   }
 
   /** issue #133：完成后自动收起面板（默认开，可在 overlay_display prefs 关掉）。 */
-  private fun autoCollapseOnDone(): Boolean = try {
+  internal fun autoCollapseOnDone(): Boolean = try {
     getSharedPreferences("overlay_display", MODE_PRIVATE).getBoolean("auto_collapse_on_done", true)
   } catch (_: Exception) {
     true
@@ -1260,7 +1260,6 @@ class OverlayService : Service() {
   /** 页面宿主给出的**权威**会话 id（P0-1：只进会话域，绝不与 agentId 互写）。 */
   internal fun adoptPageSession(sessionId: String) {
     val sid = sessionId.trim()
-    if (sid.isEmpty()) return
     currentSessionId = sid
     if (sid == activeSessionId) return
     activeSessionId = sid

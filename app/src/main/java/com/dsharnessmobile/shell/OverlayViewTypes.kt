@@ -155,6 +155,7 @@ internal data class OverlayCardData(
   val pending: List<OverlayPendingAction>,
   val running: Boolean,
   val transcript: List<OverlayTranscriptRow> = emptyList(),
+  val answerLine: String = "",
 )
 
 /**
@@ -178,7 +179,13 @@ internal data class OverlayCommandItem(
  *
  * @param kind 固定 "image" 或 "file"；图片携带页面有界JPEG缩略图，不传原始附件字节。
  */
-internal data class OverlayAttachmentChip(val name: String, val kind: String, val id: String = "", val thumbnail: String = "")
+internal data class OverlayAttachmentChip(
+  val name: String,
+  val kind: String,
+  val id: String = "",
+  val thumbnail: String = "",
+  val pending: Boolean = false,
+)
 
 /** 仅接收页面投影的48KiB以内JPEG缩略图；拒绝URL/原图/SVG及畸形base64。 */
 internal fun overlayThumbnailData(data: String): String =

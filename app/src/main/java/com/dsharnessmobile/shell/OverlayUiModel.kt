@@ -416,8 +416,7 @@ internal object OverlayUiModel {
   /**
    * 药丸单行状态。
    *
-   * 优先级 OFFLINE > WAITING > RUNNING > ERROR > IDLE：离线时不能用残留工具行
-   * 冒充仍在运行；在线时等待用户是唯一需要用户动作的状态，不得被工具/正文盖住。
+   * 离线、待答、工具活动和错误保留状态文案。正常输出和完成态沿用卡片的答复摘要。
    *
    * @param english true = 英文文案（中英成对，调用方按当前语言传入）。
    */
@@ -436,7 +435,7 @@ internal object OverlayUiModel {
       val text = if (runningTool != null) {
         UiText.t(english, "工作中：" + runningTool, "Working: " + runningTool)
       } else {
-        UiText.t(english, "工作中", "Working")
+        m.headline.ifBlank { UiText.t(english, "工作中", "Working") }
       }
       return OverlayPillModel(text, OverlayTone.WORKING)
     }
@@ -445,6 +444,9 @@ internal object OverlayUiModel {
         UiText.t(english, "失败", "Failed"),
         OverlayTone.ERROR,
       )
+    }
+    if (m.completionKind == "completed") {
+      return OverlayPillModel(m.headline.ifBlank { completionLabelOf(m, english) }, OverlayTone.IDLE)
     }
     return OverlayPillModel(UiText.t(english, "空闲", "Idle"), OverlayTone.IDLE)
   }

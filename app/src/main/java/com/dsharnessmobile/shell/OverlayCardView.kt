@@ -383,6 +383,7 @@ internal class OverlayCardView(
     val previousTranscript = transcriptRows
     val previousBody = lastBodyData
     val bodyChanged = previousBody == null || data.thinkingLine != previousBody.thinkingLine ||
+      data.answerLine != previousBody.answerLine ||
       data.rows != previousBody.rows || data.footerLine != previousBody.footerLine || data.pending != previousBody.pending
     lastBodyData = data
     statusLabel.setTextIfChanged(overlaySingleLine(data.stateLabel))
@@ -395,9 +396,11 @@ internal class OverlayCardView(
 
     val thinking = overlaySingleLine(data.thinkingLine)
     // Thinking stays one quiet line: it is context, not content, so it is smaller and secondary.
-    thinkingLine.setTextIfChanged(if (thinking.isEmpty()) "" else UiText.t(context, "思考 · ", "Thinking · ") + thinking)
-    thinkingLine.visibility = if (thinking.isEmpty()) View.GONE else View.VISIBLE
-    thinkingShown = revealOnAppear(thinkingLine, thinking.isNotEmpty(), thinkingShown)
+    val answer = overlaySingleLine(data.answerLine)
+    val preview = answer.ifEmpty { if (thinking.isEmpty()) "" else UiText.t(context, "思考 · ", "Thinking · ") + thinking }
+    thinkingLine.setTextIfChanged(preview)
+    thinkingLine.visibility = if (preview.isEmpty()) View.GONE else View.VISIBLE
+    thinkingShown = revealOnAppear(thinkingLine, preview.isNotEmpty(), thinkingShown)
 
     val footer = overlaySingleLine(data.footerLine)
     footerLine.setTextIfChanged(footer)

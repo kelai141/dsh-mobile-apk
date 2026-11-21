@@ -101,9 +101,8 @@ internal class OverlayWindows(
     for (entry in entries) {
       val params = held[entry.slot]?.params ?: continue
       params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-      // Android 12+ blocks touches through opaque untrusted overlays even with NOT_TOUCHABLE.
-      // Nine slots at .15 have combined opacity < .8. Keep windows visible, never hide/remove.
-      params.alpha = minOf(entry.alpha, .15f)
+      // Keep the same views and draft state but let the system picker own the screen and touch.
+      params.alpha = 0f
       if (!update(entry.slot, params)) {
         pendingInteractionRestore = lease
         if (restoreInteraction(lease)) pendingInteractionRestore = null
