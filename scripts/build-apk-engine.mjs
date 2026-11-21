@@ -209,6 +209,12 @@ export function assembleApk(options, runner = spawnSync) {
 
   const gradle = gradleCommand ?? (process.platform === 'win32' ? 'gradlew.bat' : './gradlew')
   const gradleArgs = [`:app:assemble${buildType === 'release' ? 'Release' : 'Debug'}`, '--no-daemon', `-PversionNameSuffix=${suffix}`]
+  const requestedAbi = options.abi ?? process.env.DSH_TARGET_ABI
+  const nativeAbi = normalizeLoaderAbi(requestedAbi)
+  if (requestedAbi && nativeAbi === null) throw new Error(`unknown ABI for APK: ${requestedAbi}`)
+  if (nativeAbi !== null) {
+    gradleArgs.push(`-PnativeControlAbis=${nativeAbi === 'arm64' ? 'arm64-v8a' : nativeAbi}`)
+  }
   // versionCode 覆盖（缺省不给 = 沿用 app/build.gradle.kts 的默认值，行为与改动前完全一致）。
   //
   // 校验放在拼参数之前，而不是交给 Gradle 去报错：这个值会进 `-P` 命令行，
@@ -235,7 +241,7 @@ export function assembleApk(options, runner = spawnSync) {
       source: nativeLinuxLoaderDir,
       // 调用方不一定给 abi（本地链按 ABI 循环时知道，云端/发布链也各自知道），故 ABI 单独取：
       // 显式 options.abi > 环境变量 DSH_TARGET_ABI；都缺时由门禁按源目录内容唯一命中推断。
-      abi: options.abi ?? process.env.DSH_TARGET_ABI,
+      abi: requestedAbi,
       apkDir: resolvedApkDir,
       gate: nativeLoaderGate,
       execute,
