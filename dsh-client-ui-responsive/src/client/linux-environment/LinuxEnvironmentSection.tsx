@@ -191,6 +191,15 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
   const [job, setJob] = useState<InstallJob | undefined>(installJobStatus)
   const sectionRef = useRef<HTMLElement>(null)
   const autoCheckStartedRef = useRef(false)
+  const statusRevision = useRef({ issued: 0, applied: 0 })
+
+  const applyStatus = useCallback((revision: number, next: LinuxStatus | null, message = ''): boolean => {
+    if (revision < statusRevision.current.applied) return false
+    statusRevision.current.applied = revision
+    if (next !== null) setStatus(next)
+    setStatusError(message)
+    return true
+  }, [])
 
   useLayoutEffect(() => {
     const section = sectionRef.current
@@ -206,15 +215,15 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
   }, [terminalOpen, toolsOpen])
 
   const refresh = useCallback(async (): Promise<LinuxStatus | undefined> => {
+    const revision = ++statusRevision.current.issued
     try {
       const next = await fetchStatus()
-      setStatus(next)
-      setStatusError('')
+      applyStatus(revision, next)
       return next
     } catch (cause) {
-      setStatusError(failureText(cause))
+      applyStatus(revision, null, failureText(cause))
     }
-  }, [])
+  }, [applyStatus])
 
   useEffect(() => {
     let active = true
@@ -226,11 +235,11 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
     const runAutoCheck = (): void => {
       setAutoCheckState('checking')
       setAutoCheckError('')
+      const revision = ++statusRevision.current.issued
       void queryLatestRelease().then(
         (checked) => {
           if (!active) return
-          if (checked !== null && typeof checked === 'object') setStatus(checked)
-          setStatusError('')
+          if (checked !== null && typeof checked === 'object') applyStatus(revision, checked)
           setAutoCheckState('done')
           setAutoCheckError('')
         },
@@ -250,18 +259,17 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
       const currentJob = installJobStatus()
       let busy = inFlight || ['queued', 'paused', 'installing'].includes(currentJob?.state ?? '')
       setJob(currentJob)
+      const revision = ++statusRevision.current.issued
       try {
         const next = await fetchStatus()
-        if (!active) return
-        setStatus(next)
-        setStatusError('')
+        if (!active || !applyStatus(revision, next)) return
         busy ||= next.busy === true
         if (!autoCheckStartedRef.current && !busy && presented()) {
           autoCheckStartedRef.current = true
           runAutoCheck()
         }
       } catch (cause) {
-        if (active) setStatusError(failureText(cause))
+        if (active) applyStatus(revision, null, failureText(cause))
       } finally {
         reading = false
         if (active && presented()) {
@@ -282,7 +290,7 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
       window.clearTimeout(timer)
       document.removeEventListener('visibilitychange', wake)
     }
-  }, [])
+  }, [applyStatus])
 
   const runtimes = (Array.isArray(status?.runtimes) ? status.runtimes : [])
     .filter((runtime) => status?.architecture === undefined || runtime.architecture === status.architecture)
@@ -375,7 +383,7 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
         installing()
         next = await reinstallEnvironment()
       }
-      if (typeof next.installed === 'boolean') setStatus(next)
+      if (typeof next.installed === 'boolean') applyStatus(++statusRevision.current.issued, next)
       setPhase('done')
       await refresh()
     } catch (cause) {
@@ -396,10 +404,9 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
       if (nextPhase !== 'checking' && releaseCheck !== null) {
         try { await releaseCheck } catch { /* A query failure does not block local operations. */ }
       }
-      // 动作返回的宿主状态先落地：手动 check 刚刷新出的 updateAvailable 不会被紧随其后的
-      // 状态轮询（可能还是上一拍缓存）抹掉。
+      // 动作结果覆盖动作完成前发出的读取。后续回读仍可带来更新的宿主状态。
       const next = await action()
-      if (next !== null && typeof next === 'object') setStatus(next)
+      if (next !== null && typeof next === 'object') applyStatus(++statusRevision.current.issued, next)
       if (nextPhase === 'checking') {
         setAutoCheckState('done')
         setAutoCheckError('')
