@@ -102,4 +102,27 @@ class BackGateTest {
     assertTrue(setter.isAnnotationPresent(JavascriptInterface::class.java))
     assertTrue(getter.isAnnotationPresent(JavascriptInterface::class.java))
   }
+
+  @Test
+  fun aBlockedLayerAtDocumentRootDoesNotFinishTheActivity() {
+    assertEquals(BackDecision.CONSUME, BackGate.decide(false, "\"blocked\""))
+  }
+
+  @Test
+  fun missingOrMalformedRendererReplyDoesNotTriggerFallback() {
+    for (result in listOf(null, "null", "", "\"unknown\"")) {
+      assertEquals(BackDecision.CONSUME, BackGate.decide(false, result))
+    }
+  }
+
+  @Test
+  fun dispatchKeepsCurrentAndLegacyWebClientsCompatible() {
+    val script = BackGate.DISPATCH_SCRIPT
+    val current = script.indexOf("window.__dshNavigationBack('android')")
+    val legacy = script.indexOf("window.__dshBack()")
+    assertTrue("Prefer the current controller before the legacy callback", current in 0 until legacy)
+    assertTrue("Protect an open legacy layer when dismissal returns false", script.contains(
+      "window.__dshBackDepth > 0 ? 'blocked' : 'root'",
+    ))
+  }
 }
