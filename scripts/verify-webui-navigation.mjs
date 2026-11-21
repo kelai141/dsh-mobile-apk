@@ -123,7 +123,10 @@ async function findControl(selector, label) {
     if (!button) return null
     button.scrollIntoView({ block: 'nearest', inline: 'nearest' })
     const rect = button.getBoundingClientRect()
-    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
+    const x = rect.x + rect.width / 2
+    const y = rect.y + rect.height / 2
+    if (!button.contains(document.elementFromPoint(x, y))) return null
+    return { x, y }
   }).toString() + ")(" + JSON.stringify(selector) + ',' + JSON.stringify(label) + ")")
 }
 async function tap(selector, label = null) {
@@ -352,9 +355,6 @@ try {
       if ((await state()).layout === 'phone' && (await state()).drawer) androidBack()
     }
   }
-  report.nativeLogs = adb('logcat', '-d', '-s', 'dsh-back:I')
-    .split(/\r?\n/).filter(line => /source=android/.test(line)).slice(-report.cases.length - 5)
-  report.completed = new Date().toISOString()
   process.exitCode = report.cases.some(item => item.result === 'FAIL') ? 1
     : report.cases.some(item => item.result === 'NOT RUN') || report.cases.length === 0 ? 2 : 0
 } catch (error) {
@@ -365,6 +365,13 @@ try {
     await evalPage('delete window.__dshNavigationTrace').catch(() => {})
   }
   ws?.close()
-  if (port) adb('forward', '--remove', 'tcp:' + port)
+  if (port) {
+    try {
+      adb('forward', '--remove', 'tcp:' + port)
+      report.nativeLogs = adb('logcat', '-d', '-s', 'dsh-back:I')
+        .split(/\r?\n/).filter(line => /source=android/.test(line)).slice(-report.cases.length - 5)
+    } catch (error) { report.logError = error.message }
+  }
+  report.completed = new Date().toISOString()
   save()
 }
