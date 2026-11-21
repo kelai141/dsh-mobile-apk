@@ -100,19 +100,11 @@ internal class OverlayCardView(
     visibility = View.GONE
   }
 
-  private val restoreBallButton = pendingButton(UiText.t(context, "恢复为球", "Restore ball"), filled = false) {
-    listener.onCardEntryStyle()
-  }.apply {
-    tag = "overlay-card-restore-ball"
-    visibility = View.GONE
-  }
-
   private val headerRow = LinearLayout(context).apply {
     orientation = LinearLayout.HORIZONTAL
     gravity = Gravity.CENTER_VERTICAL
     setPadding(dp(14), dp(9), dp(14), dp(5))
     addView(statusLabel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-    addView(restoreBallButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     addView(
       toolCountLabel,
       LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
@@ -386,7 +378,6 @@ internal class OverlayCardView(
    * 换肤、开动画开关），任何一次都不能改变最终状态。
    */
   fun render(data: OverlayCardData) {
-    restoreBallButton.visibility = if (data.canRestoreBall) View.VISIBLE else View.GONE
     // 布局变更前捕获可见消息锚点；流更新不能打断用户正在向上读历史。
     val scroll = pendingTranscriptScroll ?: captureTranscriptScroll()
     val previousTranscript = transcriptRows

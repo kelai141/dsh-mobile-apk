@@ -155,7 +155,6 @@ internal data class OverlayCardData(
   val pending: List<OverlayPendingAction>,
   val running: Boolean,
   val transcript: List<OverlayTranscriptRow> = emptyList(),
-  val canRestoreBall: Boolean = false,
 )
 
 /**

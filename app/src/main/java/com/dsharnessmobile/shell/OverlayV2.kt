@@ -257,7 +257,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     var entryDownTime = -1L
     val longPress = Runnable {
       if (router.onLongPress(SystemClock.uptimeMillis()) == EntryGesture.LONG_PRESS) {
-        onEntryLongPress()
+        if (strip) restoreEntryBall() else onEntryLongPress()
       }
     }
     val resolveTap = Runnable {
@@ -336,7 +336,7 @@ internal class OverlayV2(private val svc: OverlayService) {
   }
 
   /**
-   * 球向边框拖动会吸附成细条。细条纵向拖动，入口形态可在打开的卡片切换。
+   * 球向边框拖动会吸附成细条。细条只纵向拖动，长按恢复为球。
    *
    * 语义来自「常驻入口只有一种形态会误导」：贴边的球既挡点击又挡系统手势，
    * 用户朝边框推它就是在说「收起来」，不是「再往边上挪 2px」。
@@ -379,7 +379,6 @@ internal class OverlayV2(private val svc: OverlayService) {
   }
 
   private fun restoreEntryBall() {
-    if (style != STYLE_STRIP || attachmentInteraction != null) return
     val lp = entryParams ?: return
     val (x, y) = OverlayWindowFrames.restoredEntryBallPlacement(screen(), entryStripRight, lp.y, lp.height)
     style = STYLE_BALL
@@ -388,7 +387,6 @@ internal class OverlayV2(private val svc: OverlayService) {
     entryY = y
     removeEntryWindow()
     showEntry()
-    scheduleRender()
     hapticConfirm(entryView?.view)
   }
 
@@ -479,7 +477,6 @@ internal class OverlayV2(private val svc: OverlayService) {
 
         override fun onCardContentHeightChanged() = resizeCardIfNeeded()
         override fun onCardHideEntry() = hideEntry()
-        override fun onCardEntryStyle() = restoreEntryBall()
       })
       card = view
       // 「点卡片外部收起」的接线单独抽出去：它不属于「卡片展开」这件事，混在 showCard 里
@@ -2005,7 +2002,6 @@ internal class OverlayV2(private val svc: OverlayService) {
     c.render(
       OverlayCardData(
         stateLabel = stateLabel,
-        canRestoreBall = style == STYLE_STRIP,
         thinkingLine = model.thinkingLine,
         toolCount = model.toolCount,
         rows = rows,
