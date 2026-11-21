@@ -314,8 +314,10 @@ class OverlayV2IntegrationTest {
     assertTrue(sheet.contains(".first.second + c.chipGapPx + (24f * screen.density).toInt()"))
     assertTrue("sheet must cover input+chips without moving them",
       sheet.contains("maxOf(c.measureDrawerHeightPx(OverlayWindowFrames.composerWidthPx(screen)), coverBottomControls)"))
-    assertTrue("coverage cannot violate the 40% available-height hard cap",
-      sheet.contains(".coerceIn(1, (OverlayWindowFrames.availableHeightPx(screen) * .4f).toInt().coerceAtLeast(1))"))
+    assertTrue("picker may grow to 55%; the covering sheet retains its 40% cap",
+      sheet.contains("OverlayWindowFrames.availableHeightPx(screen) * if (picker) .55f else .4f"))
+    val coveringSheet = sheet.substringAfter("coverBottomControls)")
+    assertTrue("covering sheet enforces its height cap", coveringSheet.contains(".coerceIn(1, maxHeight)"))
     assertFalse(sheet.contains("composerParams?.y ="))
   }
 
@@ -335,7 +337,8 @@ class OverlayV2IntegrationTest {
       text.replace(" + c.chipGapPx + (24f * screen.density).toInt()", " + c.chipGapPx"),
       text.replace("maxOf(c.measureDrawerHeightPx(OverlayWindowFrames.composerWidthPx(screen)), coverBottomControls)",
         "c.measureDrawerHeightPx(OverlayWindowFrames.composerWidthPx(screen))"),
-      text.replace(".coerceIn(1, (OverlayWindowFrames.availableHeightPx(screen) * .4f).toInt().coerceAtLeast(1))", ""),
+      text.replace("coverBottomControls)\n        .coerceIn(1, maxHeight)", "coverBottomControls)"),
+      text.replace("if (picker) .55f else .4f", ".55f"),
     )
     for (mutated in mutants) {
       assertNotEquals("negative must alter actual region/coverage wiring", text, mutated)
