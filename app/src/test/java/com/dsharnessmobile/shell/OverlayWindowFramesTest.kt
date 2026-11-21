@@ -248,6 +248,16 @@ class OverlayWindowFramesTest {
   }
 
   @Test
+  fun `恢复悬浮球保留贴边方向和纵向中心并避开边缘`() {
+    val left = OverlayWindowFrames.restoredEntryBallPlacement(landscape, false, 100, 242)
+    val right = OverlayWindowFrames.restoredEntryBallPlacement(landscape, true, 100, 242)
+    assertEquals(88, left.first)
+    assertEquals(2400 - 94 - 88, right.first)
+    assertEquals(174, left.second)
+    assertEquals(left.second, right.second)
+  }
+
+  @Test
   fun `细条纵向落点被夹在可用区内`() {
     val bottom = OverlayWindowFrames.stripPlacement(
       landscape, rightSide = true, y = 99999, windowHeightPx = 242,

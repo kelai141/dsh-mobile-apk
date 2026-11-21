@@ -233,6 +233,16 @@ internal object OverlayWindowFrames {
     return x to clampStripY(y, windowHeightPx, screen)
   }
 
+  /** Recover on the same side, centered vertically on the strip and inset for a new touch. */
+  fun restoredEntryBallPlacement(screen: OverlayScreen, rightSide: Boolean, stripY: Int, stripHeight: Int): Pair<Int, Int> {
+    val ball = dpPx(ENTRY_BALL_DP, screen.density)
+    val maxLeft = (screen.widthPx - ball).coerceAtLeast(0)
+    val margin = dpPx(32f, screen.density).coerceAtMost(maxLeft / 2)
+    val x = if (rightSide) maxLeft - margin else margin
+    val y = clampPillY(stripY + (stripHeight - ball) / 2, ball, ball, screen)
+    return x to y
+  }
+
   /**
    * 细条 y 钳制到 [0, 可用高 - 窗口高]。
    *
