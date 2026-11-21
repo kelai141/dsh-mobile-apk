@@ -737,6 +737,29 @@ describe('E. max = 0.88 * innerHeight', () => {
       window.androidBridge = previousBridge
     }
   })
+
+  it('reveals in the native dismissal event once the real and target insets both reach zero', async () => {
+    const root = document.documentElement
+    const overlap = '--dsh-android-page-ime-overlap'
+    const target = '--dsh-android-page-ime-target'
+    root.style.setProperty(overlap, '360px')
+    root.style.setProperty(target, '360px')
+    try {
+      buildComposer()
+      await openSheet()
+      const backdrop = document.querySelector<HTMLElement>(BACKDROP)!
+      const pending = 'data-dsh-composer-sheet-waiting-ime'
+      root.style.setProperty(target, '0px')
+      window.dispatchEvent(new Event('dsh-page-ime-change'))
+      expect(backdrop.hasAttribute(pending)).toBe(true)
+      root.style.setProperty(overlap, '0px')
+      window.dispatchEvent(new Event('dsh-page-ime-change'))
+      expect(backdrop.hasAttribute(pending)).toBe(false)
+    } finally {
+      root.style.removeProperty(overlap)
+      root.style.removeProperty(target)
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------
