@@ -1136,7 +1136,9 @@ internal class OverlayV2(private val svc: OverlayService) {
       return
     }
     svc.sendTextFromOverlay(trimmed, settled, { message ->
-      // 结果未知：保留草稿，只提示；不触发清空/回填。
+      // 结果未知时保留草稿，允许用户用原发送动作复核同一请求。
+      sending = false
+      scheduleRender()
       svc.flashStatus(message)
     }, { created ->
       // 引擎为这条消息新建了会话。只有「同一条在飞发送、且当前没有别的会话被选中」时才迁移：
