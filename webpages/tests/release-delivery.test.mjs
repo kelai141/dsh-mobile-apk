@@ -135,6 +135,12 @@ test('publication triggers a default-branch site build rather than a draft build
   assert.match(workflow, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/);
 });
 
+test('the draft includes the Bionilux loader checksums listed in MANIFEST.txt', () => {
+  const workflow = fs.readFileSync(path.join(root, '../.github/workflows/release.yml'), 'utf8');
+  const upload = workflow.split('\n').find(line => line.includes('for f in release/'));
+  assert.ok(upload?.includes('/provenance/bionilux-loader-sha256.txt'));
+});
+
 /**
  * 本文件原来有一条断言**有缺陷的接线**，已随 0.14.10 的修复改正。
  *

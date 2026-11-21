@@ -480,7 +480,7 @@ jobs:
             gh release create "$TAG" --repo "${{ github.repository }}" --draft --target "$GITHUB_SHA" \
               --title "dsh-mobile $TAG" --notes-file "release/v${VER}/notes.md"
           fi
-          for f in release/v${VER}/apk/*.apk release/v${VER}/snapshot/*.tar.xz release/v${VER}/plugins/*.tgz release/v${VER}/provenance/*.json release/v${VER}/MANIFEST.txt release/v${VER}/notes.md; do
+          for f in release/v${VER}/apk/*.apk release/v${VER}/snapshot/*.tar.xz release/v${VER}/plugins/*.tgz release/v${VER}/provenance/*.json release/v${VER}/provenance/bionilux-loader-sha256.txt release/v${VER}/MANIFEST.txt release/v${VER}/notes.md; do
             [ -f "$f" ] || continue
             gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber
           done
