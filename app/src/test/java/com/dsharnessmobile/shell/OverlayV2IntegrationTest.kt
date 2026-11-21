@@ -348,6 +348,19 @@ class OverlayV2IntegrationTest {
     }
   }
 
+  @Test fun overlayOpenersAndBackCloseTheSameSurface() {
+    val source = source("OverlayV2.kt")
+    val plus = source.substringAfter("private fun toggleDrawer()").substringBefore("private fun onComposerBackPressed()")
+    assertTrue(plus.indexOf("closeDrawer(animated = true)") in 0 until plus.indexOf("drawerMode = DrawerMode.COMMANDS"))
+    assertFalse(plus.contains("openSessionPicker()") || plus.contains("openWorkspacePicker()"))
+    val back = source.substringAfter("private fun onComposerBackPressed()").substringBefore("private fun syncChipWindows()")
+    assertTrue(back.indexOf("closeDrawer(animated = true)") in 0 until back.indexOf("hideComposer()"))
+    val close = source.substringAfter("private fun closeDrawer(").substringBefore("private fun pickerVisibleBottom(")
+    assertTrue(close.indexOf("drawerRetryToken++") in 0 until close.indexOf("drawerMode = DrawerMode.NONE"))
+    assertTrue(close.contains("hideSoftInputFromWindow"))
+    assertTrue(close.contains("syncComposerWithPicker"))
+  }
+
   @Test fun rpcTransportRequiresTheExactResponseIdentity() {
     assertTrue(overlayRpcReplyMatches("""{"type":"server-response","rpcId":"request-a","result":{"ok":true}}""", "request-a"))
     assertFalse(overlayRpcReplyMatches("""{"type":"server-response","rpcId":"request-b","result":{"ok":true}}""", "request-a"))
