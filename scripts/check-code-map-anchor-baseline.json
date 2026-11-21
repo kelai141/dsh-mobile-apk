@@ -351,7 +351,7 @@
     "DownloadSaver.kt:61": 1,
     "dsh-client-ui-responsive/src/client/mobile/form-marker.ts:88": 1,
     "dsh-shell-termux/src/index.ts:184": 1,
-    "use-shell-state.ts:26": 1,
+    "use-shell-state.ts:29": 1,
     "docs/AGENTS/gotchas.md:103": 2,
     "dsh-client-ui-responsive/src/client/dev-section/notify-settings.tsx:66": 2,
     "check-build-chain-abort.mjs:53": 1,
@@ -1699,8 +1699,8 @@
     "trajectory-panels-observer.ts:43": [
       "this.ledger.classList.toggle('dsh-mobile-ledger-raised', panel !== null)"
     ],
-    "use-shell-state.ts:26": [
-      "export function useShellState<T>(getter: () => T, options: ShellStateOptions = {}): readonly [T, () => void] {"
+    "use-shell-state.ts:29": [
+      "export function useShellState<T>(getter: () => T, options: ShellStateOptions<T> = {}): readonly [T, () => void] {"
     ],
     "verify-browser-host.mjs:4": [
       "const argv = process.argv.slice(2)"

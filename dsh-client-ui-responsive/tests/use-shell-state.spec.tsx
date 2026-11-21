@@ -3,6 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { phoneStateOptions, watchPhoneControlPanel } from '../src/client/dev-section/phone-control-poll.ts'
 import { useShellState } from '../src/client/mobile/use-shell-state.ts'
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
@@ -38,6 +39,7 @@ afterEach(async () => {
   host?.remove()
   host = undefined
   vi.useRealTimers()
+  vi.unstubAllGlobals()
 })
 
 describe('useShellState（ST-09）', () => {
@@ -93,5 +95,52 @@ describe('useShellState（ST-09）', () => {
     await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
     expect(shown(el)).not.toBe('z')
     expect(readsAfterUnmount).toBe(0)
+  })
+})
+
+describe('phone control panel scheduling', () => {
+  it('shares one timer, retains the two polling intervals, and reads immediately on return', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    let intersect: (visible: boolean) => void = () => {}
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(callback: IntersectionObserverCallback) {
+        intersect = (visible) => callback([{
+          isIntersecting: visible, intersectionRatio: visible ? 1 : 0,
+        } as IntersectionObserverEntry], this as unknown as IntersectionObserver)
+      }
+      observe() {}
+      disconnect() {}
+    })
+    const refresh = { fast: vi.fn(), accessibility: vi.fn(), onReturn: vi.fn() }
+    const stop = watchPhoneControlPanel(document.createElement('div'), refresh)
+    expect(vi.getTimerCount()).toBe(0)
+    intersect(true)
+    expect(vi.getTimerCount()).toBe(1)
+    vi.advanceTimersByTime(6_000)
+    expect(refresh.fast).toHaveBeenCalledTimes(4)
+    expect(refresh.accessibility).toHaveBeenCalledTimes(3)
+    expect(refresh.onReturn).toHaveBeenCalledTimes(1)
+    intersect(false)
+    expect(vi.getTimerCount()).toBe(0)
+    vi.advanceTimersByTime(9_000)
+    expect(refresh.fast).toHaveBeenCalledTimes(4)
+    intersect(true)
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(vi.getTimerCount()).toBe(0)
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(refresh.fast).toHaveBeenCalledTimes(6)
+    expect(refresh.accessibility).toHaveBeenCalledTimes(5)
+    expect(refresh.onReturn).toHaveBeenCalledTimes(3)
+    stop()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('keeps unchanged nested status snapshots and detects actual ownership changes', () => {
+    expect(phoneStateOptions.equal({ ownership: { running: true, result: [1] } },
+      { ownership: { running: true, result: [1] } })).toBe(true)
+    expect(phoneStateOptions.equal({ ownership: { running: true } },
+      { ownership: { running: false } })).toBe(false)
   })
 })
