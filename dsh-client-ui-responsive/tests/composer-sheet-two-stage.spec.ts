@@ -701,6 +701,34 @@ describe('E. max = 0.88 * innerHeight', () => {
     expect(getComputedStyle(backdrop).zIndex).toBe('2147483647')
     expect(maxPx()).toBe(880)
   })
+
+  it('asks Android to dismiss IME while upstream menu rows are still loading', async () => {
+    const viewport = Object.assign(new EventTarget(), { height: 600, offsetTop: 0 })
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: viewport })
+    const add = buildComposer([])
+    const editor = document.querySelector<HTMLElement>('[data-composer-input]')!
+    const dismissWebIme = vi.fn(() => { expect(document.activeElement).toBe(editor) })
+    const previousBridge = window.androidBridge
+    window.androidBridge = { dismissWebIme }
+    try {
+      editor.focus()
+      sheet.attach()
+      add.click()
+      const backdrop = document.querySelector<HTMLElement>(BACKDROP)!
+      expect(dismissWebIme).toHaveBeenCalledOnce()
+      expect(backdrop.hasAttribute('data-dsh-composer-sheet-waiting-ime')).toBe(true)
+      expect(document.querySelector(ROW)).toBeNull()
+
+      viewport.height = 1000
+      viewport.dispatchEvent(new Event('resize'))
+      expect(backdrop.hasAttribute('data-dsh-composer-sheet-waiting-ime')).toBe(false)
+      expect(document.activeElement).toBe(editor)
+      document.querySelector('[role="listbox"]')!.append(option('Command'))
+      await vi.waitFor(() => { expect(document.querySelector(ROW)).not.toBeNull() })
+    } finally {
+      window.androidBridge = previousBridge
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------

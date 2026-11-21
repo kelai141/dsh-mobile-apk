@@ -541,7 +541,9 @@ export class ComposerSheet {
     // issue #929：等映射读完**再**压焦点。旧实现用 `void` 丢掉了 Promise，
     // 紧接着的 blurActiveEditor() 会在读菜单**之前**跑 —— 等于又白读一次。
     const generation = this.generation
-    void this.fillRows(rows).finally(() => {
+    const filling = this.fillRows(rows)
+    if (backdrop.hasAttribute(WAITING_IME_ATTR)) this.dismissIme()
+    void filling.finally(() => {
       // issue #999：收尾只在「这次打开的 sheet 还开着」时做 —— 代次没变，且这块
       // backdrop 仍是当前那块、还挂在文档里。用户已经关掉的话，这里的 blur 会打断
       // 他此刻的输入（键盘自己缩回）。
@@ -554,18 +556,31 @@ export class ComposerSheet {
       // 行到齐之后重算 peek：行高只有真实行才量得到（打开瞬间还没有行）。
       this.relayoutSheet()
       if (backdrop.hasAttribute(WAITING_IME_ATTR) && this.keyboardInset() > 0) {
-        this.imeRevealTimer = window.setTimeout(() => this.revealPanel(), IME_SETTLE_MAX_MS)
+        this.imeRevealTimer ??= window.setTimeout(() => this.revealPanel(), IME_SETTLE_MAX_MS)
       } else {
         this.revealPanel()
       }
     })
   }
 
+  private dismissIme(): void {
+    try {
+      const bridge = window.androidBridge
+      if (bridge?.dismissWebIme === undefined) return
+      // fillRows has started the upstream menu with its editor focused. Android
+      // can now close the IME while React loads the menu rows.
+      bridge.dismissWebIme()
+      this.imeRevealTimer = window.setTimeout(() => this.revealPanel(), IME_SETTLE_MAX_MS)
+    } catch {
+      // An older shell or an unavailable bridge still uses the blur path.
+    }
+  }
+
   private revealPanel(): void {
     window.clearTimeout(this.imeRevealTimer)
     this.imeRevealTimer = undefined
     this.backdrop?.removeAttribute(WAITING_IME_ATTR)
-    this.panel()?.querySelector<HTMLElement>('[' + TILE_ATTR + ']')?.focus({ preventScroll: true })
+    if (!this.borrowing) this.panel()?.querySelector<HTMLElement>('[' + TILE_ATTR + ']')?.focus({ preventScroll: true })
   }
 
   private readonly onSheetIme = (): void => {

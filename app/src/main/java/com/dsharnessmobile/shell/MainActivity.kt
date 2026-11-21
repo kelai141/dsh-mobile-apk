@@ -1814,6 +1814,13 @@ class MainActivity : ComponentActivity() {
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         },
         // ST-10：桥 setter 走 ShellState.ImmersiveMode（偏好 + 应用成对，单一真源）。
+        onDismissWebIme = {
+          runOnUiThread {
+            if (pageUiActive && webView.visibility == View.VISIBLE && isEngineSource(trustedTopFrameUrl) &&
+              (!guideViewReady || guideView.visibility != View.VISIBLE)
+            ) hideSoftInput()
+          }
+        },
         onSetImmersiveRequest = { enable -> ImmersiveMode.setEnabled(this, enable) },
         // UI language: the shell preference is the truth source; the setter also
         // mirrors it into the dsh profile patch so the engine UI follows.
@@ -2411,7 +2418,7 @@ class MainActivity : ComponentActivity() {
     }
   }
 
-  /** Hide Android's soft keyboard before replacing the WebView with the guide. */
+  /** Dismiss the soft keyboard for a shell or WebUI transition. */
   internal fun hideSoftInput() {
     try {
       WindowInsetsControllerCompat(window, window.decorView).hide(WindowInsetsCompat.Type.ime())

@@ -15,6 +15,7 @@ export interface OpenPathResult {
 }
 
 export interface AndroidShellBridge {
+  dismissWebIme?: () => void
   /** H1: sync system-dark query (fallback for vendor WebViews whose matchMedia is stuck on light). */
   getSystemDark?: () => boolean
   /**
