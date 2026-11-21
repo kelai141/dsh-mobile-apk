@@ -1,8 +1,9 @@
+import { SUBLAYER_POP_EVENT } from '../mobile/back-stack.ts'
 /**
  * 从设置或侧栏管理 Linux。安卓下载队列独立于页面，运行和更新通过同源路由操作。
  * 终端与工具链是子页，返回只退出子页。终端会话由引擎持有。
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { LinuxTerminal } from './LinuxTerminal.tsx'
 import { LinuxToolchains } from './LinuxToolchains.tsx'
@@ -32,7 +33,8 @@ import {
 } from './transport.ts'
 
 /** 轮询间隔（页面可见时才轮询）。 */
-const POLL_MS = 2000
+const BUSY_POLL_MS = 2_000
+const IDLE_POLL_MS = 12_000
 const SOURCE_KEY = 'dsh.linux.download-source'
 const DOWNLOAD_NODES = [['auto', '自动选择', 'Automatic'], ['gh-proxy', 'gh-proxy.com', 'gh-proxy.com'],
   ['ghfast', 'ghfast.top', 'ghfast.top'], ['ghproxy', 'ghproxy.net', 'ghproxy.net']] as const
@@ -190,7 +192,7 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
   const sectionRef = useRef<HTMLElement>(null)
   const autoCheckStartedRef = useRef(false)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const section = sectionRef.current
     if (!section || (!terminalOpen && !toolsOpen)) return
     const pop = (event: Event) => {
@@ -199,8 +201,8 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
       setToolsOpen(false)
     }
     const terminal = section.querySelector('[data-dsh-settings-sublayer]')
-    terminal?.addEventListener('dsh-settings-sublayer-pop', pop)
-    return () => terminal?.removeEventListener('dsh-settings-sublayer-pop', pop)
+    terminal?.addEventListener(SUBLAYER_POP_EVENT, pop)
+    return () => terminal?.removeEventListener(SUBLAYER_POP_EVENT, pop)
   }, [terminalOpen, toolsOpen])
 
   const refresh = useCallback(async (): Promise<LinuxStatus | undefined> => {
@@ -216,6 +218,11 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
 
   useEffect(() => {
     let active = true
+    let reading = false
+    let timer: number | undefined
+    const section = sectionRef.current
+    const presented = (): boolean => document.visibilityState === 'visible' &&
+      (typeof IntersectionObserver !== 'function' || (section?.getClientRects().length ?? 0) > 0)
     const runAutoCheck = (): void => {
       setAutoCheckState('checking')
       setAutoCheckError('')
@@ -236,44 +243,44 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
         },
       )
     }
-    const load = (): void => {
-      if (typeof IntersectionObserver === 'function' && sectionRef.current?.getClientRects().length === 0) {
-        autoCheckStartedRef.current = false
-        return
-      }
+    const load = async (): Promise<void> => {
+      window.clearTimeout(timer)
+      if (!active || !presented() || reading) return
+      reading = true
       const currentJob = installJobStatus()
+      let busy = inFlight || ['queued', 'paused', 'installing'].includes(currentJob?.state ?? '')
       setJob(currentJob)
-      void fetchStatus().then(
-        (next) => {
-          if (!active) return
-          setStatus(next)
-          setStatusError('')
-          if (!autoCheckStartedRef.current && next.busy !== true && !inFlight &&
-            !['queued', 'paused', 'installing'].includes(currentJob?.state ?? '')) {
-            autoCheckStartedRef.current = true
-            runAutoCheck()
-          }
-        },
-        (cause: unknown) => { if (active) setStatusError(failureText(cause)) },
-      )
+      try {
+        const next = await fetchStatus()
+        if (!active) return
+        setStatus(next)
+        setStatusError('')
+        busy ||= next.busy === true
+        if (!autoCheckStartedRef.current && !busy && presented()) {
+          autoCheckStartedRef.current = true
+          runAutoCheck()
+        }
+      } catch (cause) {
+        if (active) setStatusError(failureText(cause))
+      } finally {
+        reading = false
+        if (active && presented()) {
+          timer = window.setTimeout(wake, busy ? BUSY_POLL_MS : IDLE_POLL_MS)
+        }
+      }
     }
-    load()
-    const section = sectionRef.current
+    const wake = (): void => { void load() }
     const observer = typeof IntersectionObserver === 'function' && section !== null
-      ? new IntersectionObserver(() => { if (document.visibilityState === 'visible') load() })
+      ? new IntersectionObserver(wake)
       : undefined
     if (section !== null) observer?.observe(section)
-    // 可见时才轮询：后台 WebView 不打扰引擎。
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') load()
-    }, POLL_MS)
-    const onVisible = (): void => { if (document.visibilityState === 'visible') load() }
-    document.addEventListener('visibilitychange', onVisible)
+    document.addEventListener('visibilitychange', wake)
+    wake()
     return () => {
       active = false
       observer?.disconnect()
-      window.clearInterval(timer)
-      document.removeEventListener('visibilitychange', onVisible)
+      window.clearTimeout(timer)
+      document.removeEventListener('visibilitychange', wake)
     }
   }, [])
 
@@ -433,7 +440,9 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
       aria-label={tr('Linux环境', 'Linux environment')}
     >
       {sidebar && <header className="dsh-linux-panel-header">
-        <Button size="sm" variant="outline" onClick={() => {
+        <Button size="sm" variant="outline" data-dsh-linux-back="" onClick={() => {
+          const result = window.__dshNavigationBack?.('control')
+          if (result !== undefined && result !== 'root') return
           if (terminalOpen) setTerminalOpen(false)
           else if (toolsOpen) setToolsOpen(false)
           else close()
@@ -637,16 +646,7 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
         >
           {tr('卸载 Linux 环境', 'Remove Linux environment')}
         </button>}
-        {installed && !busy && !sidebar && (
-          <button
-            type="button"
-            className="dsh-dev-btn"
-            data-linux-action="back"
-            onClick={() => { close() }}
-          >
-            {tr('返回对话', 'Back to chat')}
-          </button>
-        )}
+
       </div>
 
       {phase === 'failed' && error !== '' && (

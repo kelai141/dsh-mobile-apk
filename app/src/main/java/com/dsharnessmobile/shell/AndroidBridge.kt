@@ -212,6 +212,7 @@ class AndroidBridge(
    * （单测/复用）时宁可全拒也不裸放。
    */
   private val isTrustedTopFrame: () -> Boolean = { false },
+  private val onDismissWebIme: () -> Unit = {},
 ) {
 
   /**
@@ -911,6 +912,10 @@ class AndroidBridge(
       }
     }
   }
+
+  /** Dismiss the visible WebView's IME without changing editor focus. */
+  @JavascriptInterface
+  fun dismissWebIme(): Unit = trusted { onDismissWebIme() }
 }
 
 /**

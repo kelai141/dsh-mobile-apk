@@ -1,3 +1,4 @@
+import { COMPOSER_BACK_EVENT } from '../src/client/mobile/back-stack.ts'
 // @vitest-environment jsdom
 // 输入行「+」底部 sheet：三块瓦片 + 自动映射上游「+」菜单项。
 //
@@ -383,10 +384,11 @@ describe('「+」底部 sheet：收起途径', () => {
     expect(document.querySelector(BACKDROP)).not.toBeNull()
   })
 
-  it('返回键（popstate）收起', async () => {
+  it('返回键（navigation back）收起', async () => {
     buildComposer([['甲', null]])
     await openSheet()
-    window.dispatchEvent(new PopStateEvent('popstate'))
+    document.querySelector('[data-dsh-composer-sheet-backdrop]')!
+      .dispatchEvent(new Event(COMPOSER_BACK_EVENT, { cancelable: true }))
     expect(document.querySelector(BACKDROP)).toBeNull()
   })
 
@@ -468,7 +470,8 @@ describe('「+」底部 sheet：#1001 借用闸必须复位', () => {
       document.querySelector<HTMLElement>(ADD)!.click()
       await vi.advanceTimersByTimeAsync(50)
       expect(borrowingOf(sheet)).toBe(true)
-      window.dispatchEvent(new PopStateEvent('popstate'))
+      document.querySelector('[data-dsh-composer-sheet-backdrop]')!
+      .dispatchEvent(new Event(COMPOSER_BACK_EVENT, { cancelable: true }))
       expect(document.querySelector(BACKDROP)).toBeNull()
       expect(borrowingOf(sheet)).toBe(false)
       // 让那次借用自己走完超时，别把悬挂的计时器留给后面的用例。

@@ -6,53 +6,25 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * BackGate: the three-input back decision (cross-document history / page layer stack / neither),
- * the page-script contracts, the cached signal, and the bridge's set/get symmetry.
- *
- * The decision is a pure function on purpose: the shell's back callback must decide
- * synchronously, so the only testable unit is "given these two booleans, which branch",
- * not a WebView.
- */
 class BackGateTest {
-
-  // ── 三分支：跨文档历史 / 页面层栈 / 都没有（IX-BG-13）────────────────────────
-
   @Test
-  fun crossDocumentHistoryTakesTheHistoryBranch() {
-    assertEquals(BackDecision.GO_BACK_HISTORY, BackGate.decide(canGoBack = true, pageStackAvailable = false))
-    assertTrue(BackGate.consumed(BackDecision.GO_BACK_HISTORY))
+  fun pageLayersTakePrecedenceOverAvailableHistory() {
+    for (result in listOf("\"handled\"", "\"blocked\"", null, "\"unexpected\"")) {
+      assertEquals(BackDecision.CONSUME, BackGate.decide(canGoBack = true, pageResult = result))
+    }
   }
 
   @Test
-  fun pageLayerStackDispatchesToThePageAndConsumes() {
-    assertEquals(BackDecision.DISPATCH_PAGE_STACK, BackGate.decide(canGoBack = false, pageStackAvailable = true))
-    assertTrue(BackGate.consumed(BackDecision.DISPATCH_PAGE_STACK))
+  fun confirmedRootUsesHistoryThenActivityDefault() {
+    assertEquals(BackDecision.GO_BACK_HISTORY, BackGate.decide(true, "\"root\"", legacyAvailable = true))
+    assertEquals(BackDecision.FINISH_ACTIVITY, BackGate.decide(false, "\"root\""))
   }
 
   @Test
-  fun neitherInputFinishesTheActivity() {
-    assertEquals(BackDecision.FINISH_ACTIVITY, BackGate.decide(canGoBack = false, pageStackAvailable = false))
-    assertFalse(BackGate.consumed(BackDecision.FINISH_ACTIVITY))
-  }
-
-  /** IX-BG-11：历史优先于层栈，写反即拒合。 */
-  @Test
-  fun historyOutranksThePageStack() {
-    assertEquals(BackDecision.GO_BACK_HISTORY, BackGate.decide(canGoBack = true, pageStackAvailable = true))
-  }
-
-  // ── 页面脚本契约 ──────────────────────────────────────────────────────────
-
-  /** 入口名与 && 短路是页面侧的契约（注入层暴露 window.__dshBack）。 */
-  @Test
-  fun dispatchScriptPinsThePageEntry() {
-    assertEquals("window.__dshBack && window.__dshBack()", BackGate.DISPATCH_SCRIPT)
-  }
-
-  @Test
-  fun depthScriptReadsThePublishedGlobal() {
-    assertEquals("window.__dshBackDepth|0", BackGate.READ_DEPTH_SCRIPT)
+  fun absentControllerHonorsTheLegacySignal() {
+    assertEquals(BackDecision.CONSUME, BackGate.decide(true, "\"unavailable\"", legacyAvailable = true))
+    assertEquals(BackDecision.GO_BACK_HISTORY, BackGate.decide(true, "\"unavailable\""))
+    assertEquals(BackDecision.FINISH_ACTIVITY, BackGate.decide(false, "\"unavailable\""))
   }
 
   @Test
@@ -129,5 +101,28 @@ class BackGateTest {
     val getter = BackGateBridge::class.java.getMethod("getBackAvailable")
     assertTrue(setter.isAnnotationPresent(JavascriptInterface::class.java))
     assertTrue(getter.isAnnotationPresent(JavascriptInterface::class.java))
+  }
+
+  @Test
+  fun aBlockedLayerAtDocumentRootDoesNotFinishTheActivity() {
+    assertEquals(BackDecision.CONSUME, BackGate.decide(false, "\"blocked\""))
+  }
+
+  @Test
+  fun missingOrMalformedRendererReplyDoesNotTriggerFallback() {
+    for (result in listOf(null, "null", "", "\"unknown\"")) {
+      assertEquals(BackDecision.CONSUME, BackGate.decide(false, result))
+    }
+  }
+
+  @Test
+  fun dispatchKeepsCurrentAndLegacyWebClientsCompatible() {
+    val script = BackGate.DISPATCH_SCRIPT
+    val current = script.indexOf("window.__dshNavigationBack('android')")
+    val legacy = script.indexOf("window.__dshBack()")
+    assertTrue("Prefer the current controller before the legacy callback", current in 0 until legacy)
+    assertTrue("Protect an open legacy layer when dismissal returns false", script.contains(
+      "window.__dshBackDepth > 0 ? 'blocked' : 'root'",
+    ))
   }
 }

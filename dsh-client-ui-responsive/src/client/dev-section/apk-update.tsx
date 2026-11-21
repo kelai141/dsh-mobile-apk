@@ -256,7 +256,9 @@ export function ApkUpdateRow() {
   const polling = BUSY_STATES.has(state)
   useEffect(() => {
     if (!polling) return
-    const timer = window.setInterval(() => { refresh() }, 2000)
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') refresh()
+    }, 2000)
     return () => { window.clearInterval(timer) }
   }, [polling, refresh])
 

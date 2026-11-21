@@ -1,3 +1,4 @@
+import { COMPOSER_BACKDROP_SELECTOR } from '../mobile/composer-sheet.css.ts'
 /**
  * 浏览器半：把「虚拟屏」注册为**右侧栏的同级 tab 类型**（与「工作区文件」同级），状态面板
  * 只读原生 `window.androidBridge.vdisplayStatus()`（fail-closed 四态）。
@@ -262,7 +263,8 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
       // 覆盖层让位（0.14.8 用户实报）：三个点弹层展开时必须把原生画面藏起来。
       // 原生 SurfaceView 在 WebView 之上，不藏它的话弹层会被虚拟屏画面整块盖住，
       // 用户看到的是「点开三个点，结果被一块黑色虚拟屏挡住」。收起后 next publish 自动恢复。
-      const overlapped = document.documentElement.hasAttribute('data-dsh-popover-open')
+      const overlapped = document.documentElement.hasAttribute('data-dsh-popover-open') ||
+        document.querySelector(COMPOSER_BACKDROP_SELECTOR) !== null
       // 应用退后台时判据必须转 false（0.14.11，D1）：后台期间 WebView 的 JS 仍在跑，旧判据六项全不变，
       // 于是继续下发 visible:true；此时 Surface 已交给浮窗，壳侧 attach 被判 viewer-target-occupied，
       // 舞台被置 GONE 并进入 30s 冻结——用户按 Home 去用别的应用再回来，侧栏空白最长 30 秒，

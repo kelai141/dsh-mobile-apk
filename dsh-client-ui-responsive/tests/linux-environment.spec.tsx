@@ -292,7 +292,7 @@ describe('LinuxEnvironmentSection', () => {
     expect(element.querySelector('[data-linux-error="true"]')?.textContent).toContain('资产准备通道')
   }, 20000)
 
-  it('offers back-to-chat once the environment is ready', async () => {
+  it('leaves navigation to the settings header once the environment is ready', async () => {
     const { impl } = makeFetch({
       '/api/android/linux-environment/status': { body: STATUS_INSTALLED },
     })
@@ -303,10 +303,9 @@ describe('LinuxEnvironmentSection', () => {
     const section = element.querySelector('[data-linux-environment]') as HTMLElement
     expect(section.getAttribute('data-installed')).toBe('true')
     expect(element.querySelector('[data-linux-ready="true"]')).not.toBeNull()
-    const back = element.querySelector('[data-linux-action="back"]') as HTMLButtonElement
-    expect(back.textContent).toContain('返回对话')
-    await act(async () => { back.click() })
-    expect(close).toHaveBeenCalledTimes(1)
+    expect(element.querySelector('[data-linux-action="back"]')).toBeNull()
+    expect(element.querySelector('[data-dsh-linux-back]')).toBeNull()
+    expect(close).not.toHaveBeenCalled()
   })
 
   it('uses the sidebar header to return from toolchains and close Linux', async () => {
@@ -352,14 +351,14 @@ describe('LinuxEnvironmentSection', () => {
     })
 
     const close = vi.fn()
-    const element = await render(close)
+    const element = await render(close, true)
     await act(async () => {
       (element.querySelector('[data-linux-action="update"]') as HTMLButtonElement).click()
       await new Promise((resolve) => { setTimeout(resolve, 50) })
     })
     expect(element.querySelector('[data-linux-error="true"]')).not.toBeNull()
     expect((element.querySelector('[data-linux-action="retry"]') as HTMLButtonElement).disabled).toBe(false)
-    const back = element.querySelector('[data-linux-action="back"]') as HTMLButtonElement
+    const back = element.querySelector('[data-dsh-linux-back]') as HTMLButtonElement
     expect(back.disabled).toBe(false)
     await act(async () => { back.click() })
     expect(close).toHaveBeenCalledTimes(1)
@@ -410,8 +409,8 @@ describe('LinuxEnvironmentSection', () => {
     expect(element.querySelector('[data-linux-error="true"]')).not.toBeNull()
     expect(element.querySelector('[data-linux-ready="true"]')).toBeNull()
     expect(element.textContent).not.toContain('已就绪')
-    // 已装环境仍保留回对话入口。
-    expect((element.querySelector('[data-linux-action="back"]') as HTMLButtonElement).disabled).toBe(false)
+    // 设置外壳持有返回控件。
+    expect(element.querySelector('[data-linux-action="back"]')).toBeNull()
   }, 20000)
 
   it('shows release status when current and keeps reinstall available under Linux settings', async () => {
@@ -452,7 +451,7 @@ describe('LinuxEnvironmentSection', () => {
     expect(primary.textContent).toContain('1.3.0')
   }, 20000)
 
-  it('auto-queries upstream on open, deduplicates 2s polls, and performs one-click upgrade to the new release', async () => {
+  it('checks once on open, pauses hidden status reads, and still upgrades on demand', async () => {
     let installedVersion = '1.2.0'
     let updateAvailable = false
     const calls: string[] = []
@@ -518,14 +517,26 @@ describe('LinuxEnvironmentSection', () => {
       expect(primary.textContent).toContain('1.3.0')
       expect(element.querySelector('[data-linux-auto-check="update-available"]')).not.toBeNull()
 
-      // Across multiple 2s status polls and visibility events, /check must NOT re-trigger.
+      const statusReads = () => calls.filter(url => url.endsWith('/status')).length
+      expect(statusReads()).toBe(1)
+      await act(async () => { await vi.advanceTimersByTimeAsync(6500) })
+      expect(statusReads()).toBe(1)
+
+      const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(6500)
+        document.dispatchEvent(new Event('visibilitychange'))
+        await vi.advanceTimersByTimeAsync(15_000)
+      })
+      expect(statusReads()).toBe(1)
+      visibility.mockReturnValue('visible')
+      await act(async () => {
+        document.dispatchEvent(new Event('visibilitychange'))
         document.dispatchEvent(new Event('visibilitychange'))
         await vi.advanceTimersByTimeAsync(10)
       })
-      expect(calls.filter((u) => u.endsWith('/status')).length).toBeGreaterThanOrEqual(4)
-      expect(calls.filter((u) => u.endsWith('/check')).length).toBe(1)
+      expect(statusReads()).toBe(2)
+      expect(calls.filter(url => url.endsWith('/check'))).toHaveLength(1)
+      visibility.mockRestore()
 
       // The explicit download rechecks the channel before preparing the verified assets.
       await act(async () => {
@@ -564,7 +575,7 @@ describe('LinuxEnvironmentSection', () => {
       await act(async () => { (element.querySelector('[data-linux-action="settings"]') as HTMLButtonElement).click() })
       expect((element.querySelector('[data-linux-action="reinstall"]') as HTMLButtonElement).disabled).toBe(false)
       expect((element.querySelector('[data-linux-action="uninstall"]') as HTMLButtonElement).disabled).toBe(false)
-      expect((element.querySelector('[data-linux-action="back"]') as HTMLButtonElement).disabled).toBe(false)
+      expect(element.querySelector('[data-linux-action="back"]')).toBeNull()
 
       await act(async () => {
         (element.querySelector('[data-linux-action="reinstall"]') as HTMLButtonElement).click()

@@ -1,45 +1,7 @@
 /**
- * Back-stack signal: the page half of the shell's system-back policy (iteration
- * 0.14.0-preview, plan §5.1 "方案 1" / source diagnosis §6).
- *
- * The shell decides in ONE synchronous back callback, and `evaluateJavascript` is
- * asynchronous, so the page can never be asked at back time: this module observes
- * the known in-memory layers of the upstream frame, keeps them in an ordered
- * stack, exposes `window.__dshBack()`, and pushes "a layer can be popped" to the
- * shell through the synchronous `dshBackBridge.setAvailable` uplink whenever that
- * boolean changes. The shell caches the boolean and calls `window.__dshBack()`.
- *
- * Why an observed layer stack instead of the alternatives:
- * - `WebView.canGoBack()` does not see same-document history entries on the
- *   measured WebView (Chromium 110), so pushState routing cannot drive the shell;
- * - one synthetic Escape would hit every mounted document-level listener at once
- *   (settings, Modal, menu, lightbox) and still miss drawer, trajectory details,
- *   and the right column.
- *
- * Each layer is closed through its OWN control, by stable hook (data attributes,
- * roles, mask structure), not by localized copy:
- * - drawer: the layout service's own toggle (the top-bar button's action);
- * - dialog (settings panel, `Modal`, image lightbox): its mask, else its close
- *   button, else its clickable backdrop;
- * - trajectory "Event details" `<aside>`: its close button;
- * - right column fullscreen, while the column is presented: its mode toggle, else its
- *   collapse toggle;
- * - `@`/slash menu: the menu's own outside-pointerdown dismissal;
- * - menu drill-down: the last enabled breadcrumb (one level per press).
- * - composer "+" bottom sheet (this plugin's own): its own outside-pointerdown
- *   dismissal, which the sheet implements.
- * - global main panel (upstream's plugin manager and its kin): one detail level
- *   per press through the page's own crumb control, then the page's own back
- *   control (this plugin's, at the list root — see mobile/main-panel-back.ts).
- *
- * Failure direction: the stack only ever pops through reconciliation (a layer's
- * anchor disappearing from the DOM). A layer whose control cannot be found keeps
- * being counted, so the shell consumes the press instead of finishing the
- * activity ("an unobserved or unclosable layer must never exit the app").
- *
- * The main-panel layer is the one kind that always finds a closure: its top level
- * (the plugin manager list root) draws no control upstream, so it ends at the layout
- * service's own panel selection rather than consuming the press without effect.
+ * Resolves one back action against the live layout and presented WebUI surfaces.
+ * Browser document history and the Android task stack remain owned by their hosts.
+ * The legacy availability bridge is retained for older APKs.
  */
 
 /** Layer kinds, bottom to top as detected within one pass. */
@@ -48,6 +10,7 @@ export type BackLayerKind =
   | 'dialog'
   | 'trajectory-details'
   | 'right-fullscreen'
+  | 'browser-history'
   | 'sidebar-bubbles'
   | 'header-options'
   | 'menu'
@@ -55,12 +18,14 @@ export type BackLayerKind =
   | 'composer-sheet'
   | 'model-menu'
   | 'main-panel'
+  | 'main-panel-detail'
   | 'marketplace'
+  | 'context-menu'
 
 /** One observed layer plus the closure that pops it. */
 interface BackLayerDetection {
   /** Stable identity across observation passes, so ordering survives re-detection. */
-  id: string
+  id: string | Element
   kind: BackLayerKind
   /** Pop this layer through its own control; false when no control was found. */
   close: () => boolean
@@ -79,7 +44,7 @@ const RIGHT_COL_SELECTOR = '[data-rightbar-col]'
 /** Frame attribute: present while the left sidebar is collapsed (drawer closed). */
 const SIDEBAR_COLLAPSED_ATTR = 'data-sidebar-collapsed'
 /** Every upstream modal surface (settings panel, ui-primitives Modal, image lightbox). */
-const DIALOG_SELECTOR = '[role="dialog"][aria-modal="true"]'
+const DIALOG_SELECTOR = '[role="dialog"][aria-modal="true"]:not([data-shortcut-modal="sidebar"])'
 /** Accessible names of the trajectory "Event details" side panel (zh + en dictionaries). */
 const TRAJECTORY_LABELS = ['Event details', '事件详情']
 /**
@@ -95,6 +60,8 @@ const TRAJECTORY_LABELS = ['Event details', '事件详情']
  */
 const RIGHT_FULLSCREEN_SELECTOR =
   '[data-sidebar-right-panel="fullscreen"][data-sidebar-right-open]:not([aria-hidden="true"])'
+const BROWSER_BACK_SELECTOR = '[data-sidebar-right-open] [data-dsh-browser-history-back]'
+const MAIN_SECTION_LAYER_SELECTOR = '[data-dsh-linux-environment-panel] [data-dsh-settings-sublayer]'
 const MENU_SELECTOR = '[data-trigger-menu]'
 // ComposerPopupGuard marks only the open, aria-controlled Android ModelSelect portal.
 const MODEL_MENU_SELECTOR = '[data-dsh-android-model-menu]'
@@ -106,7 +73,21 @@ const MODEL_MENU_SELECTOR = '[data-dsh-android-model-menu]'
  * FINISH_ACTIVITY (BackGate.kt:56-60), so without this entry pressing system back with the sheet
  * open would exit the app instead of closing it.
  */
-const COMPOSER_SHEET_SELECTOR = '[data-dsh-composer-sheet-backdrop]'
+const COMPOSER_SHEET_SELECTOR = '[data-dsh-composer-sheet-backdrop]:not([data-dsh-composer-sheet-leaving])'
+const CONTEXT_MENU_SELECTOR = '[data-context-menu][role="menu"], [data-subagent-panel], [data-dsh-header-popup], [role="menu"][class*="_viewOptionsMenu"]'
+export const COMPOSER_BACK_EVENT = 'dsh-composer-back-request'
+export const SETTINGS_BACK_EVENT = 'dsh-settings-back-request'
+export const SUBLAYER_POP_EVENT = 'dsh-settings-sublayer-pop'
+
+export function popSectionLayer(layer: Element): boolean {
+  if (!layer.dispatchEvent(new Event(SUBLAYER_POP_EVENT, { bubbles: true, cancelable: true }))) return true
+  const back = layer.querySelector<HTMLElement>('[data-dsh-settings-sublayer-back]')
+  if (back === null) return false
+  back.click()
+  return true
+}
+export type NavigationBackResult = 'handled' | 'blocked' | 'root'
+export type NavigationBackSource = 'android' | 'control'
 /**
  * 第三方市场插件（dshmarketplace-plugin）的整页浮层。
  *
@@ -118,7 +99,6 @@ const COMPOSER_SHEET_SELECTOR = '[data-dsh-composer-sheet-backdrop]'
 const MARKETPLACE_OVERLAY_SELECTOR = '.dshm-overlay'
 const MARKETPLACE_BACK_SELECTOR = '.dshm-back'
 /** The drilled-listing breadcrumb header (a `nav`; the candidate list is a `div[role=listbox]`). */
-const MENU_DRILL_SELECTOR = '[data-trigger-menu] nav'
 /**
  * Every element any layer's presence is derived from, as one union selector.
  *
@@ -144,6 +124,9 @@ const CANDIDATE_SELECTOR = [
   MODEL_MENU_SELECTOR,
   COMPOSER_SHEET_SELECTOR,
   MARKETPLACE_OVERLAY_SELECTOR,
+  CONTEXT_MENU_SELECTOR,
+  BROWSER_BACK_SELECTOR,
+  MAIN_SECTION_LAYER_SELECTOR,
 ].join(', ')
 /** Hashed CSS-module close controls still carry the class token (`[class*=ledger]` precedent). */
 const CLOSE_CLASS_HINT = '[class*="close"]'
@@ -168,6 +151,7 @@ const OBSERVED_ATTRIBUTES = [
   SIDEBAR_COLLAPSED_ATTR,
   'role',
   'aria-modal',
+  'data-shortcut-modal',
   'aria-label',
   'aria-hidden',
   'data-sidebar-right-panel',
@@ -179,12 +163,48 @@ const OBSERVED_ATTRIBUTES = [
   'data-dsh-main-panel-back',
   'data-dsh-sidebar-bubbles',
   'data-dsh-topbar-fold',
+  'data-dsh-composer-sheet-leaving',
+  'data-dsh-composer-sheet-concealed',
+  'data-dsh-header-popup',
+  'data-dsh-settings-level',
+  'data-dsh-settings-depth',
+  'disabled',
+  'hidden',
+  'inert',
 ]
+
+const MUTATION_CANDIDATE_SELECTOR = CANDIDATE_SELECTOR +
+  ', [data-dsh-settings-sublayer], [data-dsh-browser-history-back]'
+
+function containsCandidate(node: Node): boolean {
+  return node instanceof Element &&
+    (node.matches(MUTATION_CANDIDATE_SELECTOR) || node.querySelector(MUTATION_CANDIDATE_SELECTOR) !== null)
+}
+
+function affectsNavigation(record: MutationRecord): boolean {
+  if (!(record.target instanceof Element)) return false
+  if (record.type === 'childList') {
+    // Breadcrumbs belong to a menu. Other insertions matter only if their
+    // subtree brings a layer in or removes one.
+    return record.target.closest(MENU_SELECTOR) !== null ||
+      [...record.addedNodes, ...record.removedNodes].some(containsCandidate)
+  }
+  if (record.target === document.documentElement || record.target.matches(MUTATION_CANDIDATE_SELECTOR)) return true
+  // Closing attributes can make a previously matching element stop matching.
+  if (record.attributeName?.startsWith('data-') || record.attributeName === 'role' ||
+    record.attributeName === 'aria-modal' || record.attributeName === 'aria-label') return true
+  if (record.attributeName === 'aria-hidden' || record.attributeName === 'hidden' || record.attributeName === 'inert') {
+    return record.target.querySelector(CANDIDATE_SELECTOR) !== null
+  }
+  return false
+}
 
 declare global {
   interface Window {
     /** Pop the topmost page layer; false when the page holds no layer of its own. */
     __dshBack?: () => boolean
+    __dshNavigationBack?: (source: NavigationBackSource) => NavigationBackResult
+    __dshNavigationTrace?: boolean
     /** Number of layers the page currently holds (device-side observability). */
     __dshBackDepth?: number
     /** Layer kinds bottom to top (device-side observability). */
@@ -214,6 +234,12 @@ function dispatchMouse(target: EventTarget, type: string): void {
  * @returns whether a control was found and triggered.
  */
 function closeDialog(dialog: Element): boolean {
+  if (dialog.hasAttribute('data-dsh-settings-dialog')) {
+    const request = new Event(SETTINGS_BACK_EVENT, { bubbles: true, cancelable: true })
+    if (!dialog.dispatchEvent(request)) return true
+    const section = dialog.querySelector('[data-dsh-settings-sublayer]')
+    if (section !== null) return popSectionLayer(section)
+  }
   // Mask first: both masks are documented close paths (settings panel and
   // `Modal` mask.onClick; the image lightbox mask.onMouseDown). The mask is
   // either a sibling of the panel (`Modal`, `SettingsRoot`) or the backdrop's
@@ -285,7 +311,9 @@ function closeMainPanel(leave: () => void): boolean {
   // One detail level at a time, through the crumb the page itself draws.
   const details = PANEL_DETAIL_SELECTORS.flatMap(selector => [...document.querySelectorAll(selector)])
   const detail = details[details.length - 1]
-  const crumb = detail?.querySelector(CRUMB_BUTTON_HINT) ?? null
+  const crumb = detail?.querySelector(CRUMB_BUTTON_HINT)
+    ?? document.querySelector('[data-plugin-panel] > header[data-window-drag] button[class*="moreBack"]')
+
   if (crumb !== null) {
     dispatchMouse(crumb, 'click')
     return true
@@ -381,7 +409,7 @@ export class BackStackSignal {
   private available = false
   private attached = false
   /** 合帧用的挂起标记：一批 DOM 变更只换一次检测。 */
-  private scheduled = false
+  private scheduled: number | null = null
 
   /** @param options - the drawer toggle callback. */
   constructor(options: BackStackOptions) {
@@ -392,17 +420,13 @@ export class BackStackSignal {
   attach(): void {
     if (this.attached) return
     this.attached = true
-    window.__dshBack = () => this.popTop()
-    this.observer = new MutationObserver(() => { this.schedule() })
-    // 全文档观察，两条腿都必须留着（0.14.10 实测）：
-    // - attributes + OBSERVED_ATTRIBUTES：上游用属性驱动层（侧栏折叠、dialog 角色、面板模式）
-    //   和本插件自己的标记；
-    // - childList：React 提交一棵**属性已经在创建时写好**的子树时，插入动作本身不产生任何
-    //   属性变更。dialog / 菜单 / 附件来源菜单全都这么进场，去掉 childList 它们一条都看不见，
-    //   而壳侧只有在收到「层栈非空」信号时才会调用 __dshBack，所谓「返回键前同步 sync()」的
-    //   兜底根本到不了 —— 实测：去掉 childList 后这三层的深度停在 0，返回键直接 finish 应用。
-    //
-    // 所以这里不动观察面，改的是回调的代价：合帧，一批/一阵 DOM 变更只做一次检测。
+    window.__dshBack = () => this.requestBack('android') === 'handled'
+    window.__dshNavigationBack = source => this.requestBack(source)
+    window.addEventListener('popstate', this.onHistoryTraversal)
+    this.observer = new MutationObserver(records => {
+      if (records.some(affectsNavigation)) this.schedule()
+    })
+    // React may insert a complete surface with its attributes already applied.
     this.observer.observe(document.documentElement, {
       childList: true,
       subtree: true,
@@ -423,10 +447,9 @@ export class BackStackSignal {
    * 而壳侧正是靠这个信号决定按返回键要不要问页面。
    */
   private schedule(): void {
-    if (this.scheduled || !this.attached) return
-    this.scheduled = true
-    window.setTimeout(() => {
-      this.scheduled = false
+    if (this.scheduled !== null || !this.attached) return
+    this.scheduled = window.setTimeout(() => {
+      this.scheduled = null
       this.sync()
     }, 0)
   }
@@ -443,11 +466,14 @@ export class BackStackSignal {
     this.attached = false
     this.observer?.disconnect()
     this.observer = null
-    this.scheduled = false
+    if (this.scheduled !== null) window.clearTimeout(this.scheduled)
+    this.scheduled = null
+    window.removeEventListener('popstate', this.onHistoryTraversal)
     document.removeEventListener('visibilitychange', this.onVisibilityChange)
     window.removeEventListener('pageshow', this.onVisibilityChange)
     this.layers = []
     delete window.__dshBack
+    delete window.__dshNavigationBack
     delete window.__dshBackDepth
     delete window.__dshBackKinds
     // Explicit false: the shell must not keep consuming back presses for a page
@@ -472,25 +498,28 @@ export class BackStackSignal {
     if (this.attached) this.sync()
   }
 
-  /**
-   * Pop the topmost layer through its own control.
-   * @returns whether a layer existed (the shell consumes the press either way);
-   *   the stack itself only shrinks when the layer's anchor leaves the DOM.
-   */
-  private popTop(): boolean {
-    // Re-detect before deciding: the observer delivers asynchronously, so the
-    // cached stack may lag one batch behind (a rapid second back press).
+  // popstate arrives after the browser has traversed. Let the existing router
+  // restore that entry, then reconcile its committed DOM without traversing again.
+  private readonly onHistoryTraversal = (): void => { this.schedule() }
+
+  requestBack(source: NavigationBackSource): NavigationBackResult {
     this.sync()
     const top = this.layers[this.layers.length - 1]
-    if (top === undefined) return false
-    try {
-      return top.close()
-    } catch {
-      // A throwing control (detached node, upstream change) must not propagate
-      // into the shell's back callback: the layer stays counted, so the press is
-      // consumed and the activity is not finished.
-      return false
+    let result: NavigationBackResult = 'root'
+    if (top !== undefined) {
+      try {
+        result = top.close() ? 'handled' : 'blocked'
+      } catch {
+        result = 'blocked'
+      }
     }
+    if (window.__dshNavigationTrace === true) {
+      console.info('[dsh-navigation]', {
+        source, panel: this.options.activePanelId(), stack: this.kinds,
+        layer: top?.kind ?? null, result,
+      })
+    }
+    return result
   }
 
   /** Reconcile the observed layers with the stack, keeping open order. */
@@ -505,7 +534,19 @@ export class BackStackSignal {
         ? { ...detection, seq: ++this.seq }
         : { ...existing, close: detection.close })
     }
-    next.sort((a, b) => a.seq - b.seq)
+    const sheetActive = next.some(layer => layer.kind === 'composer-sheet')
+    next.sort((a, b) => {
+      const rank = (kind: BackLayerKind): number => {
+        if (kind === 'browser-history' || (sheetActive && (kind === 'menu' || kind === 'menu-drill'))) return 1
+        if (kind === 'drawer' || kind === 'main-panel' || kind === 'main-panel-detail' || kind === 'right-fullscreen') return 0
+        return 2
+      }
+      if (a.id instanceof Element && b.id instanceof Element) {
+        if (a.id.contains(b.id)) return -1
+        if (b.id.contains(a.id)) return 1
+      }
+      return rank(a.kind) - rank(b.kind) || a.seq - b.seq
+    })
     this.layers = next
     this.publish()
   }
@@ -521,15 +562,27 @@ export class BackStackSignal {
       return null
     }
     const all = (selector: string): HTMLElement[] => candidates.filter(element => element.matches(selector))
+    const presented = (element: HTMLElement): boolean =>
+      element.closest('[hidden], [inert], [aria-hidden="true"], [data-dsh-composer-sheet-concealed]') === null
     const drawer = this.detectDrawer(first)
     if (drawer !== null) found.push(drawer)
     const mainPanel = this.detectMainPanel()
-    if (mainPanel !== null) found.push(mainPanel)
+    if (mainPanel !== null) {
+      found.push(mainPanel)
+      const section = first(MAIN_SECTION_LAYER_SELECTOR)
+      if (section !== null) found.push({
+        id: section, kind: 'main-panel-detail', close: () => popSectionLayer(section),
+      })
+    }
     for (const dialog of this.detectDialogs(all)) found.push(dialog)
     const trajectory = this.detectTrajectoryDetails(all)
     if (trajectory !== null) found.push(trajectory)
     const fullscreen = this.detectRightFullscreen(first)
     if (fullscreen !== null) found.push(fullscreen)
+    const browserBack = all(BROWSER_BACK_SELECTOR).find(button => !button.matches(':disabled') && presented(button))
+    if (browserBack !== undefined) found.push({
+      id: browserBack, kind: 'browser-history', close: () => { browserBack.click(); return true },
+    })
     const bubbles = first('[data-dsh-sidebar-bubbles="open"]')
     const bubbleToggle = bubbles?.parentElement?.querySelector<HTMLElement>('[data-dsh-sidebar-bubbles-toggle]')
     if (bubbles && bubbleToggle) found.push({ id: 'sidebar-bubbles', kind: 'sidebar-bubbles', close: () => { bubbleToggle.click(); return true } })
@@ -546,16 +599,20 @@ export class BackStackSignal {
         return true
       },
     })
-    const menu = this.detectMenu(first)
-    if (menu !== null) found.push(menu)
-    const drill = this.detectMenuDrill(all)
-    if (drill !== null) found.push(drill)
+    for (const menu of all(MENU_SELECTOR).filter(presented)) {
+      found.push({ id: menu, kind: 'menu', close: () => closeMenu(menu) })
+      const nav = menu.querySelector('nav')
+      if (nav !== null) found.push({ id: nav, kind: 'menu-drill', close: () => popMenuDrill(nav) })
+    }
     const modelMenu = this.detectModelMenu(first)
     if (modelMenu !== null) found.push(modelMenu)
     const composerSheet = this.detectComposerSheet(first)
     if (composerSheet !== null) found.push(composerSheet)
     const marketplace = this.detectMarketplace(first)
     if (marketplace !== null) found.push(marketplace)
+    for (const menu of all(CONTEXT_MENU_SELECTOR).filter(presented)) {
+      found.push({ id: menu, kind: 'context-menu', close: () => closeMenu(menu) })
+    }
     return found
   }
 
@@ -591,13 +648,9 @@ export class BackStackSignal {
 
   /** Every modal surface, in document order (settings panel, Modal, lightbox). */
   private detectDialogs(all: (selector: string) => HTMLElement[]): BackLayerDetection[] {
-    return all(DIALOG_SELECTOR).map((dialog, index) => ({
-      // Index-keyed: the modal layer is a singleton in practice (one dialog is
-      // on top), and open order is what the stack needs, not long-lived identity.
-      id: `dialog:${String(index)}`,
-      kind: 'dialog' as const,
-      close: () => closeDialog(dialog),
-    }))
+    return all(DIALOG_SELECTOR)
+      .filter(dialog => dialog.closest('[hidden], [inert], [aria-hidden="true"], [data-dsh-composer-sheet-backdrop]') === null)
+      .map(dialog => ({ id: dialog, kind: 'dialog', close: () => closeDialog(dialog) }))
   }
 
   /** The trajectory inspector side panel. */
@@ -622,13 +675,6 @@ export class BackStackSignal {
       kind: 'right-fullscreen',
       close: () => closeRightFullscreen(panel),
     }
-  }
-
-  /** An open command/reference menu. */
-  private detectMenu(first: (selector: string) => HTMLElement | null): BackLayerDetection | null {
-    const menu = first(MENU_SELECTOR)
-    if (menu === null) return null
-    return { id: 'menu', kind: 'menu', close: () => closeMenu(menu) }
   }
 
   /** ModelSelect owns Escape: leave its drilled pane first, then close and restore trigger focus. */
@@ -657,7 +703,7 @@ export class BackStackSignal {
   private detectComposerSheet(first: (selector: string) => HTMLElement | null): BackLayerDetection | null {
     const sheet = first(COMPOSER_SHEET_SELECTOR)
     if (sheet === null) return null
-    return { id: 'composer-sheet', kind: 'composer-sheet', close: () => closeMenu(sheet) }
+    return { id: sheet, kind: 'composer-sheet', close: () => !sheet.dispatchEvent(new Event(COMPOSER_BACK_EVENT, { cancelable: true })) || closeMenu(sheet) }
   }
 
   /**
@@ -680,26 +726,6 @@ export class BackStackSignal {
         return true
       },
     }
-  }
-
-  /**
-   * A menu listing descended into a directory (its breadcrumb header is up).
-   *
-   * `[data-trigger-menu] nav` is a **relationship** query: it matches a `nav` that is a
-   * descendant of any trigger menu. Walking the trigger menus in document order and taking the
-   * first one that contains a `nav` yields the same element: document order puts every
-   * descendant of an earlier menu before a later menu, so the first menu with a nav holds the
-   * globally first matching nav. A menu without a breadcrumb is skipped, exactly like the
-   * original selector (which would keep looking).
-   */
-  private detectMenuDrill(all: (selector: string) => HTMLElement[]): BackLayerDetection | null {
-    let nav: HTMLElement | null = null
-    for (const menu of all(MENU_SELECTOR)) {
-      nav = menu.querySelector<HTMLElement>('nav')
-      if (nav !== null) break
-    }
-    if (nav === null) return null
-    return { id: 'menu-drill', kind: 'menu-drill', close: () => popMenuDrill(nav) }
   }
 
   /** Publish the observability globals and the shell uplink (only on change). */

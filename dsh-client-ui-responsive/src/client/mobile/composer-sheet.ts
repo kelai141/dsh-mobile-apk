@@ -1,3 +1,4 @@
+import { COMPOSER_BACK_EVENT } from './back-stack.ts'
 import { zh, en, type ComposerSheetKey } from './composer-sheet.locales.ts'
 import { visibleViewport } from '../composer-popup-guard.ts'
 import {
@@ -45,6 +46,8 @@ import {
 const FILE_INPUT_SELECTOR = 'input[type="file"][multiple]'
 
 const BACKDROP_ATTR = 'data-dsh-composer-sheet-backdrop'
+const WAITING_IME_ATTR = 'data-dsh-composer-sheet-waiting-ime'
+const IME_SETTLE_MAX_MS = 750
 const PANEL_ATTR = 'data-dsh-composer-sheet-panel'
 const TILES_ATTR = 'data-dsh-composer-sheet-tiles'
 const TILE_ATTR = 'data-dsh-composer-sheet-tile'
@@ -278,6 +281,7 @@ export class ComposerSheet {
   }
 
   private backdrop: HTMLElement | null = null
+  private imeRevealTimer: number | undefined
   /** 面板里的回执位（每次 open 重建，close 时置空）。 */
   private status: HTMLElement | null = null
   private addButton: HTMLElement | null = null
@@ -412,9 +416,7 @@ export class ComposerSheet {
     this.close()
   }
 
-  private readonly onPopState = (): void => {
-    if (this.backdrop !== null) this.close()
-  }
+
 
   attach(): void {
     if (this.attached) return
@@ -424,7 +426,6 @@ export class ComposerSheet {
       document.addEventListener('click', this.onClickCapture, true)
       document.addEventListener('pointerdown', this.onBackdropPointerDown, true)
       document.addEventListener('keydown', this.onKeyDown, true)
-      window.addEventListener('popstate', this.onPopState)
       // 「+」会随合成器重挂载（会话切换 / hero 与 dock 互切）：只盯「出现了一个带 listbox 的按钮」，
       // 不做无条件全文档查询（与 top-bar-fold 同一克制）。
       this.observer = new MutationObserver((records) => { this.onMutations(records) })
@@ -442,7 +443,6 @@ export class ComposerSheet {
     document.removeEventListener('click', this.onClickCapture, true)
     document.removeEventListener('pointerdown', this.onBackdropPointerDown, true)
     document.removeEventListener('keydown', this.onKeyDown, true)
-    window.removeEventListener('popstate', this.onPopState)
     this.observer?.disconnect()
     this.observer = null
     this.patchScheduled = false
@@ -505,6 +505,12 @@ export class ComposerSheet {
     const sheetForm = this.sheetFormRequested()
     const backdrop = document.createElement('div')
     backdrop.setAttribute(BACKDROP_ATTR, '')
+    if (sheetForm && this.keyboardInset() > 0) backdrop.setAttribute(WAITING_IME_ATTR, '')
+    backdrop.addEventListener(COMPOSER_BACK_EVENT, event => {
+      if (this.backdrop !== backdrop) return
+      event.preventDefault()
+      this.close()
+    })
     backdrop.setAttribute(FORM_ATTR, sheetForm ? FORM_SHEET : FORM_CARD)
     backdrop.setAttribute('role', 'presentation')
 
@@ -535,7 +541,9 @@ export class ComposerSheet {
     // issue #929：等映射读完**再**压焦点。旧实现用 `void` 丢掉了 Promise，
     // 紧接着的 blurActiveEditor() 会在读菜单**之前**跑 —— 等于又白读一次。
     const generation = this.generation
-    void this.fillRows(rows).finally(() => {
+    const filling = this.fillRows(rows)
+    if (backdrop.hasAttribute(WAITING_IME_ATTR)) this.dismissIme()
+    void filling.finally(() => {
       // issue #999：收尾只在「这次打开的 sheet 还开着」时做 —— 代次没变，且这块
       // backdrop 仍是当前那块、还挂在文档里。用户已经关掉的话，这里的 blur 会打断
       // 他此刻的输入（键盘自己缩回）。
@@ -547,12 +555,36 @@ export class ComposerSheet {
       this.blurActiveEditor()
       // 行到齐之后重算 peek：行高只有真实行才量得到（打开瞬间还没有行）。
       this.relayoutSheet()
-      // 焦点进入第一项：必须放在**压焦点之后**。
-      // 写在打开时同步段会被这里的 blurActiveEditor 清掉（实测 activeElement 退回 body）。
-      // 瓦片是 <button>，focus 不会唤起软键盘（编辑器才是会被唤起的那个）。
-      const first = this.panel()?.querySelector<HTMLElement>('[' + TILE_ATTR + ']')
-      if (first !== null && first !== undefined) first.focus({ preventScroll: true })
+      if (backdrop.hasAttribute(WAITING_IME_ATTR) && this.keyboardInset() > 0) {
+        this.imeRevealTimer ??= window.setTimeout(() => this.revealPanel(), IME_SETTLE_MAX_MS)
+      } else {
+        this.revealPanel()
+      }
     })
+  }
+
+  private dismissIme(): void {
+    try {
+      const bridge = window.androidBridge
+      if (bridge?.dismissWebIme === undefined) return
+      // fillRows has started the upstream menu with its editor focused. Android
+      // can now close the IME while React loads the menu rows.
+      bridge.dismissWebIme()
+      this.imeRevealTimer = window.setTimeout(() => this.revealPanel(), IME_SETTLE_MAX_MS)
+    } catch {
+      // An older shell or an unavailable bridge still uses the blur path.
+    }
+  }
+
+  private revealPanel(): void {
+    window.clearTimeout(this.imeRevealTimer)
+    this.imeRevealTimer = undefined
+    this.backdrop?.removeAttribute(WAITING_IME_ATTR)
+    if (!this.borrowing) this.panel()?.querySelector<HTMLElement>('[' + TILE_ATTR + ']')?.focus({ preventScroll: true })
+  }
+
+  private readonly onSheetIme = (): void => {
+    if (this.imeRevealTimer !== undefined && this.keyboardInset() === 0) this.revealPanel()
   }
 
   /**
@@ -1049,9 +1081,9 @@ export class ComposerSheet {
     return FEELS[id] ?? (FEELS['A'] as SheetFeel)
   }
 
-  /** 返回浏览器视口与宿主键盘边界的交集。 */
+  /** The fixed backdrop follows the layout viewport, including during IME motion. */
   private viewportHeight(): number {
-    return visibleViewport()?.height ?? window.innerHeight
+    return window.innerHeight
   }
 
   /** 软键盘抬起的距离：innerHeight 与可见区（height + offsetTop）之差。 */
@@ -1061,14 +1093,7 @@ export class ComposerSheet {
     return Math.max(0, Math.round(window.innerHeight - (vv.height + vv.top)))
   }
 
-  /** 把键盘抬起量写进 --dsh-sheet-bottom，让面板贴住可见区底边。 */
-  private applyViewportVars(): void {
-    const panel = this.panel()
-    if (panel === null) return
-    panel.style.setProperty('--dsh-sheet-bottom', this.keyboardInset() + 'px')
-  }
-
-  /** 展开上限：0.88 × 可见视口高，且不小于 peek。 */
+  /** 展开上限取整张遮罩的高度。 */
   private maxHeight(): number {
     const cap = Math.round(this.viewportHeight() * MAX_HEIGHT_RATIO)
     return Math.max(this.peekHeight(), cap)
@@ -1181,7 +1206,6 @@ export class ComposerSheet {
   private activateSheet(panel: HTMLElement): void {
     this.sheetPanel = panel
     this.invalidateDragGeometry()
-    this.applyViewportVars()
     this.setHeight(this.peekHeight())
     this.writeHeights('peek')
     panel.addEventListener('touchstart', this.onSheetTouchStart, { passive: true })
@@ -1190,11 +1214,8 @@ export class ComposerSheet {
     panel.addEventListener('touchend', this.onSheetTouchEnd)
     panel.addEventListener('touchcancel', this.onSheetTouchCancel)
     window.addEventListener('resize', this.onSheetViewport)
-    window.addEventListener('dsh-page-ime-change', this.onSheetViewport)
-    if (typeof window.visualViewport === 'object' && window.visualViewport !== null) {
-      window.visualViewport.addEventListener('resize', this.onSheetViewport)
-      window.visualViewport.addEventListener('scroll', this.onSheetViewport)
-    }
+    window.addEventListener('dsh-page-ime-change', this.onSheetIme)
+    window.visualViewport?.addEventListener('resize', this.onSheetIme)
     // 字体加载完成会改行高 ⇒ peek 跟着变。rowHeightPx 只在首次量到真行时写入，
     // 而那次量到的可能是回退字体；这里在字体就绪后重新采样一次并重算。
     // （jsdom / 老内核没有 document.fonts：存在性判断后跳过，不改变原有行为。）
@@ -1220,11 +1241,10 @@ export class ComposerSheet {
       this.settleTimer = undefined
     }
     window.removeEventListener('resize', this.onSheetViewport)
-    window.removeEventListener('dsh-page-ime-change', this.onSheetViewport)
-    if (typeof window.visualViewport === 'object' && window.visualViewport !== null) {
-      window.visualViewport.removeEventListener('resize', this.onSheetViewport)
-      window.visualViewport.removeEventListener('scroll', this.onSheetViewport)
-    }
+    window.removeEventListener('dsh-page-ime-change', this.onSheetIme)
+    window.visualViewport?.removeEventListener('resize', this.onSheetIme)
+    window.clearTimeout(this.imeRevealTimer)
+    this.imeRevealTimer = undefined
     // 调试取数口随面板一起失效：留着会把竖屏的 peek/max 带进横屏读到的旧值。
     delete (window as unknown as { __dshComposerSheet?: unknown }).__dshComposerSheet
     if (panel === null) return
@@ -1250,7 +1270,6 @@ export class ComposerSheet {
     if (panel === null) return
     // 行到齐（fillRows 收尾）/ 视口变化都会走到这里：几何缓存必须随之失效。
     this.invalidateDragGeometry()
-    this.applyViewportVars()
     const peek = this.peekHeight()
     const max = this.maxHeight()
     const phase = panel.getAttribute(PHASE_ATTR) === 'expanded' ? 'expanded' : 'peek'
@@ -1288,7 +1307,7 @@ export class ComposerSheet {
   }
 
   private readonly onSheetViewport = (): void => {
-    // 视口变化（软键盘弹收 / visualViewport resize / 转屏）会让 max 变 —— 拖拽中也要失效。
+    // Only layout viewport changes can move the bottom sheet or change its height cap.
     this.invalidateDragGeometry()
     this.relayoutSheet()
   }

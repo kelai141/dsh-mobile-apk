@@ -1269,16 +1269,29 @@ class MainActivity : ComponentActivity() {
     pushWebInsets()
   }
 
-  /**
-   * 返回策略接线（计划 §5.1 方案 1）：legacy onBackPressed() 覆写升级为
-   * OnBackPressedCallback。回调内**同步**读缓存布尔——evaluateJavascript 是异步 API，
-   * 不能在返回回调里现问页面，页面信号只能由 JS 主动推送。
-   *
-   * 三级判定见 BackGate.decide：① 跨文档历史（canGoBack()，本机 WebView 不认
-   * same-document 条目，故只作历史腿）→ goBack()；② 页面层栈 → JS 执行关闭并**消费**
-   * （即便 JS 侧没找到关闭控件也不退出：「观测不到/关不掉的层不得变成误退应用」）；
-   * ③ 都没有 → 关掉本回调后重新 dispatch，落回 Activity 默认 finish。
-   */
+  private var pendingBack: Any? = null
+  private var backHistoryPending = false
+
+  private fun resetBackDocument() {
+    pendingBack = null
+    backHistoryPending = false
+    backGateState.onPageStarted()
+  }
+
+  private fun beginBackRequest(view: WebView): Any {
+    val request = Any()
+    pendingBack = request
+    view.postDelayed({
+      if (pendingBack === request) {
+        pendingBack = null
+        backHistoryPending = false
+        if (BuildConfig.DEBUG) Log.w(BackGate.TAG, "source=android result=timeout")
+      }
+    }, 1500)
+    return request
+  }
+
+  /** Android buttons and committed predictive gestures share this dispatcher. */
   private fun installBackGate() {
     onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
       override fun handleOnBackStarted(backEvent: androidx.activity.BackEventCompat) {
@@ -1287,10 +1300,12 @@ class MainActivity : ComponentActivity() {
         if (guideViewReady && guideView.visibility == View.VISIBLE) guideRenderer.management.beginBack()
       }
       override fun handleOnBackProgressed(backEvent: androidx.activity.BackEventCompat) {
-        if (splashOverlay?.isActive == true) return
+        if (splashOverlay?.isActive == true || !guideViewReady || guideView.visibility != View.VISIBLE) return
         guideRenderer.management.progressBack(backEvent.progress)
       }
-      override fun handleOnBackCancelled() { guideRenderer.management.cancelBack() }
+      override fun handleOnBackCancelled() {
+        if (guideViewReady && guideView.visibility == View.VISIBLE) guideRenderer.management.cancelBack()
+      }
       override fun handleOnBackPressed() {
         // 0.14.9：开屏视频播放时，系统返回（手势或按键）先关闭视频并消费本次返回。
         if (splashOverlay?.isActive == true) {
@@ -1298,25 +1313,53 @@ class MainActivity : ComponentActivity() {
           return
         }
         if (guideViewReady && guideView.visibility == View.VISIBLE && guideRenderer.management.back()) return
-        val canGoBack = webViewReady && webView.canGoBack()
-        val pageStack = webViewReady && backGateState.pageStackAvailable
-        val decision = BackGate.decide(canGoBack, pageStack)
-        Log.i(
-          BackGate.TAG,
-          "back: canGoBack=" + canGoBack + " pageStack=" + pageStack +
-            " depth=" + backGateState.pageStackDepth + " -> " + decision.name,
-        )
+        if (guideViewReady && guideView.visibility == View.VISIBLE) {
+          dispatchActivityBack()
+          return
+        }
+        if (!webViewReady || webView.visibility != View.VISIBLE || pageRecovery.rendererGone) {
+          dispatchActivityBack()
+          return
+        }
+        if (pendingBack != null) return
+        val view = webView
+        if (!isEngineSource(trustedTopFrameUrl)) {
+          applyBackDecision(view, BackGate.decide(view.canGoBack(), "\"unavailable\""))
+          return
+        }
+        // Keep one in-flight press per document. Repeated key events during the same
+        // renderer turn cannot close a second surface or dispatch two history steps.
+        val request = beginBackRequest(view)
+        view.evaluateJavascript(BackGate.DISPATCH_SCRIPT) { result ->
+          if (pendingBack !== request) return@evaluateJavascript
+          pendingBack = null
+          if (!pageUiActive || view !== webView || view.visibility != View.VISIBLE ||
+            (guideViewReady && guideView.visibility == View.VISIBLE) || splashOverlay?.isActive == true
+          ) return@evaluateJavascript
+          val decision = BackGate.decide(view.canGoBack(), result, backGateState.pageStackAvailable)
+          if (BuildConfig.DEBUG) Log.i(BackGate.TAG, "source=android pageResult=$result decision=${decision.name}")
+          applyBackDecision(view, decision)
+        }
+      }
+
+      private fun applyBackDecision(view: WebView, decision: BackDecision) {
         when (decision) {
-          BackDecision.GO_BACK_HISTORY -> webView.goBack()
-          BackDecision.DISPATCH_PAGE_STACK -> webView.evaluateJavascript(BackGate.DISPATCH_SCRIPT, null)
-          BackDecision.FINISH_ACTIVITY -> {
-            // 层穷尽：交回 Activity 默认行为。重新 dispatch（而非直接 finish()）保持与
-            // 其它 OnBackPressedCallback 的次序语义一致；dispatch 返回后复位，多窗口或
-            // 延迟 finish 时下一次返回仍由本回调处理。
-            isEnabled = false
-            onBackPressedDispatcher.onBackPressed()
-            isEnabled = true
+          BackDecision.CONSUME -> Unit
+          BackDecision.GO_BACK_HISTORY -> {
+            backHistoryPending = true
+            beginBackRequest(view)
+            view.goBack()
           }
+          BackDecision.FINISH_ACTIVITY -> dispatchActivityBack()
+        }
+      }
+
+      private fun dispatchActivityBack() {
+        isEnabled = false
+        try {
+          onBackPressedDispatcher.onBackPressed()
+        } finally {
+          isEnabled = true
         }
       }
     })
@@ -1561,7 +1604,7 @@ class MainActivity : ComponentActivity() {
         engineFlow.stopMonitoring()
         if (webViewRef === view) webViewRef = null
         themeRetryRunnable?.let { view.removeCallbacks(it) }
-        backGateState.onPageStarted()
+        resetBackDocument()
         webFrameCommitted = false
         webRevealPending = false
         (view.parent as? ViewGroup)?.removeView(view)
@@ -1585,7 +1628,7 @@ class MainActivity : ComponentActivity() {
         trustedTopFrameUrl = url
         if (isEngineSource(url)) enginePageFailed = false
         // 新文档：上一文档的层栈信号作废（页面插件在新文档里重新推）。
-        if (isEngineSource(url)) backGateState.onPageStarted()
+        resetBackDocument()
         // 新文档＝还没有任何像素：露出请求若已发生，回到「透明等首帧」状态（#242）。
         overlayDocumentReady = false
         if (isEngineSource(url)) webFrameCommitted = false
@@ -1602,6 +1645,14 @@ class MainActivity : ComponentActivity() {
         if (isEngineSource(url ?: "")) {
           webFrameCommitted = true
           onWebFrameCommitted()
+        }
+      }
+
+      override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+        super.doUpdateVisitedHistory(view, url, isReload)
+        if (view === webView && backHistoryPending) {
+          backHistoryPending = false
+          pendingBack = null
         }
       }
 
@@ -1763,6 +1814,13 @@ class MainActivity : ComponentActivity() {
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         },
         // ST-10：桥 setter 走 ShellState.ImmersiveMode（偏好 + 应用成对，单一真源）。
+        onDismissWebIme = {
+          runOnUiThread {
+            if (pageUiActive && webView.visibility == View.VISIBLE && isEngineSource(trustedTopFrameUrl) &&
+              (!guideViewReady || guideView.visibility != View.VISIBLE)
+            ) hideSoftInput()
+          }
+        },
         onSetImmersiveRequest = { enable -> ImmersiveMode.setEnabled(this, enable) },
         // UI language: the shell preference is the truth source; the setter also
         // mirrors it into the dsh profile patch so the engine UI follows.
@@ -2360,7 +2418,7 @@ class MainActivity : ComponentActivity() {
     }
   }
 
-  /** Hide Android's soft keyboard before replacing the WebView with the guide. */
+  /** Dismiss the soft keyboard for a shell or WebUI transition. */
   internal fun hideSoftInput() {
     try {
       WindowInsetsControllerCompat(window, window.decorView).hide(WindowInsetsCompat.Type.ime())

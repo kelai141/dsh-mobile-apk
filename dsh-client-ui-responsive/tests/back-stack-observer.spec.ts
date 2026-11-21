@@ -92,12 +92,10 @@ describe('审计 §7.3：childList 是必需的（层是靠插入进场的）', 
     attributeOnlyObserver.disconnect()
   })
 
-  it('漏层的后果是壳侧不调 __dshBack：整栈为空时返回键直接 finish 应用', async () => {
+  it('同步兼容桥的可用性，供旧版 APK 使用', async () => {
     signal.attach()
     await flush()
     expect(uplink).toHaveBeenLastCalledWith(false)
-    // 壳侧 BackGate.decide 的第三支：canGoBack=false 且 pageStackAvailable=false → finish。
-    // 页面这一侧能证明的就是「有没有层」这一个布尔信号。
     expect(window.__dshBackDepth).toBe(0)
 
     commitLayer(document.body, 'div', { role: 'dialog', 'aria-modal': 'true' })
@@ -116,7 +114,7 @@ describe('审计 §7.3：观察者回调合帧，一阵变更只检测一次', (
     // 五批变更，每批都让出到微任务（观察者回调照常派发），但**不**让出到宏任务 ——
     // 这正是流式渲染的形状：一个 rAF 窗口里上游提交了好几次。
     for (let batch = 0; batch < 5; batch++) {
-      document.body.append(document.createElement('span'))
+      commitLayer(document.body, 'div', { role: 'dialog', 'aria-modal': 'true' })
       await Promise.resolve()
       await Promise.resolve()
     }

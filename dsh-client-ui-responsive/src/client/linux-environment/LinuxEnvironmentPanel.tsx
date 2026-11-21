@@ -7,7 +7,7 @@ export function LinuxPanelIcon({ size }: { size: number }) {
 
 export function LinuxEnvironmentPanel({ close }: { close(): void }) {
   return (
-    <div className="dsh-linux-panel">
+    <div className="dsh-linux-panel" data-dsh-linux-environment-panel="">
       <LinuxEnvironmentSection close={close} sidebar />
     </div>
   )

@@ -19,7 +19,8 @@
  *  - **授权只能由用户在 Shizuku 内完成**（被提权方不得自改授权），壳侧只负责把人送到界面；
  *    回到本页每 2 秒轮询一次状态，授权完成会自动收敛，不需要用户手动点刷新。
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { SUBLAYER_POP_EVENT } from '../mobile/back-stack.ts'
 import { useShellState } from '../mobile/use-shell-state.ts'
 import { describeCallReason } from '../user-copy.ts'
 import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -1298,16 +1299,16 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
    * 于是容器「点它」在真机上等于什么都没发生（设备实测：系统返回后仍停在第三层）。
    * 契约因此改成事件：容器只管说「退一层」，怎么退由本页自己决定。
    */
-  useEffect(() => {
-    if (view === 'home') return
-    const node = document.querySelector('[data-dsh-settings-sublayer]')
+  const sublayer = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const node = sublayer.current
     if (node === null) return
     const onPop = (event: Event): void => {
       event.preventDefault()
       setView('home')
     }
-    node.addEventListener('dsh-settings-sublayer-pop', onPop)
-    return () => { node.removeEventListener('dsh-settings-sublayer-pop', onPop) }
+    node.addEventListener(SUBLAYER_POP_EVENT, onPop)
+    return () => { node.removeEventListener(SUBLAYER_POP_EVENT, onPop) }
   }, [view])
 
   /** 当前下级页的标题（上游注册名之外的本页自造名，中英各一份）。 */
@@ -1323,6 +1324,7 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
       data-native-control-protected=""
       /* 登记「本分区自己还有一层下级页」：分层容器（mobile/settings-nav.ts）读这两个属性决定
          系统返回弹本层还是直接退到设置首页。属性缺席 = 停在「手机控制」这一层。 */
+      ref={sublayer}
       data-dsh-settings-sublayer=""
       data-dsh-settings-sublayer-title={viewTitle}
       {...(vdisplay.displayId === undefined ? {} : { 'data-display-id': String(vdisplay.displayId) })}
