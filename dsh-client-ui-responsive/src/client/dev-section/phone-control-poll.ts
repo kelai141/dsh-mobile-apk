@@ -24,12 +24,12 @@ export function watchPhoneControlPanel(
   let nextAccessibility = 0
   let observed = typeof IntersectionObserver !== 'function'
 
-  const tick = (): void => {
+  const tick = (due = 0): void => {
     if (document.visibilityState !== 'visible') {
       update()
       return
     }
-    const now = performance.now()
+    const now = Math.max(due, performance.now())
     if (nextFast <= now) {
       refresh.fast()
       nextFast = now + fastInterval
@@ -38,7 +38,9 @@ export function watchPhoneControlPanel(
       refresh.accessibility()
       nextAccessibility = now + accessibilityInterval
     }
-    timer = window.setTimeout(tick, Math.max(1, Math.ceil(Math.min(nextFast, nextAccessibility) - performance.now())))
+    const next = Math.min(nextFast, nextAccessibility)
+    const delay = Math.max(1, Math.ceil(next - Math.max(now, performance.now())))
+    timer = window.setTimeout(() => tick(next), delay)
   }
 
   const update = (force = false): void => {
