@@ -212,6 +212,25 @@ jobs:
         run: |
           yes | sudo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" >/dev/null 2>&1 || true
           find "${ANDROID_HOME}/build-tools" -maxdepth 2 -type f -name apksigner | tail -1
+      - name: 准备双 ABI 的钉定原生工具链
+        shell: bash
+        run: |
+          set -euo pipefail
+          facts=$(node -p 'JSON.stringify(require("./native/phone-control-core/build-config.json"))')
+          read -r rust_version ndk_version arm_target x86_target < <(node -e '
+            const config = JSON.parse(process.argv[1]);
+            console.log(config.compiler.rustc, config.ndk.version,
+              config.abis["arm64-v8a"].rustTarget, config.abis.x86_64.rustTarget)
+          ' "$facts")
+          rustup toolchain install "$rust_version" --profile minimal --target "$arm_target,$x86_target"
+          ndk="$ANDROID_HOME/ndk/$ndk_version"
+          readelf="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          if [[ ! -x "$readelf" ]]; then
+            sudo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$ndk_version"
+          fi
+          test -x "$readelf"
+          # The runner exports a different preinstalled NDK. Override it for Gradle's native tasks.
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
       - name: 下载并校验 Bionilux 双 ABI loader
         shell: bash
         env:
