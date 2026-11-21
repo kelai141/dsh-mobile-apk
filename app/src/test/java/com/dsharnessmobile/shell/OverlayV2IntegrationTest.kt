@@ -28,6 +28,17 @@ class OverlayV2IntegrationTest {
     assertTrue(service.indexOf("val targeted = matchesTargetAgent(agentId)") < service.indexOf("currentAgentId = agentId"))
     assertTrue(service.indexOf("if (!targeted) return") < service.indexOf("cachedV2?.onAgentStatus(agentId, running)"))
   }
+
+  @Test fun notificationsAndLivePreviewShareTheOnlyDirectoryObserver() {
+    val live = source("OverlayLiveFeed.kt")
+    val notifications = source("NotifyStore.kt")
+    assertFalse(live.contains("object : FileObserver"))
+    assertTrue(live.contains("NotifyStore.watchOverlayFiles(svc)"))
+    assertTrue(live.contains("watchSubscription?.close()"))
+    assertTrue(notifications.contains("overlayFileEvents?.invoke(event, path)"))
+    assertTrue(notifications.contains("if (overlayFileEvents === listener) overlayFileEvents = null"))
+    assertTrue(live.contains("val lastNewline = buf.lastIndexOf"))
+  }
   @Test fun realUiPreferencesDoNotStopDataChannels() {
     val body = source("OverlayService.kt").substringAfter("private fun switchOverlayUi() {").substringBefore("// ── 协作类")
     assertFalse(body.contains("v2?.destroy()"))
