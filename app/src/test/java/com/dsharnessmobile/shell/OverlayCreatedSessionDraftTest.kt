@@ -38,9 +38,12 @@ class OverlayCreatedSessionDraftTest {
     assertTrue(changed.contains("createdDraftMigration?.takeIf { it.sessionId == svc.activeSessionId }"))
     assertTrue(changed.contains("createdDraftMigration = null"))
     assertTrue(changed.contains("val restoredDraft = migrated ?: sessionDrafts[svc.activeSessionId]"))
-    assertTrue(changed.contains("if (restoredDraft != null) restoreDraftSnapshot(restoredDraft)"))
+    assertTrue(changed.contains("if (previousSession == svc.activeSessionId) return"))
+    assertTrue(changed.contains("if (migrated != null) sessionDrafts.remove(previousSession)"))
+    assertTrue(changed.contains("if (restoredDraft != null) applyDraftToComposer(c, restoredDraft)"))
+    assertTrue(changed.contains("else c.setInputText(\"\")"))
     assertTrue("draft/selection is restored before observers can accept the new generation",
-      changed.indexOf("restoreDraftSnapshot(restoredDraft)") < changed.indexOf("sessionGeneration++"))
+      changed.indexOf("applyDraftToComposer(c, restoredDraft)") < changed.indexOf("sessionGeneration++"))
     val restore = section(v2, "  internal fun restoreDraftSnapshot(", "  internal fun suspendUi()")
     assertTrue(restore.contains("snapshot.matchesSession(svc.activeSessionId)"))
     assertTrue(restore.contains("c.setInputText(snapshot.text)"))
@@ -94,6 +97,7 @@ class OverlayCreatedSessionDraftTest {
       " && ok &&" to " &&",
       " && svc.activeSessionId == admittedSession" to "",
       " && composer?.inputText() == sentDraft" to "",
+      "else c.setInputText(\"\")" to "else Unit",
       "input?.setSelection(selection.first, selection.second)" to "Unit",
       "createdDraftMigration?.takeIf { it.sessionId == svc.activeSessionId }" to "createdDraftMigration",
     )) {

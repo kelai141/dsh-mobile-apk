@@ -1260,7 +1260,6 @@ class OverlayService : Service() {
   /** 页面宿主给出的**权威**会话 id（P0-1：只进会话域，绝不与 agentId 互写）。 */
   internal fun adoptPageSession(sessionId: String) {
     val sid = sessionId.trim()
-    if (sid.isEmpty()) return
     currentSessionId = sid
     if (sid == activeSessionId) return
     activeSessionId = sid

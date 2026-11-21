@@ -1700,7 +1700,10 @@ internal class OverlayV2(private val svc: OverlayService) {
             val requestEpoch = drawerRetryToken
             OverlayPageHost.newSession { ok ->
               if (!ok) svc.flashStatus(t("无法新建会话", "Could not start a new conversation"))
-              else if (drawerMode == DrawerMode.SESSIONS && drawerRetryToken == requestEpoch) closeDrawer(animated = false)
+              else if (drawerMode == DrawerMode.SESSIONS && drawerRetryToken == requestEpoch) {
+                closeDrawer(animated = false)
+                svc.adoptPageSession("")
+              }
             }
           } else {
             svc.flashStatus(t("新建会话需要主界面在线", "Start a conversation in the main app"))
@@ -1943,15 +1946,18 @@ internal class OverlayV2(private val svc: OverlayService) {
   internal fun onSessionChanged() {
     if (destroyed) return
     val previousSession = previousSessionId
-    if (previousSession.isNotEmpty() && previousSession != svc.activeSessionId) {
-      val previousDraft = exportDraftSnapshot()
-      sessionDrafts[previousSession] = previousDraft.copy(sessionId = previousSession)
-    }
+    if (previousSession == svc.activeSessionId) return
+    val previousDraft = exportDraftSnapshot()
+    sessionDrafts[previousSession] = previousDraft.copy(sessionId = previousSession)
     previousSessionId = svc.activeSessionId
     val migrated = createdDraftMigration?.takeIf { it.sessionId == svc.activeSessionId }
     createdDraftMigration = null
+    if (migrated != null) sessionDrafts.remove(previousSession)
     val restoredDraft = migrated ?: sessionDrafts[svc.activeSessionId]
-    if (restoredDraft != null) restoreDraftSnapshot(restoredDraft)
+    composer?.let { c ->
+      if (restoredDraft != null) applyDraftToComposer(c, restoredDraft)
+      else c.setInputText("")
+    }
     sessionGeneration++
     refreshPageState()
     scheduleRender()
@@ -2390,7 +2396,7 @@ internal class OverlayV2(private val svc: OverlayService) {
   // 会话代次：每次会话切换自增，用来判「迟到回执是否还属于当前会话」。
   private var sessionGeneration = 0
   // 上一次观察到的会话 id（用于把草稿存回它真正归属的那个会话）。
-  private var previousSessionId = ""
+  private var previousSessionId = svc.activeSessionId
   // 上一条发送已获准的代次（建会话路径会 +1，让迁移后的状态被认领）。
   // 引擎为当前发送新建会话时暂存的草稿，等 onSessionChanged 认领后置空。
   private var createdDraftMigration: OverlayV2DraftSnapshot? = null
@@ -2430,11 +2436,15 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (destroyed || !snapshot.matchesSession(svc.activeSessionId)) return false
     showComposer(focusInput = false)
     val c = composer ?: return false
+    applyDraftToComposer(c, snapshot)
+    return true
+  }
+
+  private fun applyDraftToComposer(c: OverlayComposer, snapshot: OverlayV2DraftSnapshot) {
     c.setInputText(snapshot.text)
     val input = c.view.findViewWithTag<android.widget.EditText>("overlay-composer-input")
     val selection = snapshot.selection()
     input?.setSelection(selection.first, selection.second)
-    return true
   }
 
   /** 仅暂挂 UI；保留同一个动作观察者与草稿对象，供 Service 原对象回滚复用。 */
