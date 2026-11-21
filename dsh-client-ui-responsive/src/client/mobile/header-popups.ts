@@ -15,6 +15,8 @@ const SUBAGENT_PANEL = '[data-subagent-panel]'
 const SUBAGENT_TRIGGER = '[data-subagent-action] button[aria-expanded="true"]'
 const VIEW_OPTIONS_MENU = '[role="menu"][class*="_viewOptionsMenu"]'
 const VIEW_OPTIONS_TRIGGER = '[data-sidebar-workspace-header] svg[data-icon="dsw-icon-sliders-two-outline-regular"]'
+export const SESSION_MENU_TRIGGER = 'button[data-context-menu-trigger][class*="headerMenuButton"]'
+const SESSION_MENU = '[data-context-menu][role="menu"]'
 const MARKER = 'data-dsh-header-popup'
 const OWNED_STYLES = ['position', 'top', 'left', 'right', 'width', 'max-width', 'max-height', 'overflow-y', 'z-index'] as const
 const VIEWPORT_MARGIN = 12
@@ -36,12 +38,20 @@ interface StyleSnapshot {
   readonly priority: string
 }
 
+export function sessionHeaderMenu(trigger: Element | null | undefined): HTMLElement | null {
+  if (trigger?.getAttribute('aria-expanded') !== 'true') return null
+  const id = trigger.getAttribute('aria-controls')
+  const menu = id ? document.getElementById(id) : null
+  return menu?.matches(SESSION_MENU) ? menu : null
+}
+
 /** Adapt an expanded background-jobs menu to the visible mobile viewport. */
 export class HeaderPopups {
   private observer: MutationObserver | null = null
   private active: HTMLUListElement | null = null
   private catalog: HTMLElement | null = null
   private viewOptions: HTMLElement | null = null
+  private sessionMenu: HTMLElement | null = null
   private original = new Map<string, StyleSnapshot>()
   private attached = false
   private scheduled = false
@@ -49,6 +59,11 @@ export class HeaderPopups {
   private generation = 0
 
   private readonly onViewportChange = (): void => { this.schedule() }
+  private readonly onImeChange = (): void => {
+    if (this.active !== null || this.catalog !== null || this.viewOptions !== null || this.sessionMenu !== null) {
+      this.schedule()
+    }
+  }
   /**
    * Scroll handler.
    *
@@ -61,7 +76,7 @@ export class HeaderPopups {
   private readonly onScroll = (event: Event): void => {
     const affects = (panel: HTMLElement | null): boolean =>
       panel !== null && !(event.target instanceof Node && panel.contains(event.target))
-    if (this.active !== null || affects(this.catalog) || affects(this.viewOptions)) {
+    if (this.active !== null || affects(this.catalog) || affects(this.viewOptions) || affects(this.sessionMenu)) {
       this.schedule()
     }
   }
@@ -78,6 +93,7 @@ export class HeaderPopups {
       attributeFilter: ['aria-expanded'],
     })
     window.addEventListener('resize', this.onViewportChange)
+    window.addEventListener('dsh-page-ime-change', this.onImeChange)
     window.addEventListener('scroll', this.onScroll, true)
     window.visualViewport?.addEventListener('resize', this.onViewportChange)
     window.visualViewport?.addEventListener('scroll', this.onViewportChange)
@@ -90,6 +106,7 @@ export class HeaderPopups {
     this.observer?.disconnect()
     this.observer = null
     window.removeEventListener('resize', this.onViewportChange)
+    window.removeEventListener('dsh-page-ime-change', this.onImeChange)
     window.removeEventListener('scroll', this.onScroll, true)
     window.visualViewport?.removeEventListener('resize', this.onViewportChange)
     window.visualViewport?.removeEventListener('scroll', this.onViewportChange)
@@ -99,8 +116,10 @@ export class HeaderPopups {
     this.restore()
     this.clearAnchoredStyles(this.catalog)
     this.clearAnchoredStyles(this.viewOptions)
+    this.clearAnchoredStyles(this.sessionMenu)
     this.catalog = null
     this.viewOptions = null
+    this.sessionMenu = null
   }
 
   private schedule(): void {
@@ -114,6 +133,7 @@ export class HeaderPopups {
       this.sync()
       this.syncCatalog()
       this.syncViewOptions()
+      this.syncSessionMenu()
     })
   }
 
@@ -145,8 +165,9 @@ export class HeaderPopups {
     const visual = window.visualViewport
     const viewportWidth = Math.round((visual?.width || document.documentElement.clientWidth || window.innerWidth))
     const viewportLeft = Math.round(visual?.offsetLeft ?? 0)
-    const viewportTop = Math.round(visual?.offsetTop ?? 0)
-    const viewportBottom = Math.round((visual?.offsetTop ?? 0) + (visual?.height ?? window.innerHeight))
+    const viewport = visibleViewport()
+    const viewportTop = viewport?.top ?? 0
+    const viewportBottom = viewport === null ? window.innerHeight : viewport.top + viewport.height
     const width = Math.max(1, Math.min(500, viewportWidth - VIEWPORT_MARGIN * 2))
     const viewportRight = viewportLeft + viewportWidth
     const left = Math.max(viewportLeft + VIEWPORT_MARGIN, Math.min(Math.round(rect.left), viewportRight - VIEWPORT_MARGIN - width))
@@ -185,24 +206,34 @@ export class HeaderPopups {
   }
 
   private syncCatalog(): void {
-    this.catalog = this.syncAnchoredPopup(this.catalog, SUBAGENT_PANEL, SUBAGENT_TRIGGER, 360, false)
+    const panel = document.querySelector<HTMLElement>(SUBAGENT_PANEL)
+    const trigger = panel ? document.querySelector(SUBAGENT_TRIGGER)?.closest('button') : null
+    this.catalog = this.syncAnchoredPopup(this.catalog, panel, trigger, 360, false)
   }
 
   private syncViewOptions(): void {
     // Modern WebViews already have the anchor-positioned Workspace menu.
     if (globalThis.CSS?.supports?.('top', 'anchor(bottom)')) return
-    this.viewOptions = this.syncAnchoredPopup(this.viewOptions, VIEW_OPTIONS_MENU, VIEW_OPTIONS_TRIGGER, 200, true)
+    const panel = document.querySelector<HTMLElement>(VIEW_OPTIONS_MENU)
+    const trigger = panel ? document.querySelector(VIEW_OPTIONS_TRIGGER)?.closest('button') : null
+    this.viewOptions = this.syncAnchoredPopup(this.viewOptions, panel, trigger, 200, true)
+  }
+
+  private syncSessionMenu(): void {
+    if (globalThis.CSS?.supports?.('top', 'anchor(bottom)')) return
+    const trigger = document.querySelector(`${SESSION_MENU_TRIGGER}[aria-expanded="true"]`)
+    const panel = sessionHeaderMenu(trigger)
+    this.sessionMenu = this.syncAnchoredPopup(this.sessionMenu, panel, trigger, 240, true)
   }
 
   private syncAnchoredPopup(
-    previous: HTMLElement | null, panelSelector: string, triggerSelector: string, preferredWidth: number, alignEnd: boolean,
+    previous: HTMLElement | null, panel: HTMLElement | null, trigger: Element | null | undefined,
+    preferredWidth: number, alignEnd: boolean,
   ): HTMLElement | null {
-    const panel = document.querySelector<HTMLElement>(panelSelector)
     if (panel !== previous) this.clearAnchoredStyles(previous)
     if (panel === null) return null
-    const trigger = document.querySelector(triggerSelector)?.closest('button') ?? null
     const viewport = visibleViewport()
-    if (trigger === null || viewport === null) {
+    if (!trigger || viewport === null) {
       this.clearAnchoredStyles(panel)
       return null
     }

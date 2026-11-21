@@ -19,8 +19,8 @@
  * 手势模式下没有可遮挡的栏，交互面不该凭空留出一条纯背景带。
  * 壳侧变量缺失时（桌面/旧壳）回落到保守值，再回落到 0px。
  *
- * Android resizes the WebView to the keyboard edge. The composer retains
- * only the part of the navigation padding still outside the IME.
+ * The Android host reports keyboard overlap without resizing the WebView.
+ * The keyboard motion owns the settled layout overlap. Older hosts supply the current overlap.
  *
  * #1782（用户真机 V2425A 1260x2800）：**键盘展开 + 输入框里有附件**时，输入框被抬到
  * 特别高。实测 ime=0px 时同样复现，问题出在
@@ -65,5 +65,25 @@ html [data-conversation-content][data-content-phase='hero'] > [data-conversation
 [data-composer-seat] {
   max-height: 100%;
   overflow-y: auto;
+}
+
+html[data-dsh-ime] {
+  --dsh-visible-ime-overlap: var(--dsh-android-page-ime-overlap, 0px);
+}
+
+html[data-dsh-ime-transition] {
+  --dsh-visible-ime-overlap: var(--dsh-page-ime-layout, var(--dsh-android-page-ime-target, 0px));
+}
+
+[data-dsh-ime-motion] {
+  clip-path: inset(0);
+}
+
+html:is([data-dsh-ime], [data-dsh-ime-transition]) [data-dsh-frame] {
+  height: max(0px, calc(100% - var(--dsh-visible-ime-overlap, 0px)));
+}
+
+html:is([data-dsh-ime], [data-dsh-ime-transition]) [data-dsh-settings-dialog] {
+  max-height: max(0px, calc(100% - var(--dsh-visible-ime-overlap, 0px)));
 }
 `;

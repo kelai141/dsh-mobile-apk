@@ -1,4 +1,4 @@
-import { HeaderPopups } from './header-popups.ts'
+import { HeaderPopups, SESSION_MENU_TRIGGER, sessionHeaderMenu } from './header-popups.ts'
 import { tr } from '../i18n.ts'
 
 /**
@@ -42,6 +42,9 @@ const UNMASKED_ATTR = 'data-dsh-topbar-fold-unmasked'
 /** 折叠箭头的标记属性。 */
 const ARROW_ATTR = 'data-dsh-topbar-fold-arrow'
 const EMPTY_ATTR = 'data-dsh-topbar-fold-empty'
+const MODE_ICON = 'svg[data-icon="dsw-icon-agent-preset-outline-regular"]'
+const MODE_SOURCE_ATTR = 'data-dsh-session-mode-source'
+const MODE_ROW_ATTR = 'data-dsh-session-menu-mode'
 const ID_PREFIX = 'dsh-conversation-options-'
 let nextPanelId = 0
 
@@ -94,6 +97,8 @@ export class TopBarFold {
   private arrow: HTMLButtonElement | null = null
   /** 箭头当前的宿主：视图标签条所在的那一行（父行，不是标签条本身）。 */
   private arrowRow: HTMLElement | null = null
+  private modeSource: HTMLElement | null = null
+  private modeRow: HTMLElement | null = null
   /** 容器上被我们覆盖掉的内联样式原值，解除时逐项写回。 */
   private readonly styleSnapshot = new Map<string, string>()
   private panelId: string | null = null
@@ -164,8 +169,13 @@ export class TopBarFold {
     this.attached = true
     this.headerPopups.attach()
     this.media = typeof window.matchMedia === 'function' ? window.matchMedia(MOBILE_QUERY) : null
-    this.observer = new MutationObserver(() => { this.schedule() })
-    this.observer.observe(document.body, { childList: true, subtree: true })
+    this.observer = new MutationObserver(records => {
+      if (records.some(record => record.type === 'childList' ||
+        (record.target instanceof Element && record.target.matches(SESSION_MENU_TRIGGER)))) this.schedule()
+    })
+    this.observer.observe(document.body, {
+      childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded'],
+    })
     this.formObserver = new MutationObserver(() => { this.schedule() })
     this.formObserver.observe(document.documentElement, {
       attributes: true,
@@ -249,7 +259,10 @@ export class TopBarFold {
       this.setTitleRowUncontained(false)
       this.titleRow = target.titleRow
     }
-    this.ensureArrow()
+    if (this.syncSessionMode()) {
+      if (this.open) this.setOpen(false)
+      this.removeArrow()
+    } else this.ensureArrow()
     this.syncCopy()
     // 重进手机竖屏默认收起（Spec 2.6）：容器换新时 this.open 未变，但首次接管必须从收起开始。
     //
@@ -275,6 +288,52 @@ export class TopBarFold {
     if (this.written !== null && this.written.every((value, index) => value === state[index])) return
     this.written = state
     this.applyOpen()
+  }
+
+  /** Show the existing read-only mode label in this header's ellipsis menu. */
+  private syncSessionMode(): boolean {
+    const container = this.container
+    const trigger = container?.closest('header')?.querySelector(SESSION_MENU_TRIGGER)
+    const icon = trigger ? container?.querySelector(MODE_ICON) : null
+    const label = icon?.parentElement ?? null
+    if (label !== this.modeSource) {
+      this.clearSessionMode()
+      this.modeSource = label
+      label?.setAttribute(MODE_SOURCE_ATTR, '')
+    }
+    if (!container || !label || !icon) return false
+
+    const menu = sessionHeaderMenu(trigger)
+    const viewport = menu?.querySelector<HTMLElement>(':scope > [role="presentation"]')
+    const name = label.textContent?.trim() ?? ''
+    if (!viewport || this.modeRow?.parentElement !== viewport) {
+      this.modeRow?.remove()
+      this.modeRow = null
+    }
+    if (viewport && !this.modeRow && name) {
+      const row = document.createElement('div')
+      row.setAttribute(MODE_ROW_ATTR, '')
+      row.setAttribute('role', 'presentation')
+      row.append(icon.cloneNode(true), document.createElement('span'))
+      this.modeRow = row
+      viewport.prepend(row)
+    }
+    const text = this.modeRow?.lastElementChild
+    if (text && text.textContent !== name) text.textContent = name
+    if (this.modeRow && this.modeRow.title !== label.title) this.modeRow.title = label.title
+
+    // Keep the fold for any additional contribution in the same seat.
+    for (let element = label; element !== container; element = element.parentElement!) {
+      if (element.previousElementSibling || element.nextElementSibling) return false
+    }
+    return true
+  }
+
+  private clearSessionMode(): void {
+    this.modeSource?.removeAttribute(MODE_SOURCE_ATTR)
+    this.modeSource = null
+    this.modeRow?.remove()
+    this.modeRow = null
   }
 
   /** 是否手机竖屏形态（与 form-marker.ts 的单一来源一致）。 */
@@ -378,8 +437,9 @@ export class TopBarFold {
   }
 
   private removeArrow(): void {
-    if (this.arrow !== null) this.arrow.removeEventListener('click', this.onArrowClick)
-    this.arrow?.remove()
+    if (this.arrow === null) return
+    this.arrow.removeEventListener('click', this.onArrowClick)
+    this.arrow.remove()
     this.arrow = null
     this.arrowRow = null
     // 箭头没了：缓存里的「已写状态」作废，下一次 syncState() 必须重写。
@@ -490,6 +550,7 @@ export class TopBarFold {
 
   /** 完全还原上游原样（状态、内联样式、标记、箭头）。 */
   private restore(): void {
+    this.clearSessionMode()
     this.removeArrow()
     this.setTitleRowUncontained(false)
     const container = this.container

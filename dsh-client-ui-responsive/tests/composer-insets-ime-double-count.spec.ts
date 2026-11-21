@@ -1,7 +1,7 @@
 // issue #783：输入框下方「大面积无意义留白」。
 //
 // 真因不是 padding 缺失，而是**同一个键盘高度被算了两次**：
-//   ① MainWebImeLayout 已经按 IME 遮挡缩短 WebView 布局视口；
+//   ① 页面外框已经按剩余 IME 遮挡缩短；
 //   ② 这里又用 `--dsh-android-ime-bottom` 给 composer seat 加了一份等高 padding。
 // 于是键盘弹起时输入卡下方多出一条与键盘等高的纯色空带，且 seat 被撑高后
 // `--dsh-composer-height` 跟着变大，把「回到底部」浮层又往上顶。
@@ -15,10 +15,21 @@
 import { expect, it } from 'vitest'
 import { COMPOSER_INSETS_CSS } from '../src/client/composer-insets.css'
 
-it('composer 底部 padding 不再叠加键盘高度（避免与壳侧布局收缩重复计算）', () => {
+it('composer 底部 padding 不叠加键盘高度', () => {
   expect(COMPOSER_INSETS_CSS).not.toMatch(/padding-bottom:[^;]*--dsh-android-ime-bottom/)
   expect(COMPOSER_INSETS_CSS).toMatch(/padding-bottom:\s*max\(0px,[^;]*- var\(--dsh-composer-ime-overlap, 0px\)/)
   expect(COMPOSER_INSETS_CSS).toMatch(/html\[data-dsh-ime\][^{]+\{\s*--dsh-composer-ime-overlap: var\(--dsh-android-ime-bottom, 0px\)/)
+})
+
+it('只按剩余 IME 遮挡缩短页面外框，旧壳没有遮挡变量时保持原高', () => {
+  expect(COMPOSER_INSETS_CSS).toContain('--dsh-visible-ime-overlap: var(--dsh-android-page-ime-overlap, 0px)')
+  expect(COMPOSER_INSETS_CSS).toMatch(/\[data-dsh-frame\]\s*\{\s*height: max\(0px, calc\(100% - var\(--dsh-visible-ime-overlap, 0px\)\)\)/)
+})
+
+it('开合期间使用动画控制器持有的布局高度，并裁剪会话内容', () => {
+  expect(COMPOSER_INSETS_CSS).toMatch(/html\[data-dsh-ime-transition\]\s*\{[^}]*var\(--dsh-page-ime-layout, var\(--dsh-android-page-ime-target, 0px\)\)/)
+  expect(COMPOSER_INSETS_CSS).toContain('html:is([data-dsh-ime], [data-dsh-ime-transition]) [data-dsh-frame]')
+  expect(COMPOSER_INSETS_CSS).toMatch(/\[data-dsh-ime-motion\]\s*\{[^}]*clip-path: inset\(0\)/)
 })
 
 it('欢迎区的上下留白按同一比例随可视区收放', () => {

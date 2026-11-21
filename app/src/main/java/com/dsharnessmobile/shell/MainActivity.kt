@@ -10,11 +10,13 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import android.os.Bundle
 import android.os.PowerManager
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.ConsoleMessage
 import android.webkit.JsResult
 import android.webkit.ValueCallback
@@ -79,11 +81,13 @@ class MainActivity : ComponentActivity() {
   private var webSystemBottomInset = 0
   private var webSystemTopInset = 0
   private var webImeBottomInset = 0
-  /** 上一次投递给页面的 composer 位移高度（CSS px），用于动画期逐帧推送去重。 */
+  private var webImeLayoutInset = 0
+  private var webImeTargetInset: Int? = null
+  private var webImeTransitionMs = 0L
   /** apk #182-2：横屏 + 侧边挖孔（short edge = 左右）时页面需要左右 inset 才能避让。 */
   private var webSystemLeftInset = 0
   private var webSystemRightInset = 0
-  /** Coalesces rapid IME animation callbacks into one WebView evaluation per UI turn. */
+  /** Coalesces inset updates queued on the same UI turn. */
   private var webInsetsPushScheduled = false
   /** 目录选择桥鉴权 token（进程级共享：MainActivity 重建/看门狗重启不更换，
    *  与引擎 env 的 DSH_PICK_TOKEN 始终一致；C1 修复）。 */
@@ -627,6 +631,9 @@ class MainActivity : ComponentActivity() {
     }
     // 沉浸式：内容延伸到系统栏区域（状态栏常态收起，边缘滑动临时呼出）。
     WindowCompat.setDecorFitsSystemWindows(window, false)
+    if (Build.VERSION.SDK_INT >= 30) {
+      window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+    }
     // 0.13.7fx-1（真机反馈）：只做 edge-to-edge 还不够——有挖孔/刘海的机器上，系统默认把窗口内容
     // 拦在挖孔下方，最顶部（原状态栏位置）留出一条窗口底色，用户看到「最顶部的黑带」。
     // 允许内容画进短边挖孔区，内容避让交给推给页面的 --dsh-android-system-top。
@@ -695,18 +702,40 @@ class MainActivity : ComponentActivity() {
     // The accessibility control service carries the model-facing browser* ops; it reaches this
     // Activity-owned isolated WebView only through the process-wide holder.
     BrowserHostHolder.host = browserHost
-    val imeLayout = MainWebImeLayout(window, root, webView)
+    val imeLayout = MainWebImeLayout(window, root)
     val imeType = WindowInsetsCompat.Type.ime()
     val imeAnimations = mutableSetOf<WindowInsetsAnimationCompat>()
-    fun updateWebIme(bottom: Int) {
-      imeLayout.update(bottom)
-      val cssBottom = pxToCssPx(bottom, resources.displayMetrics.density)
-      if (webImeBottomInset == cssBottom) return
-      webImeBottomInset = cssBottom
+    var lastImeBottom = 0
+    var lastImeTargetBottom = 0
+    fun updateWebImeTarget(bottom: Int, durationMs: Long = 0) {
+      if (Build.VERSION.SDK_INT < 30) return
+      lastImeTargetBottom = bottom
+      val target = pxToCssPx(imeLayout.overlap(bottom), resources.displayMetrics.density)
+      if (webImeTargetInset == target) return
+      webImeTargetInset = target
+      val scale = Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        .takeIf { it.isFinite() && it >= 0f } ?: 1f
+      webImeTransitionMs = ((if (durationMs < 0) 200L else durationMs) * scale).toLong()
       scheduleWebInsetsPush()
     }
-    // Already accounted for in the WebView's layout, including on WebViews
-    // that would otherwise also shrink their visual viewport from insets.
+    fun updateWebIme(bottom: Int) {
+      lastImeBottom = bottom
+      val density = resources.displayMetrics.density
+      val cssBottom = pxToCssPx(bottom, density)
+      val cssOverlap = pxToCssPx(imeLayout.overlap(bottom), density)
+      if (webImeBottomInset == cssBottom && webImeLayoutInset == cssOverlap) return
+      webImeBottomInset = cssBottom
+      webImeLayoutInset = cssOverlap
+      scheduleWebInsetsPush()
+    }
+    root.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+      if (left != oldLeft || top != oldTop || right != oldRight || bottom != oldBottom) {
+        imeLayout.refreshWindowBounds()
+        updateWebIme(lastImeBottom)
+        updateWebImeTarget(lastImeTargetBottom, imeAnimations.lastOrNull()?.durationMillis ?: 0)
+      }
+    }
+    // The DOM frame handles the overlap. Keep Chromium from applying it a second time.
     ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
       ViewCompat.onApplyWindowInsets(view, WindowInsetsCompat.Builder(insets)
         .setInsets(imeType, androidx.core.graphics.Insets.NONE)
@@ -730,6 +759,8 @@ class MainActivity : ComponentActivity() {
       webSystemLeftInset = pxToCssPx(maxOf(bars.left, cutout.left), density)
       webSystemRightInset = pxToCssPx(maxOf(bars.right, cutout.right), density)
       // onApply receives the destination before the first animation frame.
+      // Send that destination once so Chromium can interpolate even when IME samples arrive late.
+      updateWebImeTarget(ime, imeAnimations.lastOrNull()?.durationMillis ?: 0)
       if (imeAnimations.isEmpty()) updateWebIme(ime)
       scheduleWebInsetsPush()
       if (guideViewReady) {
@@ -763,7 +794,9 @@ class MainActivity : ComponentActivity() {
         override fun onEnd(animation: WindowInsetsAnimationCompat) {
           if (!imeAnimations.remove(animation) || imeAnimations.isNotEmpty()) return
           val settled = ViewCompat.getRootWindowInsets(root) ?: return
-          updateWebIme(settled.getInsets(imeType).bottom)
+          val ime = settled.getInsets(imeType).bottom
+          updateWebImeTarget(ime, animation.durationMillis)
+          updateWebIme(ime)
         }
       },
     )
@@ -2140,8 +2173,7 @@ class MainActivity : ComponentActivity() {
    * 底部有两条通道（issue #783 缺陷 A 起）：--dsh-android-system-bottom 是保守值
    * （系统栏与手势热区取大），--dsh-android-navbar-bottom 是真正盖住页面的系统栏高度。
    * 手势热区不是遮挡物，交互面（输入卡、抽屉）只消费后者，否则手势模式下会凭空
-   * 留出一条纯背景带。IME 走独立变量 --dsh-android-ime-bottom，且壳侧已把 IME 施加到
-   * WebView 自身布局尺寸，两者不叠加。
+   * 留出一条纯背景带。IME 原始高度与页面剩余遮挡量分别发布。WebView 的布局尺寸保持稳定。
    */
   private fun scheduleWebInsetsPush() {
     if (!pageUiActive || !webViewReady || webInsetsPushScheduled) return
@@ -2160,7 +2192,10 @@ class MainActivity : ComponentActivity() {
           "px';var system='" + webSystemBottomInset +
           "px';var navbar='" + webNavBarBottomInset +
           "px';var ime='" + webImeBottomInset +
-          "px';var left='" + webSystemLeftInset +
+          "px';var overlap='" + webImeLayoutInset +
+          "px';var target=" + (webImeTargetInset?.let { "'${it}px'" } ?: "null") +
+          ";var duration='" + webImeTransitionMs +
+          "ms';var left='" + webSystemLeftInset +
           "px';var right='" + webSystemRightInset +
           "px';var style=root.style;function set(name,value){" +
           "if(style.getPropertyValue(name)!==value)style.setProperty(name,value);}" +
@@ -2168,6 +2203,13 @@ class MainActivity : ComponentActivity() {
           "set('--dsh-android-navbar-bottom',navbar);set('--dsh-android-ime-bottom',ime);" +
           "set('--dsh-android-system-left',left);set('--dsh-android-system-right',right);" +
           "root.toggleAttribute('data-dsh-ime',parseFloat(ime)>0);" +
+          "var changed=style.getPropertyValue('--dsh-android-page-ime-overlap')!==overlap;" +
+          "set('--dsh-android-page-ime-overlap',overlap);" +
+          "if(target!==null&&style.getPropertyValue('--dsh-android-page-ime-target')!==target){" +
+          "set('--dsh-android-page-ime-duration',duration);set('--dsh-android-page-ime-target',target);" +
+          "root.setAttribute('data-dsh-ime-transition','');changed=true;}" +
+          "if(changed){" +
+          "window.dispatchEvent(new Event('dsh-page-ime-change'));}" +
           "})()"
       view.evaluateJavascript(insetsScript, null)
     } catch (_: Exception) {

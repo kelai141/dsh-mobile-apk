@@ -1,4 +1,5 @@
 import { zh, en, type ComposerSheetKey } from './composer-sheet.locales.ts'
+import { visibleViewport } from '../composer-popup-guard.ts'
 import {
   ADD_BUTTON_SELECTOR,
   CARD_SELECTOR,
@@ -1048,17 +1049,16 @@ export class ComposerSheet {
     return FEELS[id] ?? (FEELS['A'] as SheetFeel)
   }
 
-  /** 可见视口高度：优先 visualViewport（软键盘抬起时它才是真实可见区）。 */
+  /** 返回浏览器视口与宿主键盘边界的交集。 */
   private viewportHeight(): number {
-    const vv = typeof window.visualViewport === 'object' ? window.visualViewport : null
-    return vv !== null && vv.height > 0 ? vv.height : window.innerHeight
+    return visibleViewport()?.height ?? window.innerHeight
   }
 
   /** 软键盘抬起的距离：innerHeight 与可见区（height + offsetTop）之差。 */
   private keyboardInset(): number {
-    const vv = typeof window.visualViewport === 'object' ? window.visualViewport : null
+    const vv = visibleViewport()
     if (vv === null) return 0
-    return Math.max(0, Math.round(window.innerHeight - (vv.height + vv.offsetTop)))
+    return Math.max(0, Math.round(window.innerHeight - (vv.height + vv.top)))
   }
 
   /** 把键盘抬起量写进 --dsh-sheet-bottom，让面板贴住可见区底边。 */
@@ -1190,6 +1190,7 @@ export class ComposerSheet {
     panel.addEventListener('touchend', this.onSheetTouchEnd)
     panel.addEventListener('touchcancel', this.onSheetTouchCancel)
     window.addEventListener('resize', this.onSheetViewport)
+    window.addEventListener('dsh-page-ime-change', this.onSheetViewport)
     if (typeof window.visualViewport === 'object' && window.visualViewport !== null) {
       window.visualViewport.addEventListener('resize', this.onSheetViewport)
       window.visualViewport.addEventListener('scroll', this.onSheetViewport)
@@ -1219,6 +1220,7 @@ export class ComposerSheet {
       this.settleTimer = undefined
     }
     window.removeEventListener('resize', this.onSheetViewport)
+    window.removeEventListener('dsh-page-ime-change', this.onSheetViewport)
     if (typeof window.visualViewport === 'object' && window.visualViewport !== null) {
       window.visualViewport.removeEventListener('resize', this.onSheetViewport)
       window.visualViewport.removeEventListener('scroll', this.onSheetViewport)

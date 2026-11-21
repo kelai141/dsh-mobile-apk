@@ -2,64 +2,34 @@ package com.dsharnessmobile.shell
 
 import android.graphics.Rect
 import android.os.Build
-import android.view.View
 import android.view.Window
 import android.widget.FrameLayout
 
-/** Resize the main WebView to the part of the Activity window above the IME. */
+/** Measure keyboard overlap in window pixels. The page owns how it uses this space. */
 internal class MainWebImeLayout(
   private val window: Window,
   private val root: FrameLayout,
-  private val webView: View,
 ) {
   private val location = IntArray(2)
   private val visibleFrame = Rect()
-  private var imeBottom = 0
   private var windowHeight = 0
+  private var rootBottom = 0
 
-  init {
-    root.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
-      if (left != oldLeft || top != oldTop || right != oldRight || bottom != oldBottom) {
-        refreshWindowBounds()
-        layout()
-      }
-    }
-  }
-
-  // Window metrics can query WindowManager. Refresh on bounds/insets changes, outside IME progress.
+  // Cache the coordinate space outside the per-frame IME callback.
   fun refreshWindowBounds() {
     if (Build.VERSION.SDK_INT >= 30) {
       windowHeight = window.windowManager.currentWindowMetrics.bounds.height()
+      root.getLocationInWindow(location)
+    } else {
+      root.getLocationOnScreen(location)
+      root.getWindowVisibleDisplayFrame(visibleFrame)
     }
+    rootBottom = location[1] + root.height
   }
 
-  fun update(bottom: Int) {
-    imeBottom = bottom
-    layout()
-  }
-
-  private fun layout() {
-    if (root.height == 0) return
-    val margin = when {
-      imeBottom <= 0 -> 0
-      Build.VERSION.SDK_INT >= 30 -> {
-        // Metrics are window-local here. The root may already have been
-        // partly resized by the system, especially in freeform windows.
-        root.getLocationInWindow(location)
-        val keyboardTop = windowHeight - imeBottom
-        remainingImeOverlap(location[1] + root.height, keyboardTop, imeBottom)
-      }
-      else -> {
-        root.getLocationOnScreen(location)
-        root.getWindowVisibleDisplayFrame(visibleFrame)
-        remainingImeOverlap(location[1] + root.height, visibleFrame.bottom, imeBottom)
-      }
-    }
-    val params = webView.layoutParams as FrameLayout.LayoutParams
-    if (params.bottomMargin != margin) {
-      params.bottomMargin = margin
-      webView.layoutParams = params
-    }
+  fun overlap(imeBottom: Int): Int {
+    val visibleBottom = if (Build.VERSION.SDK_INT >= 30) windowHeight - imeBottom else visibleFrame.bottom
+    return remainingImeOverlap(rootBottom, visibleBottom, imeBottom)
   }
 }
 
