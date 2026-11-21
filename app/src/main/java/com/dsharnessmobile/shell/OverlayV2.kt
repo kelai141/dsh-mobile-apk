@@ -851,17 +851,14 @@ internal class OverlayV2(private val svc: OverlayService) {
       OverlayWindows.Slot.COMPOSER,
     )
     if (pickerOpen() && containsTouch(OverlayWindows.Slot.COMPOSER, x, y)) {
-      dismissPicker()
+      closeDrawer(animated = false)
       return
     }
     if (others.any { containsTouch(it, x, y) }) return
     // 有加号卡片（sheet）开着时，空白先收卡片，输入区与草稿都保留 —— 用户基线明确要求
     // 「在有加号卡片的情况下点空白区不会导致输入框收起」。
     if (drawerMode != DrawerMode.NONE) {
-      // 顺序不可交换：animateDrawerOut 里会看 drawerOpen，而 drawerOpen 由 drawerMode 推导。
-      // 先收窗再改模式，会让「已打开」判据仍然为真，收起动画直接被跳过、sheet 永远留在屏上。
-      drawerMode = DrawerMode.NONE
-      hideDrawer(true)
+      closeDrawer(animated = true)
       return
     }
     hideComposer()
@@ -1111,10 +1108,7 @@ internal class OverlayV2(private val svc: OverlayService) {
       if (!destroyed && ok && svc.activeSessionId == admittedSession && sessionGeneration == admittedGeneration && composer?.inputText() == sentDraft) {
         composer?.setInputText("")
         sessionDrafts.remove(admittedSession)
-        if (drawerMode != DrawerMode.NONE) {
-          drawerMode = DrawerMode.NONE
-          hideDrawer(false)
-        }
+        closeDrawer(animated = false)
       }
       scheduleRender()
     }
@@ -1175,8 +1169,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     val requestId = java.util.UUID.randomUUID().toString()
     if (!prepareAttachmentUi(sid, mapped, requestId)) return
     // 取件菜单已经完成选择。保留输入窗及草稿，收起菜单再让系统接管。
-    drawerMode = DrawerMode.NONE
-    hideDrawer(false)
+    closeDrawer(animated = false)
     attachmentRequestIds.getOrPut(sid) { LinkedHashSet() }.add(requestId)
     OverlayAttachProxyActivity.start(svc, mapped, sid, requestId)
   }
@@ -1293,39 +1286,25 @@ internal class OverlayV2(private val svc: OverlayService) {
   }
 
 
-  /** 「＋」切换抽屉：命令 → 会话 → 工作区 → 收起，循环一格。 */
+  /** Each opener toggles its own surface. Back returns from the active surface to the input. */
   private fun toggleDrawer() {
-    hapticConfirm(composer?.view)
     if (!composerVisible()) return
-    when (drawerMode) {
-      DrawerMode.NONE -> {
-        drawerMode = DrawerMode.COMMANDS
-        refreshCommands()
-        renderComposer()
-        // 只改 drawerMode 不会让 sheet 出现：sheet 是独立窗口，必须显式同步一次。
-        syncDrawerWindow()
-      }
-      DrawerMode.COMMANDS -> openSessionPicker()
-      DrawerMode.SESSIONS -> openWorkspacePicker()
-      DrawerMode.WORKSPACES -> {
-        drawerMode = DrawerMode.NONE
-        renderComposer()
-        hideDrawer(true)
-      }
-    }
-  }
-
-  /** 返回键三段式：先收抽屉，再收输入窗；不发送、不停止后台任务。 */
-  private fun onComposerBackPressed() {
-
-    // 答题态下按返回 = 放弃回答：把进入前留档的消息草稿还回去，不能吞掉用户写了一半的话。
-    if (messageDraftBeforeAnswer != null) {
-      leaveQuestionAnswer(false)
+    hapticConfirm(composer?.view)
+    if (drawerMode == DrawerMode.COMMANDS) {
+      closeDrawer(animated = true)
       return
     }
-    if (drawerMode != DrawerMode.NONE) {
-      drawerMode = DrawerMode.NONE
-      renderComposer()
+    if (pickerOpen()) closeDrawer(animated = false)
+    drawerMode = DrawerMode.COMMANDS
+    refreshCommands()
+    renderComposer()
+    syncDrawerWindow()
+  }
+
+  private fun onComposerBackPressed() {
+    if (closeDrawer(animated = true)) return
+    if (messageDraftBeforeAnswer != null) {
+      leaveQuestionAnswer(false)
       return
     }
     hideComposer()
@@ -1396,13 +1375,24 @@ internal class OverlayV2(private val svc: OverlayService) {
    */
   private fun pickerOpen(): Boolean = drawerMode == DrawerMode.SESSIONS || drawerMode == DrawerMode.WORKSPACES
 
-  private fun dismissPicker() {
-    if (!pickerOpen()) return
+  private fun closeDrawer(animated: Boolean): Boolean {
+    if (drawerMode == DrawerMode.NONE) return false
+    val wasPicker = pickerOpen()
     drawerRetryToken++
     drawerMode = DrawerMode.NONE
-    hideDrawer(false)
-    composer?.let { syncComposerWithPicker(it, screen()) }
+    drawerLoading = false
+    drawerError = ""
+    if (wasPicker) {
+      val c = composer
+      val imm = svc.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+      imm?.hideSoftInputFromWindow(c?.drawerView?.windowToken, 0)
+      hideDrawer(false)
+      c?.let { syncComposerWithPicker(it, screen()) }
+    } else {
+      hideDrawer(animated)
+    }
     renderComposer()
+    return true
   }
 
   private fun pickerVisibleBottom(composer: OverlayComposer, screen: OverlayScreen): Int {
@@ -1716,8 +1706,10 @@ internal class OverlayV2(private val svc: OverlayService) {
         if (name == newConversationItemId) {
           hapticConfirm(composer?.view)
           if (OverlayPageHost.available()) {
+            val requestEpoch = drawerRetryToken
             OverlayPageHost.newSession { ok ->
               if (!ok) svc.flashStatus(t("无法新建会话", "Could not start a new conversation"))
+              else if (drawerMode == DrawerMode.SESSIONS && drawerRetryToken == requestEpoch) closeDrawer(animated = false)
             }
           } else {
             svc.flashStatus(t("新建会话需要主界面在线", "Start a conversation in the main app"))
@@ -1725,7 +1717,7 @@ internal class OverlayV2(private val svc: OverlayService) {
           renderComposer()
           return
         }
-        drawerMode = DrawerMode.NONE
+        closeDrawer(animated = false)
         if (OverlayPageHost.available()) {
           OverlayPageHost.openSession(name) { ok ->
             if (ok) {
@@ -1741,7 +1733,7 @@ internal class OverlayV2(private val svc: OverlayService) {
         }
       }
       DrawerMode.WORKSPACES -> {
-        drawerMode = DrawerMode.NONE
+        closeDrawer(animated = false)
         svc.targetWorkspaceIdOverride = name
         refreshPageState()
         svc.flashStatus(t("新会话将使用该工作区", "New sessions will use this workspace"))
@@ -1749,8 +1741,12 @@ internal class OverlayV2(private val svc: OverlayService) {
       else -> {
         // 命令：走页面真源执行（不硬编码任何命令清单）
         if (OverlayPageHost.available()) {
+          val requestEpoch = drawerRetryToken
           OverlayPageHost.execute(name) { ok ->
-            if (ok) toast(t("已执行", "Command sent")) else svc.flashStatus(t("命令执行失败", "Command failed"))
+            if (ok) {
+              if (drawerMode == DrawerMode.COMMANDS && drawerRetryToken == requestEpoch) closeDrawer(animated = true)
+              toast(t("已执行", "Command sent"))
+            } else svc.flashStatus(t("命令执行失败", "Command failed"))
           }
         } else {
           toast(t("命令需要主界面在线", "Commands need the main app"))
@@ -1761,7 +1757,8 @@ internal class OverlayV2(private val svc: OverlayService) {
   }
 
   private fun openSessionPicker() {
-    if (drawerMode == DrawerMode.SESSIONS) { dismissPicker(); return }
+    if (drawerMode == DrawerMode.SESSIONS) { closeDrawer(animated = false); return }
+    if (drawerMode != DrawerMode.NONE) closeDrawer(animated = false)
     drawerMode = DrawerMode.SESSIONS
     drawerLoading = true
     drawerError = ""
@@ -1850,7 +1847,8 @@ internal class OverlayV2(private val svc: OverlayService) {
   }
 
   private fun openWorkspacePicker() {
-    if (drawerMode == DrawerMode.WORKSPACES) { dismissPicker(); return }
+    if (drawerMode == DrawerMode.WORKSPACES) { closeDrawer(animated = false); return }
+    if (drawerMode != DrawerMode.NONE) closeDrawer(animated = false)
     drawerMode = DrawerMode.WORKSPACES
     drawerLoading = true
     drawerError = ""
