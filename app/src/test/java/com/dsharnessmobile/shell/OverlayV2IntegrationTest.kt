@@ -354,6 +354,10 @@ class OverlayV2IntegrationTest {
     assertTrue(close.indexOf("drawerRetryToken++") in 0 until close.indexOf("drawerMode = DrawerMode.NONE"))
     assertTrue(close.contains("hideSoftInputFromWindow"))
     assertTrue(close.contains("syncComposerWithPicker"))
+    val renderState = source("OverlayComposer.kt").substringAfter("fun setDrawerOpen(open: Boolean)")
+      .substringBefore("fun prepareEnter()")
+    assertTrue(renderState.contains("if (open) cancelDrawerAnimation()"))
+    assertFalse(renderState.contains("\n    cancelDrawerAnimation()"))
   }
 
   @Test fun rpcTransportRequiresTheExactResponseIdentity() {

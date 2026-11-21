@@ -437,7 +437,9 @@ internal class OverlayComposer(
   fun setDrawerOpen(open: Boolean) {
     if (open == drawerOpen) return
     drawerOpen = open
-    cancelDrawerAnimation()
+    // Closing changes the button state while the native window is still fading out.
+    // Reopening cancels the old completion before that callback can remove the new window.
+    if (open) cancelDrawerAnimation()
     plusButton.isSelected = open
     plusButton.contentDescription = if (open) UiText.t(context, "收起附件与命令", "Close attachments and commands")
       else UiText.t(context, "更多：附件与命令", "More: attachments and commands")
