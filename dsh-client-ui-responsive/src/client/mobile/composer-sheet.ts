@@ -580,20 +580,31 @@ export class ComposerSheet {
     return document.documentElement.hasAttribute('data-dsh-ime') || this.keyboardInset() > 1
   }
 
+  private revealSheet(backdrop: HTMLElement): void {
+    backdrop.removeAttribute(WAITING_IME_ATTR)
+    this.focusFirstTile()
+  }
+
   private readonly onSheetIme = (): void => {
     const backdrop = this.backdrop
     if (!backdrop?.hasAttribute(WAITING_IME_ATTR)) return
     window.cancelAnimationFrame(this.imeRevealFrame)
     this.imeRevealFrame = 0
     if (this.keyboardVisible()) return
-    // The native zero inset can arrive before WebView finishes its final layout.
-    // A new resize or inset change restarts the settle window.
+    const insets = document.documentElement.style
+    if (insets.getPropertyValue('--dsh-android-page-ime-overlap') === '0px'
+      && insets.getPropertyValue('--dsh-android-page-ime-target') === '0px') {
+      // The native keyboard and its layout target have both cleared. The fixed
+      // backdrop can paint with this frame, even if WebView's next frame is late.
+      this.revealSheet(backdrop)
+      return
+    }
+    // Without final native insets, allow WebView to finish visual viewport layout.
     this.imeRevealFrame = window.requestAnimationFrame(() => {
       this.imeRevealFrame = window.requestAnimationFrame(() => {
         this.imeRevealFrame = 0
         if (this.backdrop !== backdrop || this.keyboardVisible()) return
-        backdrop.removeAttribute(WAITING_IME_ATTR)
-        this.focusFirstTile()
+        this.revealSheet(backdrop)
       })
     })
   }
