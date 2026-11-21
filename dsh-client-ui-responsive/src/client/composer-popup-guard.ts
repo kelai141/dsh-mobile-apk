@@ -82,16 +82,19 @@ export interface VisibleViewport {
  * @returns the visible region in CSS pixels, or null when unmeasurable.
  */
 export function visibleViewport(): VisibleViewport | null {
+  const layout = Number(window.innerHeight)
+  const overlap = parseFloat(document.documentElement.style.getPropertyValue('--dsh-android-page-ime-overlap')) || 0
+  const imeBottom = layout > 0 && overlap > 0 ? layout - overlap : Infinity
   const viewport = window.visualViewport
   if (viewport !== null && viewport !== undefined) {
     const height = Number(viewport.height)
     if (Number.isFinite(height) && height > 0) {
       const offsetTop = Number(viewport.offsetTop)
-      return { top: Number.isFinite(offsetTop) ? Math.max(0, Math.round(offsetTop)) : 0, height: Math.round(height) }
+      const top = Number.isFinite(offsetTop) ? Math.max(0, Math.round(offsetTop)) : 0
+      return { top, height: Math.max(0, Math.min(Math.round(height), imeBottom - top)) }
     }
   }
-  const layout = Number(window.innerHeight)
-  return Number.isFinite(layout) && layout > 0 ? { top: 0, height: Math.round(layout) } : null
+  return Number.isFinite(layout) && layout > 0 ? { top: 0, height: Math.max(0, Math.min(Math.round(layout), imeBottom)) } : null
 }
 
 /**

@@ -49,6 +49,9 @@ export class HeaderPopups {
   private generation = 0
 
   private readonly onViewportChange = (): void => { this.schedule() }
+  private readonly onImeChange = (): void => {
+    if (this.active !== null || this.catalog !== null || this.viewOptions !== null) this.schedule()
+  }
   /**
    * Scroll handler.
    *
@@ -78,6 +81,7 @@ export class HeaderPopups {
       attributeFilter: ['aria-expanded'],
     })
     window.addEventListener('resize', this.onViewportChange)
+    window.addEventListener('dsh-page-ime-change', this.onImeChange)
     window.addEventListener('scroll', this.onScroll, true)
     window.visualViewport?.addEventListener('resize', this.onViewportChange)
     window.visualViewport?.addEventListener('scroll', this.onViewportChange)
@@ -90,6 +94,7 @@ export class HeaderPopups {
     this.observer?.disconnect()
     this.observer = null
     window.removeEventListener('resize', this.onViewportChange)
+    window.removeEventListener('dsh-page-ime-change', this.onImeChange)
     window.removeEventListener('scroll', this.onScroll, true)
     window.visualViewport?.removeEventListener('resize', this.onViewportChange)
     window.visualViewport?.removeEventListener('scroll', this.onViewportChange)
@@ -145,8 +150,9 @@ export class HeaderPopups {
     const visual = window.visualViewport
     const viewportWidth = Math.round((visual?.width || document.documentElement.clientWidth || window.innerWidth))
     const viewportLeft = Math.round(visual?.offsetLeft ?? 0)
-    const viewportTop = Math.round(visual?.offsetTop ?? 0)
-    const viewportBottom = Math.round((visual?.offsetTop ?? 0) + (visual?.height ?? window.innerHeight))
+    const viewport = visibleViewport()
+    const viewportTop = viewport?.top ?? 0
+    const viewportBottom = viewport === null ? window.innerHeight : viewport.top + viewport.height
     const width = Math.max(1, Math.min(500, viewportWidth - VIEWPORT_MARGIN * 2))
     const viewportRight = viewportLeft + viewportWidth
     const left = Math.max(viewportLeft + VIEWPORT_MARGIN, Math.min(Math.round(rect.left), viewportRight - VIEWPORT_MARGIN - width))

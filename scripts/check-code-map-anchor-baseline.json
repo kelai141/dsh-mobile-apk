@@ -662,7 +662,7 @@
       "internal fun describeEngineLogState(filesDir: File): String {"
     ],
     "MainActivity.kt:354": [
-      "return"
+      "\"无法保存重试状态，请重试。\", \"Could not save retry state. Please try again.\"))"
     ],
     "MainActivity.kt:579": [
       "// issue #945：覆盖安装后先把**上一版的**起动意图归一，再读开关。"

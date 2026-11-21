@@ -15,6 +15,7 @@ import android.os.PowerManager
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.ConsoleMessage
 import android.webkit.JsResult
 import android.webkit.ValueCallback
@@ -79,12 +80,13 @@ class MainActivity : ComponentActivity() {
   private var webSystemBottomInset = 0
   private var webSystemTopInset = 0
   private var webImeBottomInset = 0
-  /** 上一次投递给页面的 composer 位移高度（CSS px），用于动画期逐帧推送去重。 */
+  private var webImeLayoutInset = 0
   /** apk #182-2：横屏 + 侧边挖孔（short edge = 左右）时页面需要左右 inset 才能避让。 */
   private var webSystemLeftInset = 0
   private var webSystemRightInset = 0
-  /** Coalesces rapid IME animation callbacks into one WebView evaluation per UI turn. */
+  /** Coalesces insets while a WebView evaluation is queued or running. */
   private var webInsetsPushScheduled = false
+  private var webInsetsDirty = false
   /** 目录选择桥鉴权 token（进程级共享：MainActivity 重建/看门狗重启不更换，
    *  与引擎 env 的 DSH_PICK_TOKEN 始终一致；C1 修复）。 */
   private val pickToken: String = EngineManager.ensurePickToken()
@@ -627,6 +629,9 @@ class MainActivity : ComponentActivity() {
     }
     // 沉浸式：内容延伸到系统栏区域（状态栏常态收起，边缘滑动临时呼出）。
     WindowCompat.setDecorFitsSystemWindows(window, false)
+    if (Build.VERSION.SDK_INT >= 30) {
+      window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+    }
     // 0.13.7fx-1（真机反馈）：只做 edge-to-edge 还不够——有挖孔/刘海的机器上，系统默认把窗口内容
     // 拦在挖孔下方，最顶部（原状态栏位置）留出一条窗口底色，用户看到「最顶部的黑带」。
     // 允许内容画进短边挖孔区，内容避让交给推给页面的 --dsh-android-system-top。
@@ -695,18 +700,27 @@ class MainActivity : ComponentActivity() {
     // The accessibility control service carries the model-facing browser* ops; it reaches this
     // Activity-owned isolated WebView only through the process-wide holder.
     BrowserHostHolder.host = browserHost
-    val imeLayout = MainWebImeLayout(window, root, webView)
+    val imeLayout = MainWebImeLayout(window, root)
     val imeType = WindowInsetsCompat.Type.ime()
     val imeAnimations = mutableSetOf<WindowInsetsAnimationCompat>()
+    var lastImeBottom = 0
     fun updateWebIme(bottom: Int) {
-      imeLayout.update(bottom)
-      val cssBottom = pxToCssPx(bottom, resources.displayMetrics.density)
-      if (webImeBottomInset == cssBottom) return
+      lastImeBottom = bottom
+      val density = resources.displayMetrics.density
+      val cssBottom = pxToCssPx(bottom, density)
+      val cssOverlap = pxToCssPx(imeLayout.overlap(bottom), density)
+      if (webImeBottomInset == cssBottom && webImeLayoutInset == cssOverlap) return
       webImeBottomInset = cssBottom
+      webImeLayoutInset = cssOverlap
       scheduleWebInsetsPush()
     }
-    // Already accounted for in the WebView's layout, including on WebViews
-    // that would otherwise also shrink their visual viewport from insets.
+    root.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+      if (left != oldLeft || top != oldTop || right != oldRight || bottom != oldBottom) {
+        imeLayout.refreshWindowBounds()
+        updateWebIme(lastImeBottom)
+      }
+    }
+    // The DOM frame handles the overlap. Keep Chromium from applying it a second time.
     ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
       ViewCompat.onApplyWindowInsets(view, WindowInsetsCompat.Builder(insets)
         .setInsets(imeType, androidx.core.graphics.Insets.NONE)
@@ -2140,26 +2154,34 @@ class MainActivity : ComponentActivity() {
    * 底部有两条通道（issue #783 缺陷 A 起）：--dsh-android-system-bottom 是保守值
    * （系统栏与手势热区取大），--dsh-android-navbar-bottom 是真正盖住页面的系统栏高度。
    * 手势热区不是遮挡物，交互面（输入卡、抽屉）只消费后者，否则手势模式下会凭空
-   * 留出一条纯背景带。IME 走独立变量 --dsh-android-ime-bottom，且壳侧已把 IME 施加到
-   * WebView 自身布局尺寸，两者不叠加。
+   * 留出一条纯背景带。IME 原始高度与页面剩余遮挡量分别发布。WebView 的布局尺寸保持稳定。
    */
   private fun scheduleWebInsetsPush() {
-    if (!pageUiActive || !webViewReady || webInsetsPushScheduled) return
+    if (!pageUiActive || !webViewReady) return
+    webInsetsDirty = true
+    if (webInsetsPushScheduled) return
     webInsetsPushScheduled = true
     webView.post {
-      webInsetsPushScheduled = false
-      pushWebInsets()
+      webInsetsDirty = false
+      pushWebInsets(onComplete = {
+        webInsetsPushScheduled = false
+        if (webInsetsDirty) scheduleWebInsetsPush()
+      })
     }
   }
 
-  private fun pushWebInsets(view: WebView = webView) {
-    if (!pageUiActive || view !== webView) return
+  private fun pushWebInsets(view: WebView = webView, onComplete: (() -> Unit)? = null) {
+    if (!pageUiActive || view !== webView) {
+      onComplete?.invoke()
+      return
+    }
     try {
       val insetsScript =
         "(function(){var root=document.documentElement;if(!root)return;var top='" + webSystemTopInset +
           "px';var system='" + webSystemBottomInset +
           "px';var navbar='" + webNavBarBottomInset +
           "px';var ime='" + webImeBottomInset +
+          "px';var overlap='" + webImeLayoutInset +
           "px';var left='" + webSystemLeftInset +
           "px';var right='" + webSystemRightInset +
           "px';var style=root.style;function set(name,value){" +
@@ -2168,10 +2190,14 @@ class MainActivity : ComponentActivity() {
           "set('--dsh-android-navbar-bottom',navbar);set('--dsh-android-ime-bottom',ime);" +
           "set('--dsh-android-system-left',left);set('--dsh-android-system-right',right);" +
           "root.toggleAttribute('data-dsh-ime',parseFloat(ime)>0);" +
+          "if(style.getPropertyValue('--dsh-android-page-ime-overlap')!==overlap){" +
+          "set('--dsh-android-page-ime-overlap',overlap);" +
+          "window.dispatchEvent(new Event('dsh-page-ime-change'));}" +
           "})()"
-      view.evaluateJavascript(insetsScript, null)
+      view.evaluateJavascript(insetsScript, onComplete?.let { complete -> ValueCallback { complete() } })
     } catch (_: Exception) {
       // onPageFinished republishes the current insets after navigation.
+      onComplete?.invoke()
     }
   }
 
