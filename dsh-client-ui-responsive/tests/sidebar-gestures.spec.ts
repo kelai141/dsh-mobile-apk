@@ -1253,6 +1253,32 @@ describe('soft keyboard boundary (0.14.7 §2.1)', () => {
     expect(h.calls.returnToConversation).toHaveBeenCalledOnce()
     expect(document.activeElement).toBe(input)
   })
+
+  it.each([false, true])('手势收起右栏=%s 时拦住正文编辑器的自动聚焦，允许马上点选输入框', (rightOpen) => {
+    const h = setup({ drawerOpen: !rightOpen, rightOpen })
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    const editor = document.createElement('textarea')
+    card.append(editor)
+    h.frame.append(card)
+    const close = rightOpen ? h.calls.closeRight : h.calls.returnToConversation
+    const realClose = close.getMockImplementation()!
+    close.mockImplementation(() => {
+      realClose()
+      editor.focus()
+    })
+    editor.focus() // Android Back can leave DOM focus behind with the IME closed.
+    if (rightOpen) swipe(h.rightPanel, 75, 300, 325, 300)
+    else swipe(h.drawer, 180, 300, 65, 300)
+    expect(close).toHaveBeenCalledOnce()
+    expect(document.activeElement).not.toBe(editor)
+    editor.focus()
+    expect(document.activeElement).not.toBe(editor)
+
+    editor.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
+    editor.focus()
+    expect(document.activeElement).toBe(editor)
+  })
 })
 
 

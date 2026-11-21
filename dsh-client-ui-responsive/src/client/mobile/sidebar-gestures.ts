@@ -50,6 +50,8 @@
  * （listener 侧 endPreview 把内联位移清空的瞬间，CSS 只能向"当前已提交的状态"收敛）。
  */
 
+import { ComposerFocusGuard } from './composer-focus-guard.ts'
+
 export type SidebarGestureSide = 'left' | 'right'
 
 export const LEFT_SWIPE_KEY = 'dsh.android.sidebarSwipe.left'
@@ -289,6 +291,7 @@ function progressFor(action: GestureAction, dx: number, width: number): number {
 /** Attach one shared touch arbiter; callbacks always read current upstream state. */
 export class MobileSidebarGestures {
   private readonly actions: SidebarGestureActions
+  private readonly composerFocus = new ComposerFocusGuard()
   private start: StartPoint | null = null
   /** 已进入跟手拖动：DRAWER_DRAGGING_ATTR 与预览回调的生命周期标志。 */
   private dragging = false
@@ -363,6 +366,7 @@ export class MobileSidebarGestures {
     document.removeEventListener('touchcancel', this.onTouchCancel, true)
     document.removeEventListener('click', this.onClick, true)
     this.abandon()
+    this.composerFocus.clear()
     if (this.suppressClickTimer !== null) window.clearTimeout(this.suppressClickTimer)
     this.suppressClickTimer = null
     this.suppressClick = false
@@ -567,8 +571,15 @@ export class MobileSidebarGestures {
     // 都不成立（未达 SWIPE_PX、回退、拖过头）一律回退到起始态。
     const progress = progressFor(action, dx, start.width)
     const distanceSettled = action === 'open-left' || action === 'open-right' ? progress >= 0.5 : progress <= 0.5
-    if (flung || distanceSettled) this.commit(action)
-    else this.abandon()
+    if (flung || distanceSettled) {
+      // Closing may restore editor focus as the conversation becomes active. Arm before
+      // the layout action so even synchronous focus is caught. Keep an open IME usable.
+      if ((action === 'return' || action === 'close-right') && imeInsetPx() === 0) {
+        this.composerFocus.arm()
+        this.composerFocus.blurActiveEditor()
+      }
+      this.commit(action)
+    } else this.abandon()
     // 先提交开合状态、再撤跟手预览：消费方清掉内联位移与拖动标记时，CSS 是**从手指位置**
     // 平滑收敛到最终态。顺序反了（先撤预览再改状态）会先弹回起点、再重放一次展开动画，
     // 正是用户报告的「松手才动、动画突兀」。
