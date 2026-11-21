@@ -1,4 +1,4 @@
-import { HeaderPopups } from './header-popups.ts'
+import { HeaderPopups, SESSION_MENU_TRIGGER, sessionHeaderMenu } from './header-popups.ts'
 import { tr } from '../i18n.ts'
 
 /**
@@ -42,8 +42,6 @@ const UNMASKED_ATTR = 'data-dsh-topbar-fold-unmasked'
 /** 折叠箭头的标记属性。 */
 const ARROW_ATTR = 'data-dsh-topbar-fold-arrow'
 const EMPTY_ATTR = 'data-dsh-topbar-fold-empty'
-const SESSION_MENU_TRIGGER = 'button[data-context-menu-trigger][class*="headerMenuButton"]'
-const SESSION_MENU = '[data-context-menu][role="menu"]'
 const MODE_ICON = 'svg[data-icon="dsw-icon-agent-preset-outline-regular"]'
 const MODE_SOURCE_ATTR = 'data-dsh-session-mode-source'
 const MODE_ROW_ATTR = 'data-dsh-session-menu-mode'
@@ -305,8 +303,7 @@ export class TopBarFold {
     }
     if (!container || !label || !icon) return false
 
-    const menu = trigger?.getAttribute('aria-expanded') === 'true'
-      ? document.querySelector<HTMLElement>(SESSION_MENU) : null
+    const menu = sessionHeaderMenu(trigger)
     const viewport = menu?.querySelector<HTMLElement>(':scope > [role="presentation"]')
     const name = label.textContent?.trim() ?? ''
     if (!viewport || this.modeRow?.parentElement !== viewport) {

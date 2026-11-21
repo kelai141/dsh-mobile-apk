@@ -154,4 +154,27 @@ describe('手机顶栏内的后台任务浮窗', () => {
     expect(fold.hasAttribute('data-dsh-header-popup')).toBe(false)
     expect(list.getAttribute(MARKER)).toBeNull()
   })
+
+  it('旧 WebView 将会话菜单定位在右上角触发器下方', async () => {
+    document.body.innerHTML = `
+      <button class="hash_headerMenuButton" data-context-menu-trigger
+        aria-expanded="true" aria-controls="session-header-menu"></button>
+      <div data-context-menu role="menu"></div>
+      <div id="session-header-menu" data-context-menu role="menu"></div>`
+    const trigger = document.querySelector('button')!
+    const menu = document.getElementById('session-header-menu')!
+    vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+      left: 524, right: 552, top: 11, bottom: 39,
+    } as DOMRect)
+    popup = new HeaderPopups()
+    popup.attach()
+    await flush()
+    expect(menu.style.top).toBe('44px')
+    expect(menu.style.left).toBe('312px')
+    expect(document.querySelector<HTMLElement>('[role="menu"]')?.style.top).toBe('')
+    trigger.setAttribute('aria-expanded', 'false')
+    await flush()
+    expect(menu.style.top).toBe('')
+    expect(menu.style.left).toBe('')
+  })
 })

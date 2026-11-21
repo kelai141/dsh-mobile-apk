@@ -139,8 +139,9 @@ it('shows the preset in the session ellipsis and only keeps the separate fold fo
   button.className = 'hash_headerMenuButton'
   button.setAttribute('data-context-menu-trigger', '')
   button.setAttribute('aria-expanded', 'false')
+  button.setAttribute('aria-controls', 'session-header-menu')
   document.querySelector('.titleRow')!.append(button)
-  document.body.insertAdjacentHTML('beforeend', '<div data-context-menu role="menu"><div role="presentation"><button role="menuitem">下载 Session 日志</button></div></div>')
+  document.body.insertAdjacentHTML('beforeend', '<div data-context-menu role="menu"></div><div id="session-header-menu" data-context-menu role="menu"><div role="presentation"><button role="menuitem">下载 Session 日志</button></div></div>')
   fold.attach()
   await flush()
   expect(state().arrow).toBeNull()
