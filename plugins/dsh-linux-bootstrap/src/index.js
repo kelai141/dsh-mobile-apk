@@ -226,13 +226,13 @@ export function createMobileBootstrap(options = {}) {
   let tail = Promise.resolve()
   const listeners = new Set()
 
-  const statusValue = () => {
-    const runtime = operation === 'idle' && state.injectionActivated && typeof manager?.status === 'function'
-      ? manager.status() : state.runtime
+  const statusValue = (verified) => {
+    const runtime = verified ?? (operation === 'idle' && state.injectionActivated && typeof manager?.status === 'function'
+      ? manager.status() : state.runtime)
     return statusShape({ ...state, runtime }, mobileVersion, operation, options.version ?? BOOTSTRAP_VERSION, hostArch)
   }
-  const emit = () => {
-    lastStatus = statusValue()
+  const emit = (verified) => {
+    lastStatus = statusValue(verified)
     for (const listener of listeners) {
       try { listener(lastStatus) } catch { /* Listener errors do not affect bootstrap operations. */ }
     }
@@ -618,7 +618,23 @@ export function createMobileBootstrap(options = {}) {
     experimental: true,
     enabledByDefault: false,
     ready,
-    status: async () => { await ready; await updateMobileVersion().catch(() => {}); return emit() },
+    status: async () => {
+      await ready
+      await updateMobileVersion().catch(() => {})
+      const active = manager
+      if (operation === 'idle' && state.enabled && state.injectionActivated && typeof active?.verify === 'function') {
+        let runtime
+        try {
+          runtime = await active.verify()
+        } catch (error) {
+          runtime = { healthy: false, state: 'unhealthy', reason: error?.message ?? String(error) }
+        }
+        if (active === manager && operation === 'idle' && state.enabled && state.injectionActivated) {
+          return emit(runtime)
+        }
+      }
+      return emit()
+    },
     /**
      * Check the release channel for a newer Linux version.
      *
