@@ -166,6 +166,8 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 
 .dsh-linux-terminal-tools > [role='status'] {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .dsh-linux-back {

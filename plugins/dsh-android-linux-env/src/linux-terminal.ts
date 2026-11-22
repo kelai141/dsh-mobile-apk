@@ -89,7 +89,9 @@ function recordTerminal(handle: SubprocessTerminalHandle) {
   let history = ''
   let first = 0
   let running = true
-  let outcome: { exitCode: number | null; signal: string | null } | undefined
+  let outcome: { exitCode: number | null; signal: string | null; detail?: string } | undefined
+  let outputError: string | undefined
+  const reason = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 400)
   let stopPromise: Promise<void> | undefined
   const stop = () => stopPromise ??= handle.terminate()
   handle.output.setEncoding('utf8')
@@ -102,9 +104,14 @@ function recordTerminal(handle: SubprocessTerminalHandle) {
       history = history.slice(excess)
     }
   })
-  handle.output.on('error', () => { void stop().catch(() => {}) })
-  const settled = handle.done.then(result => { outcome = result }, () => {
-    outcome = { exitCode: null, signal: null }
+  handle.output.on('error', error => {
+    outputError = reason(error)
+    void stop().catch(() => {})
+  })
+  const settled = handle.done.then(result => {
+    outcome = outputError ? { ...result, detail: outputError } : result
+  }, error => {
+    outcome = { exitCode: null, signal: null, detail: outputError ?? reason(error) }
   }).then(() => {
     running = false
     return stop()
@@ -159,11 +166,15 @@ export function createLinuxTerminal(options: {
         terminalType: 'xterm-256color',
         graceMs: 500,
         ...size,
+      }).catch((error: unknown) => {
+        if (error instanceof TerminalError) throw error
+        const detail = error instanceof Error ? error.message : String(error)
+        throw new TerminalError(502, 'linux-terminal-pty-start-failed', detail.slice(0, 400))
       })
       const started = recordTerminal(handle)
       const child = { abort: () => { void started.stop().catch(() => {}) }, promise: started.settled }
       manager.children.add(child)
-      void started.settled.then(() => manager.children.delete(child), () => {})
+      void started.settled.then(() => manager.children.delete(child), () => manager.children.delete(child))
       if (manager.gate.managementPending) {
         await started.stop()
         throw new TerminalError(409, 'linux-terminal-runtime-busy')

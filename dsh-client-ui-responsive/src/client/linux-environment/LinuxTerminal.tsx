@@ -8,6 +8,7 @@ import { RouteError, terminalRequest, type TerminalUpdate } from './transport.ts
 
 function terminalError(error: unknown): string {
   if (error instanceof RouteError) {
+    if (error.detail) return error.detail
     switch (error.message) {
       case 'linux-terminal-runtime-unavailable':
         return tr('请先启动 Linux 环境。', 'Start the Linux environment first.')
@@ -79,8 +80,10 @@ export function LinuxTerminal({ onBack }: { onBack?(): void }) {
       pollDelay = update.output ? 120 : Math.min(pollDelay * 2, 800)
       if (!active) return
       setState(running ? 'running' : 'exited')
-      if (!running && update.outcome?.exitCode != null) {
-        setMessage(tr('退出码 ', 'Exit code ') + update.outcome.exitCode)
+      if (!running) {
+        if (update.outcome?.detail) setMessage(update.outcome.detail)
+        else if (update.outcome?.signal) setMessage(tr('终端信号 ', 'Terminal signal ') + update.outcome.signal)
+        else if (update.outcome?.exitCode != null) setMessage(tr('退出码 ', 'Exit code ') + update.outcome.exitCode)
       }
     }
     const schedulePoll = (delay: number) => {
@@ -185,7 +188,7 @@ export function LinuxTerminal({ onBack }: { onBack?(): void }) {
         {onBack && <button type="button" className="dsh-linux-back" data-dsh-settings-sublayer-back="" onClick={onBack}>
           {tr('返回', 'Back')}
         </button>}
-        <span role="status">{message || {
+        <span role="status" title={message || undefined}>{message || {
           connecting: tr('连接中', 'Connecting'), running: tr('运行中', 'Running'),
           exited: tr('会话已结束', 'Session ended'), failed: tr('连接失败', 'Connection failed'),
         }[state]}</span>

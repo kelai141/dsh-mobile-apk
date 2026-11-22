@@ -161,7 +161,7 @@ export interface TerminalUpdate {
   next: number
   more: boolean
   output: string
-  outcome?: { exitCode: number | null; signal: string | null }
+  outcome?: { exitCode: number | null; signal: string | null; detail?: string }
 }
 
 export function terminalRequest(action: Extract<TerminalAction, { action: 'read' }> | ({ action: 'open' | 'restart' } & TerminalSize)): Promise<TerminalUpdate>
