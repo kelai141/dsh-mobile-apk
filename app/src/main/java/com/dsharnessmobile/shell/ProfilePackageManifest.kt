@@ -39,6 +39,23 @@ internal object ProfilePackageManifest {
     return removeRetired(user).toString(2)
   }
 
+  /** The profile loader treats declared installed copies as overrides of bundled packages. */
+  fun removeLegacyCorePins(profile: JSONObject, bundledVersion: (String) -> String?): Set<String> {
+    val core = setOf("llm", "agent", "session", "tools").map { "@deepseek-ai/dsh-$it" }.toSet()
+    val removed = linkedSetOf<String>()
+    for (section in listOf("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")) {
+      val dependencies = profile.optJSONObject(section) ?: continue
+      for (name in core) {
+        if (dependencies.optString(name) != "0.1.1-rc.2") continue
+        val version = bundledVersion(name)
+        if (version.isNullOrBlank() || version == "0.1.1-rc.2") continue
+        dependencies.remove(name)
+        removed += name
+      }
+    }
+    return removed
+  }
+
   private fun removeRetired(profile: JSONObject): JSONObject {
     for (section in listOf("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")) {
       val dependencies = profile.optJSONObject(section) ?: continue

@@ -1628,10 +1628,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
         "Hard bundle profile 校验/修复失败；拒绝启动引擎，" + hardBundleRepair.failure,
       )
     }
+    val legacyPinsRepaired = repairLegacyWebCorePins()
     if (hardBundleRepair.changed) {
       LogCollector.log(TAG, "required Hard factory bundles added to web profile; engine restart required")
     }
-    val restartForHardBundleRepair = hardBundleRepair.changed
+    val restartForHardBundleRepair = hardBundleRepair.changed || legacyPinsRepaired
     // 通过闸门 A：码与确诊项已在入口清过（见函数头注释），此处无需重复。
     // 取证字段**刻意不清**：它是只增的现场记录，供诊断包读取。
     val now = System.currentTimeMillis()
@@ -2319,6 +2320,36 @@ class EngineManager(private val context: Context, private val pickToken: String?
     } catch (t: Throwable) {
       Log.w(TAG, "profile patch normalize failed (non-fatal)", t)
     }
+  }
+
+  private fun repairLegacyWebCorePins(): Boolean = runCatching {
+    val profile = File(homeDir, ".dsh/profiles/web")
+    if (!isFactoryOwnedProfile(profile)) return false
+    val manifest = File(profile, "package.json")
+    val original = manifest.readText()
+    val parsed = org.json.JSONObject(original)
+    val installedModules = File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules")
+    val removed = ProfilePackageManifest.removeLegacyCorePins(parsed) { name ->
+      runCatching {
+        val bundled = org.json.JSONObject(File(installedModules, "$name/package.json").readText())
+        bundled.optString("version").takeIf { bundled.optString("name") == name }
+      }.getOrNull()
+    }
+    if (removed.isEmpty()) return false
+    val backup = File(profile, "package.json.pre-core-pins-" + java.util.UUID.randomUUID() + ".bak")
+    java.io.FileOutputStream(backup).use { output ->
+      output.write(original.toByteArray(Charsets.UTF_8))
+      output.fd.sync()
+    }
+    SnapshotTransaction.writeTextAtomic(manifest, parsed.toString(2) + "\n", "迁移旧版核心插件") {
+      require(org.json.JSONObject(it).toString() == parsed.toString()) { "invalid migrated profile" }
+    }
+    LogCollector.writeBootDiag(context, "profile-core-pins-migrated",
+      "Bundled plugins restored: " + removed.joinToString() + "; backup=" + backup.name)
+    true
+  }.getOrElse {
+    LogCollector.writeBootDiag(context, "profile-core-pins-migration-failed", it.message.orEmpty())
+    false
   }
 
   /** review C8：工厂拥有的 profile = 出厂 seed 形态（name=dsh-profile-* 且带 dsh.profile 块）。 */

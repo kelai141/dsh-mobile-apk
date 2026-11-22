@@ -54,6 +54,7 @@ internal class GuideChrome(
   val apkSecondaryLink: TextView,
   /** Secondary startup action: retry the engine, or open the repair assistant. */
   val repairButton: Button,
+  val safeModeButton: Button,
   val runtimeChip: TextView,
   val storageChip: TextView,
   val versionLabel: TextView,
@@ -73,6 +74,7 @@ internal class GuideCallbacks(
   val onShareLog: () -> Unit,
   val onManagement: () -> Unit = {},
   val onRepairAssistant: () -> Unit = {},
+  val onSafeMode: () -> Unit = {},
 )
 
 internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallbacks): GuideChrome {
@@ -451,6 +453,9 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   val updateButton = makeSecondary(activity.getString(R.string.ds_check_update), callbacks.onCheckUpdate)
   val repairButton = makeSecondary(activity.getString(R.string.ds_repair_assistant), callbacks.onRepairAssistant)
 
+  val safeModeButton = makeSecondary(UiText.t(activity, "安全模式启动", "Start in Safe Mode"), callbacks.onSafeMode)
+    .apply { visibility = View.GONE }
+
   // 更新块的两枚新增控件：状态行（次要色小字）+ 下载按钮（与检查按钮同款次级样式，视觉上并列）。
   //
   // 两枚都**不加入任何布局**，默认 GONE，由管理中心的更新块决定何时挂上去：更新块落在哪里是
@@ -520,7 +525,9 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
       ViewGroup.LayoutParams.MATCH_PARENT, dpix(R.dimen.ds_btn_secondary_height),
     ).apply { topMargin = dpix(R.dimen.ds_space_8) }
   }
-  repairRow.addView(repairButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+  repairRow.addView(repairButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+  repairRow.addView(safeModeButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+    .apply { marginStart = dpix(R.dimen.ds_space_8) })
 
   val gear = android.widget.ImageButton(activity).apply {
     setImageDrawable(android.graphics.drawable.RotateDrawable().apply {
@@ -585,6 +592,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     apkDownload = apkDownload,
     apkSecondaryLink = apkSecondaryLink,
     repairButton = repairButton,
+    safeModeButton = safeModeButton,
     runtimeChip = runtimeChip,
     storageChip = storageChip,
     versionLabel = versionLabel,
