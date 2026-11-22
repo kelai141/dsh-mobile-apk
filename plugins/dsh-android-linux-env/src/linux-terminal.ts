@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import type { SubprocessTerminalHandle, SubprocessTerminalSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 
 const HISTORY_LIMIT = 512 * 1024
@@ -6,6 +8,7 @@ const PAGE_LIMIT = 32 * 1024
 
 interface RuntimePaths {
   launcher: string
+  nativeLibDir?: string
   [name: string]: unknown
 }
 
@@ -154,6 +157,12 @@ export function createLinuxTerminal(options: {
         throw new TerminalError(409, 'linux-terminal-runtime-unavailable', verified.reason)
       }
       if (manager.gate.managementPending) throw new TerminalError(409, 'linux-terminal-runtime-busy')
+      const nativeLibDir = verified.paths.nativeLibDir
+      if (nativeLibDir && !existsSync(join(nativeLibDir, 'libbionilux-loader.so'))) {
+        // The APK loader must be executable from nativeLibraryDir. Falling back to
+        // the guest loader can abort in Android's linker before Bash emits output.
+        throw new TerminalError(409, 'linux-terminal-native-loader-missing')
+      }
       const launch = manager._sessionLaunch(verified.paths)
       if (launch.args.at(-2) !== '--norc' || launch.args.at(-1) !== '-s') {
         throw new TerminalError(409, 'linux-terminal-runtime-incompatible')

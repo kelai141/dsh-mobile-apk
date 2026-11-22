@@ -3,7 +3,7 @@ import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import { createLinuxTerminal, parseTerminalRequest } from '../lib/linux-terminal.js'
 
-function harness(spawnOverride) {
+function harness(spawnOverride, paths = { launcher: '/runtime/bionilux' }) {
   const children = new Set()
   const gate = { managementPending: false, acquireShared: async () => {}, releaseShared() {} }
   const changes = []
@@ -12,7 +12,7 @@ function harness(spawnOverride) {
     children, gate,
     processScope: { environment: env => ({ ...env, BIONILUX_PROCESS_SCOPE: 'scope' }) },
     _ensureStartupRecovery: async () => {},
-    _verifyLocked: async () => ({ healthy: true, paths: { launcher: '/runtime/bionilux' } }),
+    _verifyLocked: async () => ({ healthy: true, paths }),
     _executionEnvironment: (_paths, { guestCwd }) => ({ BIONILUX_GUEST_CWD: guestCwd }),
     _sessionLaunch: ({ launcher }) => ({ file: '/system/bin/linker64', args: [launcher, '/bin/bash', '--norc', '-s'] }),
   }
@@ -81,4 +81,14 @@ test('PTY startup failures retain their diagnostic, and restart can try again', 
   const stopped = await terminal.request({ action: 'read', id: update.id, after: 0 })
   assert.equal(stopped.running, false)
   assert.equal(stopped.outcome.detail, 'pty worker crashed')
+})
+
+test('an APK without its native Linux loader fails before opening a PTY', async () => {
+  const { terminal, changes } = harness(undefined, {
+    launcher: '/runtime/bionilux', nativeLibDir: '/missing-linux-apk-loader',
+  })
+  await assert.rejects(terminal.request({ action: 'open', rows: 24, cols: 80 }), {
+    status: 409, message: 'linux-terminal-native-loader-missing',
+  })
+  assert.equal(changes.length, 0)
 })

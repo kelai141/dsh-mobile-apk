@@ -16,6 +16,8 @@ function terminalError(error: unknown): string {
         return tr('Linux 正在更新或安装，请稍后重试。', 'Linux is being updated or installed. Try again shortly.')
       case 'linux-terminal-runtime-incompatible':
         return tr('当前 Linux 版本需要更新。', 'Update Linux to use the terminal.')
+      case 'linux-terminal-native-loader-missing':
+        return tr('当前 APK 缺少 Linux 原生加载器，请安装包含加载器的版本。', 'This APK is missing the Linux native loader. Install a build containing it.')
       case 'linux-terminal-pty-unavailable':
         return tr('终端服务尚未启动。', 'The terminal service is unavailable.')
     }
