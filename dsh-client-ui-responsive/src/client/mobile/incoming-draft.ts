@@ -286,7 +286,7 @@ export class IncomingDraftConsumer {
     if (!this.exhausted.has(item.entryId)) {
       this.exhausted.add(item.entryId)
       console.warn('[dsh-mobile] incoming draft hydration exhausted; a fresh share is required:', item.name)
-      const sessionId = item.sessionId ?? this.createdSessions.get(item.entryId)
+      const sessionId = item.targetSessionId ?? item.sessionId ?? this.createdSessions.get(item.entryId)
       const scope = sessionId === undefined ? undefined : this.runtime.sessionScope(sessionId)
       const text = '外部附件草稿多次载入失败，已停止自动重试；请重新使用系统打开方式分享文件。'
       if (scope !== undefined) {

@@ -1288,13 +1288,15 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (receipt.error == "attachment-pending") {
       scheduleRender()
       val attempts = attachmentRecheckAttempts[receipt.requestId] ?: 0
-      if (attempts < 3) {
+      // The server owns the queue/ticket expiry. Keep waking the background consumer
+      // while that receipt can still settle, including after a slow provider copy.
+      if (attempts < 128) {
         attachmentRecheckAttempts[receipt.requestId] = attempts + 1
         main.postDelayed({
           if (!destroyed && attachmentRequestIds[receipt.sessionId]?.contains(receipt.requestId) == true) {
             OverlayAttachmentBus.recheckPending(receipt.sessionId)
           }
-        }, 1_500L * (attempts + 1))
+        }, minOf(5_000L, 1_500L * (attempts + 1)))
       }
       return
     }
