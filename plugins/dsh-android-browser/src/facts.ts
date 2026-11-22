@@ -56,7 +56,7 @@ export function factsFromEnv(env: NodeJS.ProcessEnv = process.env): FactsRead {
       /* 解析失败按"未上报"处理 */
     }
   }
-  return { facts: MEASURED_DEVICE_BASELINE, source: 'measured-baseline(p0-2026-09-12, MuMu/WebView110)' }
+  return { facts: MEASURED_DEVICE_BASELINE, source: 'emulator-baseline(p0-2026-09-12, MuMu/WebView110; not current-device facts)' }
 }
 
 /** 壳桥 browserCaps 读取（异步；不可用返回 undefined 由调用方回落）。 */

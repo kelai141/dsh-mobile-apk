@@ -20,13 +20,15 @@ package com.dsharnessmobile.shell
  * 入队时记 `(tabId, generation)`；派发前比对当前 tab 的世代，不同代**丢弃**（不出表后调用回调）。
  * 判据落在下面这个纯函数上，JVM 单测可以直接钉住「旧世代被丢弃」。
  *
- * @property tabId 发起求值时所在的 tab。
+ * @property remoteTabId 渲染进程使用的会话限定 tab id。
  * @property generation 发起求值时该 tab 的世代（`Tab.generation.get()`）。
  * @property callback 回执回调（在主线程派发）。
  */
 internal data class PendingJsEntry(
-  val tabId: String,
+  val remoteTabId: String,
   val generation: Long,
+  val owner: Any? = null,
+  val onFailure: (String) -> Unit = {},
   val callback: (String?) -> Unit,
 )
 
@@ -51,7 +53,7 @@ internal object PendingJsDispatch {
    */
   fun decide(entry: PendingJsEntry, replyTabId: String, liveGeneration: Long?): Decision {
     if (liveGeneration == null) return Decision.DISCARD_TAB_GONE
-    if (replyTabId != entry.tabId) return Decision.DISCARD_TAB_GONE
+    if (replyTabId != entry.remoteTabId) return Decision.DISCARD_TAB_GONE
     if (liveGeneration != entry.generation) return Decision.DISCARD_STALE_GENERATION
     return Decision.DELIVER
   }

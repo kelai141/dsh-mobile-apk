@@ -387,6 +387,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
         // 功能 B（0.14.6）：故障诊断包分享。入口可见性由 refreshGuideMeta 按证据点亮。
         onShareLog = { shareGuideLog() },
         onManagement = { management.toggle() },
+        onSafeMode = { enterSafeMode() },
         onRepairAssistant = {
           RepairState.requireRepair(activity)
           activity.startActivity(Intent(activity, RepairActivity::class.java))
@@ -482,6 +483,10 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     // repair gate is set; its absence was what forced users to open the assistant to retry.
     (chrome.repairButton.parent as? View)?.visibility =
       if (phase == GuidePhase.Error) View.VISIBLE else View.GONE
+    chrome.safeModeButton.visibility = if (phase == GuidePhase.Error && runCatching {
+      val tail = PluginMounts.readEngineLogTail(activity, 32_000)
+      startupPluginFailure(tail)
+    }.getOrDefault(false)) View.VISIBLE else View.GONE
 
     val showProgress = busy
     progressBar.visibility = if (showProgress) View.VISIBLE else View.GONE
@@ -1180,4 +1185,10 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       ""
     }
   }
+}
+
+internal fun startupPluginFailure(logTail: String): Boolean = logTail.lineSequence().any {
+  it.contains("required plugins did not activate", ignoreCase = true) ||
+    (it.contains("disabling profile plugin", ignoreCase = true) &&
+      it.contains("incompatible with dsh", ignoreCase = true))
 }

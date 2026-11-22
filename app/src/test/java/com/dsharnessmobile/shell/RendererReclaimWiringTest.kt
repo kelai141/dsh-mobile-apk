@@ -35,12 +35,9 @@ class RendererReclaimWiringTest {
     assertTrue("destroy() 必须 drain 在途回执", body("fun destroy()").contains("drainPendingJs("))
   }
 
-  @Test fun enqueueGoesThroughCapAwareEntryPoint() {
-    val eval = body("private fun evaluateOnTab(")
-    assertTrue("evaluateOnTab 必须走 enqueuePendingJs", eval.contains("enqueuePendingJs(seq, tab, callback)"))
-    assertFalse("不得绕过上限直接入队", eval.contains("pendingJs[seq] = PendingJsEntry("))
-    assertTrue("入队实现在 enqueuePendingJs 里",
-      body("private fun enqueuePendingJs(").contains("pendingJs[seq] = PendingJsEntry("))
+  @Test fun rendererDisconnectDrainsPendingJs() {
+    val event = body("private fun applyRendererEvent(")
+    assertTrue(event.contains("drainPendingJs(\"renderer-disconnected\")"))
   }
 
   @Test fun drainIsObservable() {
@@ -48,13 +45,13 @@ class RendererReclaimWiringTest {
     assertTrue("回收必须写日志", d.contains("Log.w"))
     assertTrue("日志必须带条数", d.contains("count="))
     assertTrue("日志必须带原因", d.contains("reason="))
-    assertTrue("必须逐条回调 null", d.contains("entry.callback(null)"))
+    assertTrue("必须逐条回传失败原因", d.contains("entry.onFailure(failure)"))
   }
 
   @Test fun capIsCheckedBeforeEnqueue() {
-    val e = body("private fun enqueuePendingJs(")
+    val e = source.substringAfter("private fun evaluateOnTab(").substringBefore("private fun tabViewportSize(")
     assertTrue("入队前必须查上限", e.contains("PendingJsDrain.shouldReclaim("))
-    assertTrue("超限必须先 drain", e.indexOf("shouldReclaim") < e.indexOf("pendingJs[seq] ="))
+    assertTrue("超限必须先 drain", e.indexOf("drainPendingJs(") in 0 until e.indexOf("pendingJs[seq] = entry"))
   }
 
   // ── #1364 ──────────────────────────────────────────────────────────────────

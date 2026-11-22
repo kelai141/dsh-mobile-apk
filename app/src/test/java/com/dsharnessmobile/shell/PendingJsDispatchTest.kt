@@ -13,21 +13,21 @@ import org.junit.Test
  * 断言，因为缺陷本体就是「关页之后回执照旧写回」。
  */
 class PendingJsDispatchTest {
-  private fun entry(tabId: String = "t1", generation: Long = 1L): PendingJsEntry =
+  private fun entry(tabId: String = "session-a/tab-1", generation: Long = 1L): PendingJsEntry =
     PendingJsEntry(tabId, generation) { /* 回调在纯判据里不参与 */ }
 
   @Test fun staleGenerationReplyIsDiscarded() {
     // tab 还在、但已经换过代（closeTabOp 会把 generation +1 再销毁 view）
     assertEquals(
       Decision.DISCARD_STALE_GENERATION,
-      PendingJsDispatch.decide(entry(generation = 1L), "t1", liveGeneration = 2L),
+      PendingJsDispatch.decide(entry(generation = 1L), "session-a/tab-1", liveGeneration = 2L),
     )
   }
 
   @Test fun replyForClosedTabIsDiscarded() {
     assertEquals(
       Decision.DISCARD_TAB_GONE,
-      PendingJsDispatch.decide(entry(), "t1", liveGeneration = null),
+      PendingJsDispatch.decide(entry(), "session-a/tab-1", liveGeneration = null),
     )
   }
 
@@ -35,21 +35,28 @@ class PendingJsDispatchTest {
     // 渲染侧自报的 tabId 与条目不一致（不该发生，但不得据此写回别人的状态）
     assertEquals(
       Decision.DISCARD_TAB_GONE,
-      PendingJsDispatch.decide(entry(tabId = "t1"), "t2", liveGeneration = 1L),
+      PendingJsDispatch.decide(entry(tabId = "session-a/tab-1"), "session-b/tab-1", liveGeneration = 1L),
     )
   }
 
   @Test fun matchingGenerationAndTabDelivers() {
     assertEquals(
       Decision.DELIVER,
-      PendingJsDispatch.decide(entry(generation = 3L), "t1", liveGeneration = 3L),
+      PendingJsDispatch.decide(entry(generation = 3L), "session-a/tab-1", liveGeneration = 3L),
+    )
+  }
+
+  @Test fun localShortIdCannotMatchTheRendererReply() {
+    assertEquals(
+      Decision.DISCARD_TAB_GONE,
+      PendingJsDispatch.decide(entry(tabId = "tab-1"), "session-a/tab-1", liveGeneration = 1L),
     )
   }
 
   @Test fun staleAndGoneAreDistinguishableForDiagnosis() {
     // 两态必须可区分：关闭竞态 vs 有人在旧页面上继续操作，排障含义不同。
-    val stale = PendingJsDispatch.decide(entry(generation = 1L), "t1", liveGeneration = 2L)
-    val gone = PendingJsDispatch.decide(entry(), "t1", liveGeneration = null)
+    val stale = PendingJsDispatch.decide(entry(generation = 1L), "session-a/tab-1", liveGeneration = 2L)
+    val gone = PendingJsDispatch.decide(entry(), "session-a/tab-1", liveGeneration = null)
     assertFalse(stale == gone)
   }
 }

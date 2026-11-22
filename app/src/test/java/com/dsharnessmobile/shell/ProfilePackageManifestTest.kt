@@ -60,4 +60,22 @@ class ProfilePackageManifestTest {
     val blankBase = JSONObject(requireNotNull(ProfilePackageManifest.merge("", factory)))
     assertFalse("空白用户面直落工厂件时同样要摘退役项", blankBase.getJSONObject("dependencies").has("@dsh-android/dsh-android-manage"))
   }
+  @Test fun migratedCorePinsExposeBundledPackagesAndPreserveOtherPins() {
+    val profile = JSONObject("""{"dependencies":{"@deepseek-ai/dsh-llm":"0.1.1-rc.2","@deepseek-ai/dsh-tools":"0.1.1-rc.2","@deepseek-ai/dsh-session":"0.2.1-rc.3","user-plugin":"0.1.1-rc.2"}}""")
+    val bundled = mapOf("@deepseek-ai/dsh-llm" to "0.2.2-rc.3")
+    assertEquals(setOf("@deepseek-ai/dsh-llm"), ProfilePackageManifest.removeLegacyCorePins(profile, bundled::get))
+    val dependencies = profile.getJSONObject("dependencies")
+    assertFalse(dependencies.has("@deepseek-ai/dsh-llm"))
+    assertEquals("0.1.1-rc.2", dependencies.getString("@deepseek-ai/dsh-tools"))
+    assertEquals("0.2.1-rc.3", dependencies.getString("@deepseek-ai/dsh-session"))
+    assertEquals("0.1.1-rc.2", dependencies.getString("user-plugin"))
+    assertTrue(ProfilePackageManifest.removeLegacyCorePins(profile, bundled::get).isEmpty())
+  }
+
+  @Test fun pluginStartupFailureExposesSafeMode() {
+    assertTrue(startupPluginFailure("dsh: startup failed: 2 required plugins did not activate"))
+    assertTrue(startupPluginFailure("dsh: disabling profile plugin row llm: incompatible with dsh 0.2.2-rc.1"))
+    assertFalse(startupPluginFailure("dsh: failed to listen on port"))
+    assertFalse(startupPluginFailure("dsh: disabling profile plugin row without a version conflict"))
+  }
 }

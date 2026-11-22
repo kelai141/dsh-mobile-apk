@@ -226,9 +226,13 @@ export function createMobileBootstrap(options = {}) {
   let tail = Promise.resolve()
   const listeners = new Set()
 
-  const statusValue = () => statusShape(state, mobileVersion, operation, options.version ?? BOOTSTRAP_VERSION, hostArch)
-  const emit = () => {
-    lastStatus = statusValue()
+  const statusValue = (verified) => {
+    const runtime = verified ?? (operation === 'idle' && state.injectionActivated && typeof manager?.status === 'function'
+      ? manager.status() : state.runtime)
+    return statusShape({ ...state, runtime }, mobileVersion, operation, options.version ?? BOOTSTRAP_VERSION, hostArch)
+  }
+  const emit = (verified) => {
+    lastStatus = statusValue(verified)
     for (const listener of listeners) {
       try { listener(lastStatus) } catch { /* Listener errors do not affect bootstrap operations. */ }
     }
@@ -383,14 +387,7 @@ export function createMobileBootstrap(options = {}) {
       restoredThisLoad = true
       state.enabled = true
       state.injectionActivated = true
-      // `status()` reads active.json; the runtime plugin registers its tools during
-      // activation only while that record is healthy, so surface an unhealthy
-      // restore instead of reporting a working environment.
-      if (state.runtime && state.runtime.healthy === false) {
-        state.lastError = 'Restored Linux runtime is unhealthy: ' + (state.runtime.reason ?? 'unknown reason')
-      } else {
-        state.lastError = null
-      }
+      state.lastError = null
       await save()
     } catch (error) {
       // Activation failure leaves the record installed but inactive: no download,
@@ -621,7 +618,23 @@ export function createMobileBootstrap(options = {}) {
     experimental: true,
     enabledByDefault: false,
     ready,
-    status: async () => { await ready; await updateMobileVersion().catch(() => {}); return emit() },
+    status: async () => {
+      await ready
+      await updateMobileVersion().catch(() => {})
+      const active = manager
+      if (operation === 'idle' && state.enabled && state.injectionActivated && typeof active?.verify === 'function') {
+        let runtime
+        try {
+          runtime = await active.verify()
+        } catch (error) {
+          runtime = { healthy: false, state: 'unhealthy', reason: error?.message ?? String(error) }
+        }
+        if (active === manager && operation === 'idle' && state.enabled && state.injectionActivated) {
+          return emit(runtime)
+        }
+      }
+      return emit()
+    },
     /**
      * Check the release channel for a newer Linux version.
      *

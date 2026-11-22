@@ -1,8 +1,8 @@
 /**
- * dsh-android-browser 数据契约（唯一契约源）。
+ * dsh-android-browser 命名、预设和参考契约。
  *
- * 本文件是**面板（client 半，待 dev-gesture 释放 ui-responsive 后落地）/ 工具面 / 壳桥 op**
- * 三面共用的命名与载荷契约。任何一面改名前先改这里，避免三处各自漂移。
+ * 工具名、操作名和预设由实现共用。下文的签名表供文档和测试参考，运行时以
+ * defineTool 的 schema 与 BrowserHost 的处理器为准。
  *
  * 命名对齐（方案 §5.3）：工具名对齐 Lum1104/dsh-browser 的生态既有语义
  * （browser_open/snapshot/click/type/press/scroll/navigate/*_tab/get_text/wait）；
@@ -121,7 +121,7 @@ export const IDENTITY_PROFILES: readonly IdentityProfile[] = [
 ] as const
 
 /**
- * 工具面逐条契约（参数 / 返回值 / 权限档）——面板与实现共用；权限档对齐
+ * 工具面参考（参数 / 返回值 / 历史权限档）；权限档对齐
  * docs/IMPLEMENTATION-ACCEPTANCE-PLAN-2026-09-12.md §4.5 的审批表：
  *  read = 只读（可按 origin 信任）/ approval = 需批准 / full-access = 完全访问档且默认失败关闭 /
  *  confirm = 需批准 + 额外二次确认（伪装档）。
@@ -135,13 +135,13 @@ export interface ToolContract {
 
 export const BROWSER_TOOL_CONTRACTS: readonly ToolContract[] = [
   { name: BROWSER_TOOLS.tier, params: '{}', returns: '{ok,tier,viewportRoute,identityRoute,factsSource,uaChAvailable,androidxWebkitAvailable,densityOverrideSupported,browserWebViewAvailable,cdpEnabled,reasons[],degradedNotes[],tools[],ops[],routes[],viewportPresets[],identityProfiles[]}', permission: 'read' },
-  { name: BROWSER_TOOLS.open, params: '{url:string, viewport?:string, identity?:string}', returns: '{ok,url,title,loadState}', permission: 'approval' },
-  { name: BROWSER_TOOLS.snapshot, params: '{delta?:boolean}', returns: '{ok,sourceUrl,sourceTitle,text,refs:[{ref,bx,role,name}],truncated}', permission: 'read' },
-  { name: BROWSER_TOOLS.click, params: '{ref:string}', returns: '{ok,url,changed:boolean}', permission: 'approval' },
-  { name: BROWSER_TOOLS.type, params: '{ref:string, text:string, replace?:boolean}', returns: '{ok,url}', permission: 'approval' },
-  { name: BROWSER_TOOLS.press, params: '{key:string}', returns: '{ok,url}', permission: 'approval' },
+  { name: BROWSER_TOOLS.open, params: '{url:string, viewport?:string, identity?:string, tabId?:string}', returns: '{ok,tabId,url,title,loadState,reason?,pageGeneration,appliedViewport?,appliedIdentity?}', permission: 'approval' },
+  { name: BROWSER_TOOLS.snapshot, params: '{delta?:boolean}', returns: '{ok,tabId,pageGeneration,surface,url,title,viewport,nodes:[{ref,role,name,bounds,inView,disabled}],truncated}', permission: 'read' },
+  { name: BROWSER_TOOLS.click, params: '{ref:string}', returns: '{ok,url,changed,pageGeneration,loadState,title,reason?}', permission: 'approval' },
+  { name: BROWSER_TOOLS.type, params: '{ref:string, text:string, replace?:boolean}', returns: '{ok,url,value,pageGeneration,loadState,title,reason?}', permission: 'approval' },
+  { name: BROWSER_TOOLS.press, params: '{key:string}', returns: '{ok,url,canGoBack,loadState,title,reason?}', permission: 'approval' },
   { name: BROWSER_TOOLS.scroll, params: '{direction:"up"|"down"|"left"|"right", amount?:number}', returns: '{ok,scrollY,atEnd:boolean}', permission: 'read' },
-  { name: BROWSER_TOOLS.getText, params: '{region?:{x:number,y:number,w:number,h:number}}', returns: '{ok,sourceUrl,text,truncated}', permission: 'read' },
+  { name: BROWSER_TOOLS.getText, params: '{region?:{x:number,y:number,w:number,h:number}}', returns: '{ok,url,title,text,truncated}', permission: 'read' },
   { name: BROWSER_TOOLS.wait, params: '{selector?:string, stable?:boolean, timeoutMs?:number}', returns: '{ok,waited:number,reason}', permission: 'read' },
   { name: BROWSER_TOOLS.navigate, params: '{url:string}', returns: '{ok,url,title}', permission: 'approval' },
   { name: BROWSER_TOOLS.back, params: '{}', returns: '{ok,url,canGoBack:boolean}', permission: 'approval' },
@@ -149,23 +149,23 @@ export const BROWSER_TOOL_CONTRACTS: readonly ToolContract[] = [
   { name: BROWSER_TOOLS.reload, params: '{}', returns: '{ok,url}', permission: 'approval' },
   { name: BROWSER_TOOLS.listTabs, params: '{}', returns: '{ok,tabs:[{tabId,url,title,active}],activeTabId}', permission: 'approval' },
   { name: BROWSER_TOOLS.followTab, params: '{tabId:string}', returns: '{ok,activeTabId,url}', permission: 'approval' },
-  { name: BROWSER_TOOLS.closeTab, params: '{tabId:string}', returns: '{ok,activeTabId}', permission: 'approval' },
+  { name: BROWSER_TOOLS.closeTab, params: '{tabId?:string}', returns: '{ok,closedTabId,activeTabId,tabs}', permission: 'approval' },
   { name: BROWSER_TOOLS.setIdentity, params: '{profile:string}', returns: '{ok,profile,uaChApplied:boolean,degraded?:string}', permission: 'confirm' },
   { name: BROWSER_TOOLS.setViewport, params: '{preset:string, fit?:"fit"|"one-to-one"}', returns: '{ok,preset,width,height,route}', permission: 'approval' },
   { name: BROWSER_TOOLS.screenshot, params: '{inline?:boolean}', returns: '{ok,path?,bytes,health:"ok"|"suspect",note?}', permission: 'full-access' },
 ] as const
 
-/** 壳桥 op 逐条契约（参数 / 返回 / 权限档），供六处登记链与面板共用。 */
+/** 壳桥 op 的参考签名。会话与标签由原生桥和 BrowserHost 校验。 */
 export const BROWSER_OP_CONTRACTS: readonly ToolContract[] = [
   { name: BROWSER_OPS.caps, params: '{}', returns: '{ok,webviewMajor,uaChAvailable,androidxWebkitCompiled,androidxWebkitAvailable,densityOverrideSupported,screenWidth,screenHeight,densityDpi,rendererProcesses}', permission: 'read' },
-  { name: BROWSER_OPS.show, params: '{url?:string}', returns: '{ok,visible,created,url,pageGeneration}', permission: 'read' },
+  { name: BROWSER_OPS.show, params: '{url?:string,tabId?:string}', returns: '{ok,visible,created,url,pageGeneration}', permission: 'read' },
   { name: BROWSER_OPS.hide, params: '{}', returns: '{ok,visible}', permission: 'read' },
   { name: BROWSER_OPS.close, params: '{}', returns: '{ok,created,visible}', permission: 'read' },
   { name: BROWSER_OPS.open, params: '{url:string}', returns: '{ok,url,title,pageGeneration,reason}', permission: 'approval' },
   { name: BROWSER_OPS.js, params: '{expr?:string, snapshot?:boolean}', returns: '{ok,value,pageGeneration,url} | 快照 {ok,tabId,surface,pageGeneration,url,title,viewport,nodes[],truncated}', permission: 'full-access' },
   { name: BROWSER_OPS.input, params: '{kind:"tap"|"key"|"text", ref?, pageGeneration?, x?, y?, text?, key?}', returns: '{ok,url,pageGeneration,changed?,value?}', permission: 'approval' },
   { name: BROWSER_OPS.shot, params: '{inline?:boolean}', returns: '{ok,path,bytes,width,height,health,note?}', permission: 'full-access' },
-  { name: BROWSER_OPS.state, params: '{}', returns: '{ok,url,title,pageGeneration,canGoBack,canGoForward,visible,tabId,tabs[]}', permission: 'read' },
+  { name: BROWSER_OPS.state, params: '{}', returns: '{ok,url,title,pageGeneration,canGoBack,canGoForward,created,visible,tabId,tabs[],jsDiscardCount,lastJsDiscardReason}', permission: 'read' },
   { name: BROWSER_OPS.setUa, params: '{profile:string, ua:string, platform:string, mobile:boolean}', returns: '{ok,profile,applied,uaChApplied:boolean,degraded?,reloaded}', permission: 'confirm' },
   { name: BROWSER_OPS.viewport, params: '{route:"S1"|"S2"|"S2b"|"S3", preset?:string, width:number, height:number, scale?:number}', returns: '{ok,route,width,height}', permission: 'approval' },
   // 0.14.0 多页签：三条 op 与 BROWSER_OPS 同批登记。契约完备性由插件单测守

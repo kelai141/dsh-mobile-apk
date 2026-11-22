@@ -124,8 +124,10 @@ internal class NativeControlDispatcher(
       if (allowed) gateGranted.set(true)
       allowed
     } }
+    val platformPlan = if (committedPlan.optString("backend") == "browserHost")
+      JSONObject(committedPlan.toString()).put("hostDeadlineNanos", deadline) else committedPlan
     val receipt = try {
-      platform.execute(callId, committedPlan, nativeArgs, { refresh().optBoolean("ok") }, gate)
+      platform.execute(callId, platformPlan, nativeArgs, { refresh().optBoolean("ok") }, gate)
         .get((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)
     } catch (_: TimeoutException) {
       exchange("cancel", callId)

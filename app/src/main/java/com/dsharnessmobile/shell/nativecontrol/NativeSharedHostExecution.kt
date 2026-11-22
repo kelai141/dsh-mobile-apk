@@ -29,7 +29,8 @@ internal class NativeSharedHostExecution(
     return try {
       worker.supplyAsync({
         val admitted = AtomicBoolean(false)
-        val raw = host.controlOp(plan.getString("operation"), args) {
+        val raw = host.controlOp(plan.getString("operation"), args,
+          if (plan.has("hostDeadlineNanos")) plan.getLong("hostDeadlineNanos") else null) {
           val allowed = authorize()
           if (allowed) admitted.set(true)
           allowed
@@ -56,6 +57,6 @@ internal class NativeSharedHostExecution(
       "browserInput", "browserShot", "browserState", "browserSetUa", "browserViewport",
       "browserTabs", "browserFollowTab", "browserCloseTab",
     )
-    private val worker = NativeOperationWorker("native-browser-host", parallelism = 2)
+    private val worker = NativeOperationWorker("native-browser-host", queued = 16)
   }
 }

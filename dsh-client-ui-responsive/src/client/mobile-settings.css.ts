@@ -4,7 +4,8 @@
  *
  * Upstream SettingsRoot draws a fixed overlay with an 800px two-column panel
  * (nav + options). On the phone form it must reflow to a single column and fill
- * the viewport (user requirement: 设置页全屏显示). 0.14.7-B additionally splits it
+ * the viewport (user requirement: 设置页全屏显示). The panel uses flex directly
+ * because older WebViews discard upstream's range-syntax media query. 0.14.7-B splits it
  * into two levels: 设置首页（分类列表）→ 二级页（可操作设置）. The level is published as
  * `data-dsh-settings-level` on the panel by mobile/settings-nav.ts; this sheet only reads it.
  *
@@ -79,6 +80,7 @@ export const MOBILE_SETTINGS_CSS: string = `
     max-height: none;
     padding-top: var(--dsh-mobile-top-inset, 0px);
     border-radius: 0;
+    display: flex;
     flex-direction: column;
   }
 
@@ -177,6 +179,7 @@ export const MOBILE_SETTINGS_CSS: string = `
     flex-direction: column;
     flex: 1;
     min-height: 0;
+    box-sizing: border-box;
     width: 100%;
     height: auto;
     gap: 0;

@@ -477,6 +477,9 @@ function purgeStaleUnclaimed(mode: 'boot' | 'ttl'): number {
     if (!stale) continue
     try {
       rmSync(join(queueDir(), item.file), { force: true })
+      if (item.requestId !== undefined && item.targetSessionId !== undefined) {
+        targetedOutcomes.set(item.requestId, { targetSessionId: item.targetSessionId, state: 'removed' })
+      }
       purged += 1
       ctxLogger?.('dsh-android-file-open')?.info?.('未认领来件过期清理(' + mode + ')：' + item.name + '（草稿仅在当前进程有效）')
     } catch { /* 删除失败留待下次启动再清 */ }
@@ -780,6 +783,9 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
     const lease = draftLeases.get(ticket)
     if (lease !== undefined && lease.expiresAt <= Date.now()) {
       draftLeases.delete(ticket)
+      if (lease.requestId !== undefined) {
+        targetedOutcomes.set(lease.requestId, { targetSessionId: lease.sessionId, state: 'removed' })
+      }
       return undefined
     }
     return lease
@@ -825,6 +831,10 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         if (req.method === 'GET') {
           const requestId = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('requestId')
           if (requestId !== null) {
+            if (targetedOutcomes.get(requestId)?.state === 'pending') {
+              try { purgeStaleUnclaimed('ttl') } catch { /* A transient read error is not a rejection. */ }
+              for (const ticket of draftLeases.keys()) leaseFor(ticket)
+            }
             const result = targetedOutcomes.get(requestId)
             res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
             res.end(JSON.stringify(result === undefined ? { ok: false, state: 'unknown' } : { ok: true, ...result }))
@@ -984,6 +994,9 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
             // lease 是同一口径，三处处置必须一致）。
             if (path === null || !existsSync(path)) {
               rmSync(join(queueDir(), item.file), { force: true })
+              if (item.requestId !== undefined) {
+                targetedOutcomes.set(item.requestId, { targetSessionId: sessionId, state: 'removed' })
+              }
               res.writeHead(410, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
               res.end(JSON.stringify({ ok: false, error: 'incoming source expired' }))
               return

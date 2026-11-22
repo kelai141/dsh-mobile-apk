@@ -286,7 +286,7 @@ export class IncomingDraftConsumer {
     if (!this.exhausted.has(item.entryId)) {
       this.exhausted.add(item.entryId)
       console.warn('[dsh-mobile] incoming draft hydration exhausted; a fresh share is required:', item.name)
-      const sessionId = item.sessionId ?? this.createdSessions.get(item.entryId)
+      const sessionId = item.targetSessionId ?? item.sessionId ?? this.createdSessions.get(item.entryId)
       const scope = sessionId === undefined ? undefined : this.runtime.sessionScope(sessionId)
       const text = '外部附件草稿多次载入失败，已停止自动重试；请重新使用系统打开方式分享文件。'
       if (scope !== undefined) {
@@ -378,7 +378,14 @@ export class IncomingDraftConsumer {
     document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'hydrate:' + item.state)
     let release: (() => void) | undefined
     try {
-      if (item.targetSessionId !== undefined) release = await this.runtime.retainSession?.(item.targetSessionId)
+      if (item.targetSessionId !== undefined) {
+        try {
+          release = await this.runtime.retainSession?.(item.targetSessionId)
+        } catch {
+          this.scopeDeferralExhausted(item)
+          return
+        }
+      }
       const locallyCreated = this.createdSessions.get(item.entryId)
       // camera 来件的目标 = **页面当前会话**（缺陷 1 的落点）：不建新会话、也不做可见导航。
       // 只在这里取一次；拿不到就落回原行为（下面 createSession 分支），不会静默丢件。

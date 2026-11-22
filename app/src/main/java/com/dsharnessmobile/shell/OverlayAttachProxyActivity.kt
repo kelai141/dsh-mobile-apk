@@ -64,7 +64,7 @@ internal object OverlayAttachmentBus {
         checking.remove(receipt.requestId)
         when (state) {
           "draft-ready" -> deliver(receipt.kind, receipt.path, "", receipt.sessionId, receipt.requestId)
-          "removed" -> deliver(receipt.kind, "", "attachment-not-ready", receipt.sessionId, receipt.requestId)
+          "removed", "unknown" -> deliver(receipt.kind, "", "attachment-not-ready", receipt.sessionId, receipt.requestId)
           else -> deliver(receipt.kind, receipt.path, "attachment-pending", receipt.sessionId, receipt.requestId)
         }
       }
@@ -283,7 +283,8 @@ internal class OverlayAttachProxyActivity : androidx.activity.ComponentActivity(
     OverlayAttachmentBus.remember(OverlayAttachmentBus.Receipt(kind, stagedName, "attachment-pending", sessionId, requestId))
     val mediaType = overlayAttachmentMediaType(handOffKind, pickedMediaType)
     FileIncoming.processTargetedIncomingPath(this, staged, sessionId, requestId, mediaType) { accepted ->
-      if (!accepted) pendingResult() else awaitDraftReady(60)
+      // A lost POST reply can still have enqueued the exact request. Resolve by requestId.
+      awaitDraftReady(if (accepted) 60 else 12)
     }
   }
 
@@ -295,7 +296,7 @@ internal class OverlayAttachProxyActivity : androidx.activity.ComponentActivity(
       when (state) {
         "draft-ready" -> { completed = true; OverlayAttachmentBus.deliver(kind, stagedName, "", sessionId, requestId); finish() }
         "removed" -> fail("attachment-not-ready")
-        "unknown" -> pendingResult()
+        "unknown" -> fail("attachment-not-ready")
         else -> android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ awaitDraftReady(remaining - 1) }, 500L)
       }
     }

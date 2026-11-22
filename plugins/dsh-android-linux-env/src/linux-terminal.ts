@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import type { SubprocessTerminalHandle, SubprocessTerminalSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 
 const HISTORY_LIMIT = 512 * 1024
@@ -6,6 +8,7 @@ const PAGE_LIMIT = 32 * 1024
 
 interface RuntimePaths {
   launcher: string
+  nativeLibDir?: string
   [name: string]: unknown
 }
 
@@ -89,7 +92,9 @@ function recordTerminal(handle: SubprocessTerminalHandle) {
   let history = ''
   let first = 0
   let running = true
-  let outcome: { exitCode: number | null; signal: string | null } | undefined
+  let outcome: { exitCode: number | null; signal: string | null; detail?: string } | undefined
+  let outputError: string | undefined
+  const reason = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 400)
   let stopPromise: Promise<void> | undefined
   const stop = () => stopPromise ??= handle.terminate()
   handle.output.setEncoding('utf8')
@@ -102,9 +107,14 @@ function recordTerminal(handle: SubprocessTerminalHandle) {
       history = history.slice(excess)
     }
   })
-  handle.output.on('error', () => { void stop().catch(() => {}) })
-  const settled = handle.done.then(result => { outcome = result }, () => {
-    outcome = { exitCode: null, signal: null }
+  handle.output.on('error', error => {
+    outputError = reason(error)
+    void stop().catch(() => {})
+  })
+  const settled = handle.done.then(result => {
+    outcome = outputError ? { ...result, detail: outputError } : result
+  }, error => {
+    outcome = { exitCode: null, signal: null, detail: outputError ?? reason(error) }
   }).then(() => {
     running = false
     return stop()
@@ -147,6 +157,12 @@ export function createLinuxTerminal(options: {
         throw new TerminalError(409, 'linux-terminal-runtime-unavailable', verified.reason)
       }
       if (manager.gate.managementPending) throw new TerminalError(409, 'linux-terminal-runtime-busy')
+      const nativeLibDir = verified.paths.nativeLibDir
+      if (nativeLibDir && !existsSync(join(nativeLibDir, 'libbionilux-loader.so'))) {
+        // The APK loader must be executable from nativeLibraryDir. Falling back to
+        // the guest loader can abort in Android's linker before Bash emits output.
+        throw new TerminalError(409, 'linux-terminal-native-loader-missing')
+      }
       const launch = manager._sessionLaunch(verified.paths)
       if (launch.args.at(-2) !== '--norc' || launch.args.at(-1) !== '-s') {
         throw new TerminalError(409, 'linux-terminal-runtime-incompatible')
@@ -159,11 +175,15 @@ export function createLinuxTerminal(options: {
         terminalType: 'xterm-256color',
         graceMs: 500,
         ...size,
+      }).catch((error: unknown) => {
+        if (error instanceof TerminalError) throw error
+        const detail = error instanceof Error ? error.message : String(error)
+        throw new TerminalError(502, 'linux-terminal-pty-start-failed', detail.slice(0, 400))
       })
       const started = recordTerminal(handle)
       const child = { abort: () => { void started.stop().catch(() => {}) }, promise: started.settled }
       manager.children.add(child)
-      void started.settled.then(() => manager.children.delete(child), () => {})
+      void started.settled.then(() => manager.children.delete(child), () => manager.children.delete(child))
       if (manager.gate.managementPending) {
         await started.stop()
         throw new TerminalError(409, 'linux-terminal-runtime-busy')

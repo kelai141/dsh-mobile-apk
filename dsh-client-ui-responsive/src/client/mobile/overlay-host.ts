@@ -653,7 +653,9 @@ export class OverlayHost {
         return { response, result }
       })
       void Promise.race([receipt, timeout]).then(({ response, result }) => {
-        if (response.ok && result.ok === true && typeof result.state === 'string') this.incomingStates.set(id, result.state)
+        if (response.ok && (result.ok === true || result.state === 'unknown') && typeof result.state === 'string') {
+          this.incomingStates.set(id, result.state)
+        }
       }).catch(() => {}).finally(() => { clearTimeout(timer); this.incomingReads.delete(id) })
     }
     return ok({ state: this.incomingStates.get(id) ?? 'pending' })

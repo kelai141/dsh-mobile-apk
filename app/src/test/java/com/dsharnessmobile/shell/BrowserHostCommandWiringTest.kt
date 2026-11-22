@@ -174,6 +174,8 @@ class BrowserHostCommandWiringTest {
     assertFalse(open.contains("identityApply(") || open.contains("viewportOp(") || open.contains("tabOrNull("))
     val recycle = body("BrowserHost.kt", "private fun recycleView(")
     assertTrue(recycle.contains("reloadPreviousUrl && it != \"about:blank\""))
+    assertBefore(recycle, "ensureViewFor(tab)", "if (tab.remoteCreated) applyStageBounds()")
+    assertBefore(recycle, "if (tab.remoteCreated) applyStageBounds()", "loadInto(tab, it)")
   }
 
   @Test

@@ -27,4 +27,29 @@ class NativeOperationWorkerTest {
     }
     assertEquals(42, next.get(5, SECONDS))
   }
+
+  @Test fun boundedQueueRunsAcceptedBrowserWorkInOrder() {
+    val worker = NativeOperationWorker("browser-worker-test", queued = 2)
+    val entered = CountDownLatch(1)
+    val finish = CountDownLatch(1)
+    val order = mutableListOf<Int>()
+    val first = worker.supplyAsync {
+      entered.countDown()
+      check(finish.await(5, SECONDS))
+      order.add(1)
+    }
+    try {
+      assertTrue(entered.await(5, SECONDS))
+      val second = worker.supplyAsync { order.add(2) }
+      val third = worker.supplyAsync { order.add(3) }
+      assertThrows(RejectedExecutionException::class.java) { worker.supplyAsync { order.add(4) } }
+      finish.countDown()
+      first.get(5, SECONDS)
+      second.get(5, SECONDS)
+      third.get(5, SECONDS)
+      assertEquals(listOf(1, 2, 3), order)
+    } finally {
+      finish.countDown()
+    }
+  }
 }
