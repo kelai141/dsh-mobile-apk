@@ -824,3 +824,18 @@ describe('newSession', () => {
     expect(String(result.error)).toBe('new-session-unavailable')
   })
 })
+
+it('publishes an explicit missing incoming receipt instead of keeping it pending', async () => {
+  const host = new OverlayHost({})
+  const request = 'fixture-incoming'
+  vi.stubGlobal('fetch', vi.fn(async () => ({
+    ok: true, json: async () => ({ ok: false, state: 'unknown' }),
+  })))
+  try {
+    expect(JSON.parse(host.incoming(request)).state).toBe('pending')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(JSON.parse(host.incoming(request)).state).toBe('unknown')
+  } finally {
+    vi.unstubAllGlobals()
+  }
+})
