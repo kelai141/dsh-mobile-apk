@@ -226,7 +226,11 @@ export function createMobileBootstrap(options = {}) {
   let tail = Promise.resolve()
   const listeners = new Set()
 
-  const statusValue = () => statusShape(state, mobileVersion, operation, options.version ?? BOOTSTRAP_VERSION, hostArch)
+  const statusValue = () => {
+    const runtime = operation === 'idle' && state.injectionActivated && typeof manager?.status === 'function'
+      ? manager.status() : state.runtime
+    return statusShape({ ...state, runtime }, mobileVersion, operation, options.version ?? BOOTSTRAP_VERSION, hostArch)
+  }
   const emit = () => {
     lastStatus = statusValue()
     for (const listener of listeners) {
@@ -383,14 +387,7 @@ export function createMobileBootstrap(options = {}) {
       restoredThisLoad = true
       state.enabled = true
       state.injectionActivated = true
-      // `status()` reads active.json; the runtime plugin registers its tools during
-      // activation only while that record is healthy, so surface an unhealthy
-      // restore instead of reporting a working environment.
-      if (state.runtime && state.runtime.healthy === false) {
-        state.lastError = 'Restored Linux runtime is unhealthy: ' + (state.runtime.reason ?? 'unknown reason')
-      } else {
-        state.lastError = null
-      }
+      state.lastError = null
       await save()
     } catch (error) {
       // Activation failure leaves the record installed but inactive: no download,

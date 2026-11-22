@@ -5,6 +5,7 @@ export type LinuxPhase = 'starting' | 'ready' | 'not-installed' | 'disabled' | '
 export function createLinuxLifecycle() {
   let phase: LinuxPhase = 'starting'
   let detail = 'DSH 已启动，Linux 运行时引擎仍在启动。请稍后调用 linux_environment_status；不要猜测路径或改用宿主 shell。'
+  let activeBootstrap: LinuxBootstrap | undefined
   let unsubscribe: (() => void) | undefined
   const terminal = () => phase === 'stopping' || phase === 'stopped'
   const update = (status: BootstrapStatus) => {
@@ -31,13 +32,19 @@ export function createLinuxLifecycle() {
       if (terminal()) return
       // status() can wait for restore; never await it from the parent apply or a tool call.
       update(await bootstrap.status())
-      if (!terminal()) unsubscribe = bootstrap.subscribe?.(update)
+      if (!terminal()) {
+        activeBootstrap = bootstrap
+        unsubscribe = bootstrap.subscribe?.(update)
+      }
+    },
+    async refresh() {
+      if (!terminal() && activeBootstrap) update(await activeBootstrap.status())
     },
     fail(error: unknown) {
       if (terminal()) return
       phase = 'failed'; detail = 'Linux 启动失败：' + (error instanceof Error ? error.message : String(error))
     },
-    stop() { unsubscribe?.(); unsubscribe = undefined; phase = 'stopping'; detail = 'DSH 引擎正在关闭，Linux 终端与后台任务正在退出。' },
+    stop() { unsubscribe?.(); unsubscribe = undefined; activeBootstrap = undefined; phase = 'stopping'; detail = 'DSH 引擎正在关闭，Linux 终端与后台任务正在退出。' },
     stopped() { phase = 'stopped'; detail = 'Linux 已停止；文件和已安装软件保留。' },
   }
 }

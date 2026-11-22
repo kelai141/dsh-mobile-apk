@@ -408,7 +408,10 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         phase: { type: 'string', required: true, enum: ['starting', 'ready', 'not-installed', 'disabled', 'failed', 'stopping', 'stopped'] },
         ready: { type: 'boolean', required: true }, engine: { type: 'string', required: true, enum: ['dsh'] }, message: { type: 'string', required: true },
       } }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
-    execute: async () => lifecycle.snapshot(),
+    execute: async () => {
+      await lifecycle.refresh()
+      return lifecycle.snapshot()
+    },
   }))
   if (typeof ctx.inject === 'function') ctx.inject(['systemPrompt'], scope => {
     registerLinuxToolContract(scope)

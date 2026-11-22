@@ -50,7 +50,7 @@ const MANIFEST = {
   'client/index.js': 'd2347a0c96fed11d9521cac5bf470231c09629c66256bb10b31047f4e95c35db',
   'src/asset-bundle.js': '7f230cce7d74e1538e704377bbf74fa6519ee956f92a2d943bf722a65b010871',
   'src/github.js': 'eb94f71c3cb1199a9f87dda94f7cd4642dec5c90e158f188dca8ff3d1cd85caf',
-  'src/index.js': 'a1c6e5650bcc17864a7ab1515f0a768d92d35487c9b7f663a5221507830ac647',
+  'src/index.js': '3c69be8b27444d5f053b5b7e81aa10a5290f1d787d669adafd28fd79bc4f3ff1',
   'src/manifest.js': '169dc63151ad1deab8a73a2e1086be048f145cc59eea58280caf48d72471f2d4',
   'src/routes.js': '5a975edf454e38b1dfcd9537c20c279ed2a32154bc8fc59f995a0c0932343795',
   'src/status.js': '494238e39094999e44105d1c56ca562f88ce3e65146bd3070806d4c82dd98f7b',

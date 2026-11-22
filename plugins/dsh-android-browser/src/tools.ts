@@ -331,7 +331,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
     })
   }
 
-  const call = async (op: string, args: Payload, timeoutMs = 15_000): Promise<CallResult> => {
+  const dispatch = async (op: string, args: Payload, timeoutMs = 15_000): Promise<CallResult> => {
     const session = sessionScope.getStore()
     const payload: Payload = session === undefined ? args : { ...args, session }
     const control = face()
@@ -341,8 +341,14 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
     try {
       const reply = await control.controlExec(op, payload, timeoutMs)
       if (reply === null || typeof reply !== 'object' || (reply as { ok?: unknown }).ok !== true) {
-        const message = (reply as { error?: unknown } | null)?.error
-        return { ok: false, error: typeof message === 'string' && message !== '' ? message : 'control-failed' }
+        const failure = reply as { code?: unknown; error?: unknown; guidance?: unknown; data?: Payload } | null
+        const error = failure?.data?.reason || failure?.code || failure?.error
+        const guidance = failure?.data?.guidance ?? failure?.guidance
+        return {
+          ok: false,
+          error: typeof error === 'string' && error !== '' ? error : 'control-failed',
+          ...(typeof guidance === 'string' ? { guidance } : {}),
+        }
       }
       const data = ((reply as { data?: unknown }).data ?? {}) as Payload
       if (data.ok === false) {
@@ -358,19 +364,23 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
     }
   }
 
-  // 浏览器面**不做任何授权校验**（0.14.0 实锤缺陷修复）。
-  //
-  // 原实现复用 bridge 的 device-control gateFor()：它要求会话档位 danger-full-access 且
-  // a11y / Shizuku / adb 三条至少有其一。于是「无障碍未开 + Shizuku 未就绪」的机器上
-  // browser_open 直接报 session-not-full-access，引导用户去开无障碍或装 Shizuku——而浏览器是
-  // **应用内隔离 WebView**（壳侧 BrowserHost 自持一个 WebView），既不碰无障碍、也不碰 Shizuku、
-  // 也不碰 adb，与设备控制完全无关。这条误门把本来可用的能力锁死（用户实测三个站点全部失败）。
-  //
-  // 为什么校验**不放在工具层**：这是权限/归属问题，不是工具能力问题。真正要守的两件事都在
-  // 原生 BrowserHost 内强制执行、且与工具层无关：
-  //   ① 会话归属——bindOwner/requireOwner 按 args.session 判定，非归属会话结构化拒绝；
-  //   ② URL 准入——只允许非本地 http(s)/about:blank，拒 loopback/file/content/data/javascript。
-  // 因此本层直接透传，由原生执行点做它该做的校验（单一真源，避免两处各写一份漂移）。
+  const surfaceOps = new Set<string>([BROWSER_OPS.js, BROWSER_OPS.shot, BROWSER_OPS.state, BROWSER_OPS.input])
+  const call = async (op: string, args: Payload, timeoutMs = 15_000): Promise<CallResult> => {
+    const result = await dispatch(op, args, timeoutMs)
+    // Only the shell's pre-execution "not created" response proves input was never dispatched.
+    // An explicit missing/closed tab or an ambiguous timeout must never trigger an input replay.
+    if (!surfaceOps.has(op) || (result.ok
+      ? op !== BROWSER_OPS.state || result.data.created !== false
+      : result.error !== 'browser-not-created' && result.error !== 'not-created')) return result
+    const shown = await dispatch(BROWSER_OPS.show, typeof args.tabId === 'string' ? { tabId: args.tabId } : {}, 6_000)
+    if (!shown.ok) return shown
+    if (op === BROWSER_OPS.state) return shown
+    return dispatch(op, args, timeoutMs)
+  }
+
+  // Authorization is enforced by the native bridge and BrowserHost. This placeholder
+  // always succeeds, so the tool-local denial branches and guidance are unreachable.
+  // If it ever gains a policy, align the legacy denial codes and supply guidance.
   const gate = (_exec: unknown): { ok: true } | { ok: false; guidance: string } => ({ ok: true })
 
   /**
@@ -417,6 +427,10 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
   const memoryKey = (): string => sessionScope.getStore() ?? '__anonymous__'
   const resetSessionMemory = (): void => { lastSnapshots.delete(memoryKey()) }
   const requireSnapshot = (): SnapshotMemory | undefined => lastSnapshots.get(memoryKey())
+  const checkRef = (memory: SnapshotMemory, ref: string): Payload | undefined =>
+    memory.refs.size > 0 && !memory.refs.has(ref)
+      ? { ok: false, error: 'stale-ref', guidance: '引用不在最近一次快照中。请重新调用 browser_snapshot。' }
+      : undefined
 
   const tools: unknown[] = [
     defineTool({
@@ -603,6 +617,8 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         if (memory === undefined) {
           return { ok: false, error: 'snapshot-required', guidance: '先调用 browser_snapshot 拿到 ref，再点击；不猜测坐标。' } as never
         }
+        const rejected = checkRef(memory, ref)
+        if (rejected !== undefined) return rejected as never
         const result = await call(BROWSER_OPS.input, { kind: 'tap', ref, tabId: memory.tabId, pageGeneration: memory.pageGeneration }, 15_000)
         if (!result.ok) return denied(result) as never
         const state = await stateOf(memory.tabId)
@@ -648,6 +664,8 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         if (memory === undefined) {
           return { ok: false, error: 'snapshot-required', guidance: '先调用 browser_snapshot 拿到 ref，再输入。' } as never
         }
+        const rejected = checkRef(memory, ref)
+        if (rejected !== undefined) return rejected as never
         const result = await call(BROWSER_OPS.input, {
           kind: 'text', ref, text, replace: replace !== false, tabId: memory.tabId, pageGeneration: memory.pageGeneration,
         }, 15_000)

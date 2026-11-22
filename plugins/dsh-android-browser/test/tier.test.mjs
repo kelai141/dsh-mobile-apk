@@ -90,8 +90,8 @@ test('facts：env 通道优先于实测基线；非法/空值回落基线并标�
   assert.equal(fromEnv.source, 'shell-env(DSH_BROWSER_FACTS)')
   assert.equal(fromEnv.facts.webviewMajor, 120)
   assert.equal(fromEnv.facts.browserWebViewAvailable, true)
-  assert.equal(factsFromEnv({ DSH_BROWSER_FACTS: '{not json' }).source, 'measured-baseline(p0-2026-09-12, MuMu/WebView110)')
-  assert.equal(factsFromEnv({}).source, 'measured-baseline(p0-2026-09-12, MuMu/WebView110)')
+  assert.equal(factsFromEnv({ DSH_BROWSER_FACTS: '{not json' }).source, 'emulator-baseline(p0-2026-09-12, MuMu/WebView110; not current-device facts)')
+  assert.equal(factsFromEnv({}).source, 'emulator-baseline(p0-2026-09-12, MuMu/WebView110; not current-device facts)')
 })
 
 test('facts：壳桥 browserCaps 成功即用真实档位（来源标注 shell-op）', async () => {
@@ -109,7 +109,7 @@ test('facts：壳桥 browserCaps 成功即用真实档位（来源标注 shell-o
 test('facts：op 失败/超时/通道缺席一律回落且带 capsNote（不隐藏降级）', async () => {
   factsCacheReset()
   const failing = await readFacts({ env: {}, control: { controlExec: async () => { throw new Error('queue busy') } }, cacheTtlMs: 0 })
-  assert.match(failing.source, /measured-baseline/)
+  assert.match(failing.source, /emulator-baseline/)
   assert.ok(failing.capsNote && failing.capsNote.includes('browserCaps'), '回落必须说明 browserCaps 不可用')
   factsCacheReset()
   const noChannel = await readFacts({ env: {}, control: undefined, cacheTtlMs: 0 })
@@ -166,7 +166,7 @@ test('状态路由：合法令牌 GET → 200 档位 JSON；POST → 405 + allow
   const json = JSON.parse(ok.body)
   assert.equal(json.ok, true)
   assert.ok(['L1-text', 'L2-native', 'L3-cdp-debug'].includes(json.tier))
-  assert.equal(json.factsSource, 'measured-baseline(p0-2026-09-12, MuMu/WebView110)')
+  assert.equal(json.factsSource, 'emulator-baseline(p0-2026-09-12, MuMu/WebView110; not current-device facts)')
   const post = await call(h, { method: 'POST' })
   assert.equal(post.code, 405)
   assert.equal(post.headers.allow, 'GET')

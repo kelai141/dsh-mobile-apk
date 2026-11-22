@@ -38,6 +38,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -168,6 +169,8 @@ internal class BrowserHost(
   // ── 兼容档（process-suffix，WebView<114）执行位 ──────────────────────────
   /** evaluateJs 序号 → 回调（tier-2；回调统一回主线程再派发）。 */
   private val pendingJs = HashMap<Int, PendingJsEntry>()
+  private var jsDiscardCount = 0L
+  private var lastJsDiscardReason = ""
 
   private val rendererListener = object : RemoteRendererHost.Listener {
     override fun onRendererEvent(tabId: String, event: JSONObject) {
@@ -208,6 +211,12 @@ internal class BrowserHost(
   /** 远端 tabId = 会话键/页 id（各会话页 id 都是 tab-N 序列，必须加前缀避免跨会话碰撞）。 */
   private fun remoteTabId(workspace: Workspace, tab: Tab): String = workspace.sessionKey + "/" + tab.id
 
+  private fun tabByRemoteId(remoteId: String): Tab? {
+    val slash = remoteId.indexOf('/')
+    if (slash <= 0) return null
+    return workspaces[remoteId.substring(0, slash)]?.tabs?.get(remoteId.substring(slash + 1))
+  }
+
   /** 远端页面事件 → 本地 Tab 状态（主线程；generation 采用远端计数器的单调值）。 */
   private fun applyRendererEvent(remoteId: String, event: JSONObject) {
     if (remoteId.isEmpty()) {
@@ -230,6 +239,7 @@ internal class BrowserHost(
         for (tab in workspace.tabs.values) tab.remoteCreated = false
       }
       lastError = "browser-renderer-unavailable"
+      drainPendingJs("renderer-disconnected")
       applyVisibility()
       // #13 兜底：多数 ROM 会在 BIND_AUTO_CREATE 下自动重启服务并重新投递 onServiceConnected
       // （届时上面的 rendererConnected 分支会清降级）；对不重启的 OEM 电池管理器场景，延迟重绑
@@ -239,10 +249,8 @@ internal class BrowserHost(
       }, 5_000L)
       return
     }
-    val slash = remoteId.indexOf('/')
-    if (slash <= 0) return
-    val workspace = workspaces[remoteId.substring(0, slash)] ?: return
-    val tab = workspace.tabs[remoteId.substring(slash + 1)] ?: return
+    val tab = tabByRemoteId(remoteId) ?: return
+    val workspace = tab.owner
     when (event.optString("type")) {
       "pageStarted" -> {
         tab.generation.set(maxOf(event.optLong("generation", 0L), tab.generation.get() + 1))
@@ -838,7 +846,7 @@ internal class BrowserHost(
    * Dispatch one registered shell control op. Called from the control queue thread; every WebView
    * touch/JS call is marshalled to the main thread with a bounded wait.
    */
-  fun controlOp(op: String, args: JSONObject, beforeDispatch: (() -> Boolean)? = null): JSONObject {
+  fun controlOp(op: String, args: JSONObject, deadlineNanos: Long? = null, beforeDispatch: (() -> Boolean)? = null): JSONObject {
     if (op == "browserOpen") openConfigProblem(args)?.let { return rejectControl(it) }
     // Capture Session and tab on the sole UI owner. No global selection survives a main slice.
     val nativeDenied = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -851,7 +859,7 @@ internal class BrowserHost(
       val workspace = workspaceFor(session)
       val id = args.optString("tabId", "").takeIf { it.isNotBlank() }
         ?: workspace.modelTabId ?: workspace.activeTabId
-      ControlTarget(workspace, id?.let { workspace.tabs[it] })
+      ControlTarget(workspace, id?.let { workspace.tabs[it] }, deadlineNanos)
     } ?: return if (nativeDenied.get()) JSONObject().put("ok", false)
       .put("reason", "native-authorization-denied") else controlTimeout()
     if (args.optString("tabId", "").isNotBlank() && target.tab == null && op != "browserOpen") {
@@ -867,12 +875,16 @@ internal class BrowserHost(
       "browserCloseTab" -> controlOnMain(target) { closeTabOp(args) }
       "browserShow" -> controlOnMain(target) {
         // Do not route through show(), which claims the global foreground workspace.
-        val browser = ensureView() ?: return@controlOnMain status().put("ok", false)
-        target.workspace.modelTabId = activeTabId
         val raw = args.optString("url", "")
-        if (raw.isNotBlank()) {
-          val normalized = normalizeUrl(raw) ?: return@controlOnMain status().put("ok", false).put("reason", "unsupported-url")
-          browser.loadUrl(normalized)
+        val normalized = if (raw.isBlank()) null else normalizeUrl(raw)
+          ?: return@controlOnMain targetFailure(target, "unsupported-url")
+        val tab = target.tab ?: ensureTab(null)
+        val wasReady = surfaceReady(tab)
+        ensureSurface(tab) ?: return@controlOnMain status().put("ok", false)
+        target.workspace.modelTabId = tab.id
+        if (normalized != null || (!wasReady && tab.url != "about:blank")) {
+          invalidateNavigation(tab)
+          loadInto(tab, normalized ?: tab.url)
         }
         status()
       }
@@ -892,7 +904,13 @@ internal class BrowserHost(
     }
   }
 
-  private inner class ControlTarget(val workspace: Workspace, val tab: Tab?)
+  private inner class ControlTarget(
+    val workspace: Workspace,
+    val tab: Tab?,
+    val deadlineNanos: Long? = null,
+  ) {
+    fun expired(): Boolean = deadlineNanos?.let { System.nanoTime() - it >= 0L } == true
+  }
 
   /** Main-thread slice only. Never keep this temporary selection while awaiting JS/navigation. */
   private fun <T> withModelTarget(target: ControlTarget, block: () -> T): T {
@@ -920,9 +938,20 @@ internal class BrowserHost(
 
   private fun targetFailure(target: ControlTarget, reason: String): JSONObject = rejectControl(reason)
     .put("session", target.workspace.sessionKey).put("tabId", target.tab?.id ?: "")
+    .also { reply ->
+      when (reason) {
+        "browser-not-created" -> reply.put("guidance", "浏览器工位未建立。先用 browser_open 打开目标页。")
+        "tab-closed", "tab-not-found", "browser-session-closed", "stale-page-generation", "stale-browser-view",
+        "browser-js-reply-tab-mismatch" ->
+          reply.put("guidance", "页面或页面代次已变化。确认目标标签，再重新获取快照。")
+        "browser-renderer-unavailable", "browser-js-dispatch-failed", "browser-js-queue-reclaimed" ->
+          reply.put("guidance", "浏览器渲染通道未完成请求。请检查工位状态，避免重复提交输入。")
+      }
+    }
 
   /** Called only on main, including every asynchronous completion before reading or dispatching. */
   private fun targetProblem(target: ControlTarget, browser: WebView? = null): String? = when {
+    target.expired() -> "browser-execution-deadline"
     workspaces[target.workspace.sessionKey] !== target.workspace -> "browser-session-closed"
     target.tab != null && target.workspace.tabs[target.tab.id] !== target.tab -> "tab-closed"
     browser != null && target.tab?.view !== browser -> "stale-browser-view"
@@ -1338,7 +1367,7 @@ internal class BrowserHost(
   private fun measureRemotePage(tab: Tab, settleChase: Int = 2) {
     if (tab.view != null) return
     evaluateOnTab(tab, "(function(){return JSON.stringify({w:window.innerWidth||0,h:window.innerHeight||0,dpr:window.devicePixelRatio||0})})()") { raw ->
-      if (tabOrNull(tab.id) !== tab) return@evaluateOnTab
+      if (workspaces[tab.owner.sessionKey] !== tab.owner || tab.owner.tabs[tab.id] !== tab) return@evaluateOnTab
       val value = decodeJsObject(raw)
       if (value != null) {
         tab.pageWidth = value.optInt("w", tab.pageWidth)
@@ -1525,6 +1554,8 @@ internal class BrowserHost(
       // isolated，于是会话 B 的 browser_open 带着会话 A 的 cookie，browser_state 却对 B 回 isolated。
       .put("profileIsolation", profileIsolationOf(isolationTier, status))
       .put("profileName", workspace?.profile?.takeIf { it.isAssigned }?.name ?: if (remote != null) BrowserProcessService.SUFFIX else "")
+      .put("jsDiscardCount", jsDiscardCount)
+      .put("lastJsDiscardReason", lastJsDiscardReason)
       .put("created", view != null || activeTab()?.remoteCreated == true)
       .put("visible", view?.visibility == View.VISIBLE || (view == null && remote?.hostSurface?.visibility == View.VISIBLE))
       .put("url", url)
@@ -2008,14 +2039,14 @@ internal class BrowserHost(
     val expr = args.optString("expr", "")
     if (expr.isBlank()) return targetFailure(target, "expr-required")
     if (expr.length > 60_000) return targetFailure(target, "expr-too-long")
-    return awaitMain(8_000) { done ->
+    return awaitMain(target, 8_000) { done ->
       targetProblem(target)?.let { done(targetFailure(target, it)); return@awaitMain }
       val tab = target.tab
       if (tab == null || !surfaceReady(tab)) { done(targetFailure(target, "browser-not-created")); return@awaitMain }
       // #1611：与 snapshotOp/textOp 同一判据——表达式自身触发导航或页面 meta-refresh 落在
       // 8 秒窗口内时，旧文档的返回值会以新文档身份交付（pageReply 现读 url/loadState/pageGeneration）。
       val startedGeneration = tab.generation.get()
-      evaluateOnTab(tab, expr) { raw ->
+      evaluateOnTab(tab, expr, { done(targetFailure(target, it)) }) { raw ->
         val value = decodeJs(raw)
         done(BrowserJsReplyGuard.settle(
           problem = targetProblem(target, tab.view),
@@ -2033,12 +2064,12 @@ internal class BrowserHost(
     }
   }
 
-  private fun snapshotOp(target: ControlTarget): JSONObject = awaitMain(8_000) { done ->
+  private fun snapshotOp(target: ControlTarget): JSONObject = awaitMain(target, 8_000) { done ->
     targetProblem(target)?.let { done(targetFailure(target, it)); return@awaitMain }
     val tab = target.tab
     if (tab == null || !surfaceReady(tab)) { done(targetFailure(target, "browser-not-created")); return@awaitMain }
     val startedGeneration = tab.generation.get()
-    evaluateOnTab(tab, SNAPSHOT_JS) { raw ->
+    evaluateOnTab(tab, SNAPSHOT_JS, { done(targetFailure(target, it)) }) { raw ->
       val problem = targetProblem(target, tab.view)
       if (problem != null) {
         done(targetFailure(target, problem)); return@evaluateOnTab
@@ -2095,13 +2126,15 @@ internal class BrowserHost(
 
   private fun tapOp(args: JSONObject, target: ControlTarget): JSONObject {
     val ref = args.optString("ref")
-    return awaitMain(8_000) { done ->
+    val localDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8)
+    return awaitMain(target, 8_000) { done ->
       resolveRef(args, target)?.let { done(it); return@awaitMain }
       val tab = target.tab!!
       if (!surfaceReady(tab)) { done(targetFailure(target, "browser-not-created")); return@awaitMain }
       val startedGeneration = tab.generation.get()
-      evaluateOnTab(tab, RESOLVE_REF_JS.replace("__REF__", ref)) { raw ->
+      evaluateOnTab(tab, RESOLVE_REF_JS.replace("__REF__", ref), { done(targetFailure(target, it)) }) { raw ->
         val problem = targetProblem(target, tab.view)
+        if (System.nanoTime() - localDeadline >= 0L) return@evaluateOnTab
         val earlyReject = problem?.let { targetFailure(target, it) } ?: resolveRef(args, target)
         if (earlyReject != null) { done(earlyReject); return@evaluateOnTab }
         val payload = decodeJsObject(raw)
@@ -2137,12 +2170,12 @@ internal class BrowserHost(
     val script = TYPE_JS.replace("__REF__", ref)
       .replace("__REPLACE__", if (args.optBoolean("replace", true)) "true" else "false")
       .replace("__TEXT__", jsString(args.optString("text", "")))
-    return awaitMain(8_000) { done ->
+    return awaitMain(target, 8_000) { done ->
       resolveRef(args, target)?.let { done(it); return@awaitMain }
       val tab = target.tab!!
       if (!surfaceReady(tab)) { done(targetFailure(target, "browser-not-created")); return@awaitMain }
       val startedGeneration = tab.generation.get()
-      evaluateOnTab(tab, script) { raw ->
+      evaluateOnTab(tab, script, { done(targetFailure(target, it)) }) { raw ->
         val problem = targetProblem(target, tab.view)
         if (problem != null) { done(targetFailure(target, problem)); return@evaluateOnTab }
         if (tab.generation.get() != startedGeneration) {
@@ -2230,10 +2263,17 @@ internal class BrowserHost(
   // ── async plumbing ────────────────────────────────────────────────────────
 
   /** Run a block on the main thread and wait for its callback to complete (bounded). */
-  private fun awaitMain(timeoutMs: Long, block: (done: (JSONObject) -> Unit) -> Unit): JSONObject {
+  private fun awaitMain(target: ControlTarget, timeoutMs: Long, block: (done: (JSONObject) -> Unit) -> Unit): JSONObject {
     val latch = CountDownLatch(1)
-    val result = AtomicReference(controlTimeout())
+    val result = AtomicReference<JSONObject>()
+    val started = AtomicBoolean(false)
+    val now = System.nanoTime()
+    val waitNanos = TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+      .coerceAtMost(target.deadlineNanos?.minus(now) ?: Long.MAX_VALUE)
+    val deadline = now + waitNanos
     main.post {
+      if (System.nanoTime() >= deadline) return@post
+      started.set(true)
       try {
         block { value ->
           result.set(value)
@@ -2244,13 +2284,16 @@ internal class BrowserHost(
         latch.countDown()
       }
     }
-    return if (latch.await(timeoutMs, TimeUnit.MILLISECONDS)) result.get() else controlTimeout()
+    return if (latch.await((deadline - System.nanoTime()).coerceAtLeast(0L), TimeUnit.NANOSECONDS)) result.get()
+    else if (target.expired()) targetFailure(target, "browser-execution-deadline")
+    else if (started.get()) controlTimeout("browser-js-reply-timeout", "浏览器未收到 JS 回执。请检查渲染通道，避免重复提交输入。")
+    else controlTimeout()
   }
 
-  private fun controlTimeout(): JSONObject = JSONObject()
-    .put("ok", false)
-    .put("reason", "timeout")
-    .put("guidance", "浏览器操作超时：页面可能繁忙或 WebView 未就绪。")
+  private fun controlTimeout(
+    reason: String = "browser-main-thread-timeout",
+    guidance: String = "浏览器主线程未及时返回。请检查应用运行状态。",
+  ): JSONObject = rejectControl(reason).put("guidance", guidance)
 
   private fun rejectControl(reason: String): JSONObject = JSONObject().put("ok", false).put("reason", reason)
 
@@ -2326,18 +2369,25 @@ internal class BrowserHost(
   }
 
   /** tier-1 直接走 WebView 回调（主线程）；tier-2 经渲染进程序号回执（统一回主线程）。 */
-  private fun evaluateOnTab(tab: Tab, script: String, callback: (String?) -> Unit) {
+  private fun evaluateOnTab(
+    tab: Tab,
+    script: String,
+    onFailure: (String) -> Unit = {},
+    callback: (String?) -> Unit,
+  ) {
     val browser = tab.view
     if (browser != null) {
       browser.evaluateJavascript(script) { raw -> callback(raw) }
       return
     }
-    val rh = remote ?: run { callback(null); return }
+    val rh = remote ?: run { onFailure("browser-renderer-unavailable"); return }
     val seq = rh.nextSeq()
-    enqueuePendingJs(seq, tab, callback)
-    if (!rh.evaluateJs(remoteTabId(tab.owner, tab), script, seq)) {
-      pendingJs.remove(seq)
-      callback(null)
+    if (PendingJsDrain.shouldReclaim(pendingJs.size)) drainPendingJs("cap")
+    val entry = PendingJsEntry(remoteTabId(tab.owner, tab), tab.generation.get(),
+      owner = tab, onFailure = onFailure, callback = callback)
+    pendingJs[seq] = entry
+    if (!rh.evaluateJs(entry.remoteTabId, script, seq)) {
+      pendingJs.remove(seq)?.onFailure?.invoke("browser-js-dispatch-failed")
     }
   }
 
@@ -2489,63 +2539,36 @@ internal class BrowserHost(
     "space" to KeyEvent.KEYCODE_SPACE,
   )
 
-  /**
-   * tier-2 JS 回执派发（issue #1363）：**先比对 tab 存活与世代，不同代直接丢弃**。
-   *
-   * 旧实现只按 `seq` 取回调：`closeTabOp` 已经 `generation.incrementAndGet()` + 销毁 view +
-   * `tabs.remove`，在途回执照旧把 url / title / scrollY 写回，模型侧读到「幽灵页」并据此继续操作。
-   *
-   * 为什么要分三态（见 [PendingJsDispatch] 的注释）：`tab 已关` 是正常关闭竞态，
-   * `换过代` 说明有人在旧页面上继续操作——两者排障含义不同，日志要能分开。
-   *
-   * @param tabId 回执上报的 tabId。
-   * @param seq 求值序号。
-   * @param result 渲染侧回执。
-   */
+  /** Match the renderer's remote id and the owning page generation before delivering a value. */
   private fun deliverJsResult(tabId: String, seq: Int, result: JSONObject) {
     val entry = pendingJs.remove(seq) ?: return
-    val live = tabs[entry.tabId]?.generation?.get()
-    when (PendingJsDispatch.decide(entry, tabId, live)) {
-      PendingJsDispatch.Decision.DELIVER -> entry.callback(result.optString("value"))
+    val live = tabByRemoteId(entry.remoteTabId)?.takeIf { it === entry.owner }?.generation?.get()
+    val reason = when (PendingJsDispatch.decide(entry, tabId, live)) {
+      PendingJsDispatch.Decision.DELIVER -> {
+        entry.callback(result.optString("value"))
+        return
+      }
       PendingJsDispatch.Decision.DISCARD_TAB_GONE ->
-        android.util.Log.w("dsh-browser", "js result discarded (tab gone): tab=" + entry.tabId + " seq=" + seq)
-      PendingJsDispatch.Decision.DISCARD_STALE_GENERATION ->
-        android.util.Log.w("dsh-browser", "js result discarded (stale generation): tab=" + entry.tabId + " seq=" + seq)
+        if (tabId == entry.remoteTabId) "tab-closed" else "browser-js-reply-tab-mismatch"
+      PendingJsDispatch.Decision.DISCARD_STALE_GENERATION -> "stale-page-generation"
     }
+    jsDiscardCount++
+    lastJsDiscardReason = reason
+    android.util.Log.w("dsh-browser", "js result discarded: reason=$reason seq=$seq")
+    entry.onFailure(reason)
   }
 
-  /**
-   * 入队一条在途回执，并在**超过上限**时先回收（issue #1362：页面还在但永不回执的那一类）。
-   *
-   * 为什么要上限：`destroy()`/断连的 drain 只能收拾「页面已死」；若渲染进程活着却卡死，
-   * 回执永远不来、调用方各自 2s 闩超时后继续发新请求 —— 同一个页面会持续堆积。
-   * 上限取值依据见 [PendingJsDrain] 的类注释（典型 1–2 条、最坏 ≈1 条/2s，64 ≈ 2 分钟挂死）。
-   *
-   * @param seq 求值序号。
-   * @param tab 发起求值的 tab（记下它的世代，供回执派发时比对）。
-   * @param callback 回执回调。
-   */
-  private fun enqueuePendingJs(seq: Int, tab: Tab, callback: (String?) -> Unit) {
-    if (PendingJsDrain.shouldReclaim(pendingJs.size)) drainPendingJs("cap")
-    pendingJs[seq] = PendingJsEntry(tab.id, tab.generation.get(), callback)
-  }
-
-  /**
-   * 清空在途回执表（issue #1362）：逐条移除并以 `null` 回调，让调用方的 2s 闩**立刻**结束，
-   * 而不是各自等到超时。
-   *
-   * **必须留痕**：每次回收写一行日志（条数 + 原因）。静默回收会让以后分不清
-   * 「没堆」与「堆了但被静默回收」——那正是本 issue 想避免的不可观测。
-   *
-   * @param reason 回收原因（`destroy` / `cap`），进日志。
-   */
   private fun drainPendingJs(reason: String) {
     if (pendingJs.isEmpty()) return
-    val drained = ArrayList<PendingJsEntry>(pendingJs.size)
-    for (entry in pendingJs.values) drained.add(entry)
+    val drained = pendingJs.values.toList()
     pendingJs.clear()
-    android.util.Log.w("dsh-browser", "pending js drained: reason=" + reason + " count=" + drained.size)
-    for (entry in drained) entry.callback(null)
+    val failure = when (reason) {
+      "cap" -> "browser-js-queue-reclaimed"
+      "destroy" -> "browser-session-closed"
+      else -> "browser-renderer-unavailable"
+    }
+    android.util.Log.w("dsh-browser", "pending js drained: reason=$reason count=" + drained.size)
+    for (entry in drained) entry.onFailure(failure)
   }
 
   /** 会话键 → 最近使用时刻（毫秒）。issue #1364：切换淘汰的依据。 */

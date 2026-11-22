@@ -137,3 +137,22 @@ test('native stale-own-ref rejection is surfaced without retrying a foreign acti
   assert.equal(calls[1].args.tabId, 'A-tab')
   assert.equal(calls[1].args.session, 'A')
 })
+
+test('mounts a missing surface once and never replays timed-out input', async () => {
+  let mounted = false
+  const target = page('tab-1', 'https://example.com/')
+  const { tool, calls } = harness((op) => {
+    if (op === BROWSER_OPS.js) return mounted
+      ? { ...target, nodes: [{ ref: 'bx1' }] }
+      : { ok: false, reason: 'browser-not-created' }
+    if (op === BROWSER_OPS.show) { mounted = true; return { ok: true, created: true } }
+    assert.equal(op, BROWSER_OPS.input)
+    return { ok: false, reason: 'browser-js-reply-timeout', guidance: 'Check state before retrying input.' }
+  })
+  assert.equal((await tool(BROWSER_TOOLS.snapshot).execute({}, exec('A'))).ok, true)
+  assert.equal((await tool(BROWSER_TOOLS.click).execute({ ref: 'bx9' }, exec('A'))).error, 'stale-ref')
+  const input = await tool(BROWSER_TOOLS.click).execute({ ref: 'bx1' }, exec('A'))
+  assert.equal(input.error, 'browser-js-reply-timeout')
+  assert.equal(input.guidance, 'Check state before retrying input.')
+  assert.deepEqual(calls.map(({ op }) => op), [BROWSER_OPS.js, BROWSER_OPS.show, BROWSER_OPS.js, BROWSER_OPS.input])
+})

@@ -131,6 +131,7 @@ function requiredArgs(tool, url) {
     const prop = props[key] ?? {}
     if (key === 'url') args[key] = url
     else if (key === 'tabId') args[key] = 'tab-2'
+    else if (key === 'ref') args[key] = 'bx1'
     else if (prop.type === 'string') args[key] = 'sample'
     else if (prop.type === 'number') args[key] = 1
     else if (prop.type === 'boolean') args[key] = true

@@ -34,18 +34,17 @@ class PendingJsWiringTest {
 
   @Test fun dispatchComparesGeneration() {
     assertTrue(source.contains("PendingJsDispatch.decide(entry, tabId, live)"))
-    assertTrue("必须从 tabs 里取当前世代", source.contains("tabs[entry.tabId]?.generation?.get()"))
+    assertTrue("必须从 tabs 里取当前世代", source.contains("tabByRemoteId(entry.remoteTabId)?.takeIf { it === entry.owner }?.generation?.get()"))
     // 光调用决策函数不够：回调必须**只在 DELIVER 分支**被调。否则「算了但不看结果」也能过。
     assertTrue(
       "回调必须挂在 DELIVER 分支上（算了却不看结果 = 世代校验形同虚设）",
-      source.contains("Decision.DELIVER -> entry.callback("),
+      Regex("Decision.DELIVER -> \\{\\s+entry.callback\\(").containsMatchIn(source),
     )
   }
 
-  @Test fun enqueueRecordsTabAndGeneration() {
-    assertTrue(
-      "入队必须记 (tabId, generation)",
-      source.contains("pendingJs[seq] = PendingJsEntry(tab.id, tab.generation.get(), callback)"),
-    )
+  @Test fun requestAndPendingReplyUseTheSameRemoteId() {
+    assertTrue(source.contains("val entry = PendingJsEntry(remoteTabId(tab.owner, tab), tab.generation.get(),"))
+    assertTrue(source.contains("pendingJs[seq] = entry"))
+    assertTrue(source.contains("rh.evaluateJs(entry.remoteTabId, script, seq)"))
   }
 }
