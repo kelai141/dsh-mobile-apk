@@ -1082,6 +1082,7 @@ internal class BrowserHost(
       // 会跳过唯一一次必要的 relayout，新投影停在 1x1（#1574 的反向风险）。
       pushedGeometry.remove(remoteTabId(workspace, tab))
       tab.remoteCreated = true
+      tab.appliedViewport = tab.requestedViewport
       workspace.profileError = ""
       return null
     }
@@ -1913,6 +1914,7 @@ internal class BrowserHost(
       synchronized(tab.refs) { tab.refs.clear() }
       tab.loadState = "idle"
       ensureViewFor(tab)
+      if (tab.remoteCreated) applyStageBounds()
       if (reloadTarget != null && requireWorkspace().profileError.isEmpty()) {
         normalizeUrl(reloadTarget)?.let { loadInto(tab, it) }
       }
