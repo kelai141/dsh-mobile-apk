@@ -1051,6 +1051,7 @@ class MainActivity : ComponentActivity() {
         }
       }
     }
+    OverlayAttachmentBus.recheckPending()
     // 本体回到前台：悬浮入口隐藏（服务与后台 Agent 不停，overlay v2 的 onHostForeground 收口）。
     // 0.13.2 W7 + ST-02：悬浮球开关已开且权限在场时补启。权限缺失时 OverlayController 把偏好
     // 回落 false，本行随即短路——不再每次回前台弹系统页。

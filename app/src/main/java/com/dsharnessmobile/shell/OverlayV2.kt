@@ -1140,7 +1140,8 @@ internal class OverlayV2(private val svc: OverlayService) {
     val attachmentsPending = OverlayAttachmentBus.pending(sentSession)
     if (attachmentsPending.isNotEmpty()) {
       OverlayAttachmentBus.recheckPending(sentSession)
-      svc.flashStatus(t("附件仍在认领中，请稍后", "Attachment still being claimed"))
+      svc.flashStatus(if (attachmentsPending.any { attachmentReviewRequired(it.requestId) }) attachmentReviewMessage()
+        else t("附件仍在认领中，请稍后", "Attachment still being claimed"))
       return
     }
     // 页面不可用时不能把「带附件的消息」降级成纯文本发出去：附件留在草稿里，
@@ -1216,9 +1217,11 @@ internal class OverlayV2(private val svc: OverlayService) {
       toast(t("会话尚未就绪，请稍后再试", "Session not ready, try again"))
       return
     }
-    if (OverlayAttachmentBus.existing(sid, mapped) != null) {
+    val previousAttachment = OverlayAttachmentBus.existing(sid, mapped)
+    if (previousAttachment != null) {
       OverlayAttachmentBus.recheckPending(sid)
-      toast(t("前一个附件仍在处理", "The previous attachment is still processing"))
+      toast(if (attachmentReviewRequired(previousAttachment.requestId)) attachmentReviewMessage()
+        else t("前一个附件仍在处理", "The previous attachment is still processing"))
       return
     }
     val requestId = java.util.UUID.randomUUID().toString()
@@ -1288,8 +1291,6 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (receipt.error == "attachment-pending") {
       scheduleRender()
       val attempts = attachmentRecheckAttempts[receipt.requestId] ?: 0
-      // The server owns the queue/ticket expiry. Keep waking the background consumer
-      // while that receipt can still settle, including after a slow provider copy.
       if (attempts < 128) {
         attachmentRecheckAttempts[receipt.requestId] = attempts + 1
         main.postDelayed({
@@ -1307,6 +1308,12 @@ internal class OverlayV2(private val svc: OverlayService) {
     scheduleRender()
     onAttachmentResult(receipt.kind, receipt.path, receipt.error)
   }
+
+  private fun attachmentReviewRequired(requestId: String): Boolean =
+    (attachmentRecheckAttempts[requestId] ?: 0) >= 4
+
+  private fun attachmentReviewMessage(): String =
+    t("附件状态待确认，请打开主界面查看", "Attachment unconfirmed. Open the main app to check.")
 
   private fun onAttachmentResult(kind: String, path: String, error: String) {
     if (error.isEmpty()) {
@@ -2178,7 +2185,8 @@ internal class OverlayV2(private val svc: OverlayService) {
       OverlayAttachmentBus.pending(svc.activeSessionId)
         .filter { it.error == "attachment-pending" && it.path.isNotBlank() }
         .map { item ->
-          val name = item.path.substringAfterLast('/') + " · " + t("添加中", "Adding")
+          val status = if (attachmentReviewRequired(item.requestId)) attachmentReviewMessage() else t("添加中", "Adding")
+          val name = item.path.substringAfterLast('/') + " · " + status
           val kind = if (item.kind == "camera" || item.kind == "photo") "image" else "file"
           OverlayAttachmentChip(name, kind, item.requestId, pending = true)
         }
