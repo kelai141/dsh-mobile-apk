@@ -49,7 +49,7 @@ class RendererReclaimWiringTest {
   }
 
   @Test fun capIsCheckedBeforeEnqueue() {
-    val e = body("private fun evaluateOnTab(")
+    val e = source.substringAfter("private fun evaluateOnTab(").substringBefore("private fun tabViewportSize(")
     assertTrue("入队前必须查上限", e.contains("PendingJsDrain.shouldReclaim("))
     assertTrue("超限必须先 drain", e.indexOf("drainPendingJs(") in 0 until e.indexOf("pendingJs[seq] = entry"))
   }
