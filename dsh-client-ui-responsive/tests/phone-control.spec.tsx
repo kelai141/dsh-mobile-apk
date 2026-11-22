@@ -1217,7 +1217,8 @@ describe('Root 桥回执形状与失败呈现', () => {
   })
 
   it('request-started 是等待而非已开启；当前同意失效后不得自动续开', async () => {
-    vi.useFakeTimers()
+    // Keep the scheduler's deadlines and timeout advancement on the same clock.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
     let consentValid = true
     let rootGranted = false
@@ -1240,7 +1241,8 @@ describe('Root 桥回执形状与失败呈现', () => {
   })
 
   it('检测应用 root 成功只更新事实面，不自动开启 AI 策略门', async () => {
-    vi.useFakeTimers()
+    // Keep the scheduler's deadlines and timeout advancement on the same clock.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
     let rootGranted = false
     const setRootGranted = vi.fn()
@@ -1262,7 +1264,8 @@ describe('Root 桥回执形状与失败呈现', () => {
 
 describe('文件属主维护异步结算（rootGrant.ownership）', () => {
   it('提交只表示进行中，单飞禁重复；2s root 轮询才呈现真实结算', async () => {
-    vi.useFakeTimers()
+    // Keep the scheduler's deadlines and timeout advancement on the same clock.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
     let ownership: Record<string, unknown> = { running: false, startedAt: 0, completedAt: 0 }
     const rootGrantState = vi.fn(() => rootGrantJson({ ownership }))
@@ -1313,7 +1316,8 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
   })
 
   it('有历史成功记录时，本次失败的红字仍必须出现（issue #1376）', async () => {
-    vi.useFakeTimers()
+    // Keep the scheduler's deadlines and timeout advancement on the same clock.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
     // 设备上以前成功修过一次：轮询里**永远**有一条旧的 completed 记录。
     // 只按「现在是不是 completed」判自愈，会把刚出现的红字在下一个 tick 立刻抹掉。
@@ -1340,7 +1344,8 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
   })
 
   it('ownership 不可读时点失败，历史成功记录不得清掉红字（issue #1518）', async () => {
-    vi.useFakeTimers()
+    // Keep the scheduler's deadlines and timeout advancement on the same clock.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
     // 壳侧回包形态不符 ⇒ ownership 不可读（readable=false）。此时基线无从谈起。
     let ownership: Record<string, unknown> = { startedAt: 10 }
@@ -1358,7 +1363,8 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
   })
 
   it('不可读基线下仍要能自愈：轮询读到活的 running 必须清红字（#1376 不得被 #1518 修法关掉）', async () => {
-    vi.useFakeTimers()
+    // Keep the scheduler's deadlines and timeout advancement on the same clock.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
     // 与上一条同一个起点（点击时不可读 ⇒ 没有可比基线），区别在于轮询随后读到**真的在跑**。
     // 「不可读就不记基线」如果实现成「没有基线就永不清除」，等于用关掉自愈来修 #1518——
@@ -1499,7 +1505,8 @@ describe('root 授权终态（issue #1377）', () => {
    * 负控（实跑过）：删掉 phone-control.tsx 里那个 setTimeout 后，本用例在「超时文案」处变红。
    */
   it('等待有上界：推进到超时点后落到 timeout 终态文案，且不再续开', async () => {
-    vi.useFakeTimers()
+    // Keep the scheduler's deadlines and timeout advancement on the same clock.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
     const setRootGranted = vi.fn(() => rootGrantJson({ ok: false, code: 'request-started', requesting: true }))
     const el = await render({
