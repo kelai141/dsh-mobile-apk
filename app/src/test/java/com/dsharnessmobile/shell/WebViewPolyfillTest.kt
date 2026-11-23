@@ -48,6 +48,15 @@ class WebViewPolyfillTest {
   }
 
   @Test
+  fun zeroOffsetTimeZoneShimIsInstalledInTheProductionScript() {
+    val shim = WebViewPolyfill.UTC_TIME_ZONE_SHIM
+    assertTrue(script.contains(shim))
+    assertTrue(shim.contains("sample === '+00:00' || sample === '-00:00'"))
+    assertTrue(shim.contains("var options = original.call(this)"))
+    assertTrue(shim.contains("options.timeZone = 'UTC'"))
+  }
+
+  @Test
   fun probeListMatchesPatchedStatics() {
     // 自检清单和脚本必须同源：清单多一项会让 verify 报假失败，少一项会漏掉真实缺口。
     for (name in WebViewPolyfill.REQUIRED_URL_STATICS) {
