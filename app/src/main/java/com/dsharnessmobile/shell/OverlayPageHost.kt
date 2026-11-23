@@ -45,7 +45,7 @@ internal object OverlayPageHost {
   internal data class PageWorkspace(val id: String, val title: String)
 
   /** 页面侧返回的附件条目（kind: image|file）。 */
-  internal data class PageAttachment(val name: String, val kind: String, val id: String = "", val thumbnail: String = "")
+  internal data class PageAttachment(val name: String, val kind: String, val id: String = "", val thumbnail: String = "", val status: String = "")
 
   /** 页面侧返回的命令条目（真源 = 上游命令菜单，禁止硬编码）。 */
   internal data class PageCommand(val name: String, val label: String, val description: String)
@@ -69,6 +69,8 @@ internal object OverlayPageHost {
     val transcript: List<OverlayTranscriptRow> = emptyList(),
     val transcriptReady: Boolean = false,
     val transcriptError: String = "",
+    val transcriptHasOlder: Boolean = false,
+    val transcriptOlderPage: Boolean = false,
   )
 
   /** 一次求值。表达式必须自己 try/catch 并返回字符串；这里只做超时与空回包归一。 */
@@ -158,14 +160,14 @@ internal object OverlayPageHost {
   }
 
   /** Unknown/timeout is never a refusal: keep the ticket and require an explicit recheck. */
-  private fun action(method: String, argument: String, onResult: (Boolean) -> Unit, onUnknown: (String) -> Unit = {}) {
+  private fun action(method: String, argument: String, onResult: (Boolean) -> Unit, onUnknown: (String) -> Unit = {}, expectedId: String? = null) {
     eval(callExpression(method, argument)) { raw ->
       val obj = parseHostReply(raw)
       if (obj?.has("ok") == true && !obj.optBoolean("pending", false)) { onResult(parseOk(obj)); return@eval }
-      val id = obj?.optString("operationId", "").orEmpty().ifEmpty { "unconfirmed-" + java.util.UUID.randomUUID().toString() }
+      val id = obj?.optString("operationId", "").orEmpty().ifEmpty { expectedId ?: "unconfirmed-" + java.util.UUID.randomUUID().toString() }
       val pending = PendingAction(id, onUnknown, onResult)
       pendingActions[id] = pending
-      if (obj == null) { unknown(pending); return@eval }
+      if (obj == null && expectedId == null) { unknown(pending); return@eval }
       pollOperation(pending, android.os.SystemClock.uptimeMillis() + 30000L, 100L)
     }
   }
@@ -214,10 +216,20 @@ internal object OverlayPageHost {
   internal fun execute(line: String, expectedSessionId: String, onUnknown: (String) -> Unit, onResult: (Boolean) -> Unit) = action("execute", jsArg(line) + "," + jsArg(expectedSessionId), onResult, onUnknown)
   internal fun execute(line: String, expectedSessionId: String, onResult: (Boolean) -> Unit) = action("execute", jsArg(line) + "," + jsArg(expectedSessionId), onResult)
   internal fun send(text: String, onResult: (Boolean) -> Unit) = action("send", jsArg(text), onResult)
-  internal fun send(text: String, expectedSessionId: String, onUnknown: (String) -> Unit, onResult: (Boolean) -> Unit) = action("send", jsArg(text) + "," + jsArg(expectedSessionId), onResult, onUnknown)
+  internal fun send(text: String, expectedSessionId: String, onUnknown: (String) -> Unit, onResult: (Boolean) -> Unit) {
+    val id = "native-send-" + java.util.UUID.randomUUID()
+    action("send", jsArg(text) + "," + jsArg(expectedSessionId) + "," + jsArg(id), onResult, onUnknown, id)
+  }
   internal fun send(text: String, expectedSessionId: String, onResult: (Boolean) -> Unit) = action("send", jsArg(text) + "," + jsArg(expectedSessionId), onResult)
   internal fun openWorkspace(id: String, onResult: (Boolean) -> Unit) = action("openWorkspace", jsArg(id), onResult)
-  internal fun removeAttachment(id: String, onResult: (Boolean) -> Unit) = action("removeAttachment", jsArg(id), onResult)
+  internal fun removeAttachment(id: String, sessionId: String, onResult: (Boolean) -> Unit) =
+    action("removeAttachment", jsArg(id) + "," + jsArg(sessionId), onResult)
+  internal fun history(direction: String, sessionId: String, onUnknown: (String) -> Unit, onResult: (Boolean) -> Unit) =
+    action("history", jsArg(direction) + "," + jsArg(sessionId), onResult, onUnknown)
+  internal fun previewAttachment(id: String, sessionId: String, onResult: (Boolean) -> Unit) =
+    action("previewAttachment", jsArg(id) + "," + jsArg(sessionId), onResult)
+  internal fun retryAttachment(id: String, sessionId: String, onResult: (Boolean) -> Unit) =
+    action("retryAttachment", jsArg(id) + "," + jsArg(sessionId), onResult)
   internal fun openSession(sessionId: String, onResult: (Boolean) -> Unit) = action("openSession", jsArg(sessionId), onResult)
 
   /** 请求页面新建会话；会话落点由页面决定，原生只跟随 sessionId 变化。 */
@@ -335,7 +347,7 @@ internal object OverlayPageHost {
         val a = atArr.optJSONObject(i) ?: continue
         val name = a.optString("name", "")
         if (name.isEmpty()) continue
-        attachments.add(PageAttachment(name, a.optString("kind", "file"), a.optString("id", ""), overlayThumbnailData(a.optString("thumbnail", ""))))
+        attachments.add(PageAttachment(name, a.optString("kind", "file"), a.optString("id", ""), overlayThumbnailData(a.optString("thumbnail", "")), a.optString("status", "")))
       }
     }
     val transcript = parseTranscript(obj.optJSONArray("transcript"))
@@ -354,6 +366,8 @@ internal object OverlayPageHost {
       transcript = transcript,
       transcriptReady = obj.optBoolean("transcriptReady", false),
       transcriptError = obj.optString("transcriptError", ""),
+      transcriptHasOlder = obj.optBoolean("transcriptHasOlder", false),
+      transcriptOlderPage = obj.optBoolean("transcriptOlderPage", false),
     )
   }
 

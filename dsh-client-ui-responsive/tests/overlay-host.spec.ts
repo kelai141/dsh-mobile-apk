@@ -106,7 +106,7 @@ describe('readPageSessionId / state', () => {
     expect(state.busy).toBe(true)
     expect(state.draft).toBe('半截草稿')
     expect(state.attachments).toEqual([
-      { id: 'img-a', name: 'img-a.bin', kind: 'image', thumbnail: '' },
+      { id: 'img-a', name: 'img-a.bin', kind: 'image' },
       { id: 'file-b', name: 'file-b.bin', kind: 'file' },
     ])
   })
@@ -597,6 +597,37 @@ describe('background attachment admission without a visual frame', () => {
       expect(f.fake.input.state.getSnapshot().draft).toBe('keep @refs')
     } finally { Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }) }
   })
+  it('submits four already-uploaded images plus text without inline re-encoding', async () => {
+    const ids = ['one', 'two', 'three', 'four']
+    const fake = fakeInput({ attachmentIds: ids })
+    const scope = {}
+    const prompt = vi.fn(async (..._args: unknown[]) => ({ ok: true, value: { accepted: true } }))
+    const session = { sessionId: 's1', prompt }
+    const serializeDraftAttachments = vi.fn(async () => { throw new Error('must reuse receipts') })
+    const host = new OverlayHost({
+      sessions: () => ({ scope: () => scope, sessionOf: () => session }),
+      conversation: () => ({
+        input: { for: () => fake.input },
+        sendSession: vi.fn(async () => ({ kind: 'error' as const })),
+        resolveDraftAttachments: () => ids.map(id => ({ kind: 'image' as const, id })),
+        fileUploads: { getSnapshot: () => Object.fromEntries(ids.map(id => [id, { status: 'ready' as const, receiptId: 'receipt-' + id }])) },
+        serializeDraftAttachments,
+      }),
+    }, () => 's1')
+    const operationId = 'native-send-12b2c483-4b43-46f1-a240-6bcede9703bb'
+    const api = host.api()
+    expect(parse(api.send('caption', 's1', operationId)).operationId).toBe(operationId)
+    await vi.waitFor(() => expect(parse(api.operation(operationId)).ok).toBe(true))
+    expect(parse(api.send('caption', 's1', operationId)).ok).toBe(true)
+    expect(prompt).toHaveBeenCalledOnce()
+    expect(serializeDraftAttachments).not.toHaveBeenCalled()
+    expect(prompt.mock.calls[0]?.[0]).toEqual([
+      ...ids.map(id => ({ type: 'file', receiptId: 'receipt-' + id })),
+      { type: 'text', text: 'caption' },
+    ])
+    host.dispose()
+  })
+
   it('explicit image capability rejection preserves original code/message and restores the exact rail', async () => {
     const f = fixture(async () => ({ ok: false, error: { code: 'session/attachment-invalid', message: 'Model does not support images' } }))
     const result = await settled(f.host, f.host.send('', 's1'))

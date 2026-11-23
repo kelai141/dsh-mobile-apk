@@ -82,7 +82,8 @@ describe('incoming request deadlines', () => {
     const first = consumer.poll()
     await vi.advanceTimersByTimeAsync(0)
     const blockedCall = fetchImpl.mock.calls.at(-1)!
-    expect(blockedCall[1]?.signal).toBeUndefined()
+    if (stage.startsWith('content')) expect(blockedCall[1]?.signal?.aborted).toBe(false)
+    else expect(blockedCall[1]?.signal).toBeUndefined()
     if (stage.endsWith('json') || stage.endsWith('blob')) {
       await vi.advanceTimersByTimeAsync(3000)
       late.resolve({ ...json({}), json: () => body.promise, blob: () => blob.promise })

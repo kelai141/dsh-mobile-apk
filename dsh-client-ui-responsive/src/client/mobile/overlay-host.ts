@@ -50,6 +50,7 @@ export interface OverlaySessionFace {
   readonly sessionId: string
   getSnapshot?(): { readonly sessionId?: string; readonly openState?: string; readonly openError?: unknown; readonly removed?: boolean }
   subscribe?(listener: () => void): () => void
+  loadOlder?(): Promise<void>
   prompt?(content: readonly unknown[], mode: 'queue' | 'steer', signal?: AbortSignal, requestId?: string): Promise<{ readonly ok: boolean; readonly value?: { readonly accepted?: boolean }; readonly error?: { readonly code?: string; readonly message?: string } }>
 }
 export interface OverlayEventWindow {
@@ -135,7 +136,11 @@ export interface OverlayInputLike {
 export interface OverlayConversationFace {
   readonly input?: { for(scope: unknown): OverlayInputLike }
   sendSession?(session: unknown, text: string, ids: readonly string[], mode: 'queue' | 'steer', signal?: AbortSignal): Promise<{ kind: 'success' | 'error'; text?: string }>
-  readonly fileUploads?: { getSnapshot(): Readonly<Record<string, { readonly status: 'uploading' | 'ready' | 'error' } | undefined>> }
+  readonly fileUploads?: {
+    getSnapshot(): Readonly<Record<string, { readonly status: 'uploading' | 'ready' | 'error'; readonly receiptId?: string } | undefined>>
+    subscribe?(listener: () => void): () => void
+  }
+  retryFileUpload?(sessionId: string, id: string): void
   resolveDraftAttachments?(ids: readonly string[]): readonly OverlayAttachmentLike[]
   serializeDraftAttachments?(ids: readonly string[]): Promise<{ readonly attachments: readonly unknown[] }>
   releaseDraftAttachment?(id: string): void
@@ -261,7 +266,7 @@ function boundOverlayTranscript(rows: readonly OverlayTranscriptRow[], hasMore: 
 }
 
 /** Public SessionBinding eventSource only: real dialog/tools, never reasoning or tool-private meta. */
-export function projectOverlayTranscript(sessionId: string, window: OverlayEventWindow): OverlayTranscriptRow[] {
+function collectOverlayTranscript(sessionId: string, window: OverlayEventWindow): OverlayTranscriptRow[] {
   const rows = new Map<string, OverlayTranscriptRow>()
   const live = new Map<string, { attempt: string; blocks: Map<number, { text: string; closed: boolean }> }>()
   const settled = new Set<string>()
@@ -321,7 +326,11 @@ export function projectOverlayTranscript(sessionId: string, window: OverlayEvent
       if (text.trim() !== '') rows.set(id, { id, role: 'assistant', text })
     }
   }
-  return boundOverlayTranscript([...rows.values()], window.hasMore === true)
+  return [...rows.values()]
+}
+
+export function projectOverlayTranscript(sessionId: string, window: OverlayEventWindow): OverlayTranscriptRow[] {
+  return boundOverlayTranscript(collectOverlayTranscript(sessionId, window), window.hasMore === true)
 }
 
 /**
@@ -341,8 +350,6 @@ export class OverlayHost {
   private readonly draftOwners = new Set<() => void>()
 
   private disposed = false
-  private readonly thumbnails = new Map<string, string>()
-  private readonly thumbnailPending = new Set<string>()
   private stateWatching = false
   private stateSubscriptions: (() => void)[] = []
   private inputSubscription: (() => void) | undefined
@@ -368,6 +375,8 @@ export class OverlayHost {
     const changed = () => { this.bindVisibleSessionObservation(); this.signalStateChanged() }
     const sessions = this.faces.sessions?.()?.list, workspaces = this.faces.workspaces?.()?.list
     const sessionDrop = sessions?.subscribe?.(changed), workspaceDrop = workspaces?.subscribe?.(changed)
+    const uploadDrop = this.faces.conversation?.()?.fileUploads?.subscribe?.(() => this.signalStateChanged())
+    if (uploadDrop !== undefined) this.stateSubscriptions.push(uploadDrop)
     if (sessionDrop !== undefined) this.stateSubscriptions.push(sessionDrop)
     if (workspaceDrop !== undefined) this.stateSubscriptions.push(workspaceDrop)
     const bindInput = () => changed()
@@ -403,7 +412,22 @@ export class OverlayHost {
     if (lifecycleDrop !== undefined) this.transcriptSubscriptions.push(lifecycleDrop)
   }
 
-  private transcriptOf(sessionId: string): { rows: OverlayTranscriptRow[]; ready: boolean; error: string } {
+  private transcriptWindow?: { sessionId: string; window: OverlayEventWindow; rows: OverlayTranscriptRow[] }
+  private transcriptBefore = ''
+  private transcriptSessionId = ''
+
+  private transcriptRows(sessionId: string, window: OverlayEventWindow): OverlayTranscriptRow[] {
+    const cached = this.transcriptWindow
+    if (cached?.sessionId === sessionId && cached.window === window) return cached.rows
+    // Cache the projection per published window so IME/menu/attachment state reads do not
+    // process the same history repeatedly. Only the page selected below crosses the bridge.
+    const rows = collectOverlayTranscript(sessionId, window)
+    this.transcriptWindow = { sessionId, window, rows }
+    return rows
+  }
+
+  private transcriptOf(sessionId: string): { rows: OverlayTranscriptRow[]; ready: boolean; error: string; hasOlder?: boolean; olderPage?: boolean } {
+    if (sessionId !== this.transcriptSessionId) { this.transcriptSessionId = sessionId; this.transcriptBefore = '' }
     if (sessionId === '') return { rows: [], ready: false, error: 'transcript-session-unavailable' }
     try {
       const binding = this.faces.sessions?.()?.binding?.(sessionId)
@@ -411,8 +435,43 @@ export class OverlayHost {
       const lifecycle = binding.session.getSnapshot?.()
       if (lifecycle?.removed === true || lifecycle?.openState === 'error') return { rows: [], ready: false, error: 'transcript-history-error' }
       const window = binding.eventSource.getSnapshot()
-      return { rows: projectOverlayTranscript(sessionId, window), ready: lifecycle?.openState === 'open', error: lifecycle?.openState === 'open' ? '' : 'transcript-history-pending' }
+      const all = this.transcriptRows(sessionId, window)
+      const boundary = this.transcriptBefore === '' ? -1 : all.findIndex(row => row.id === this.transcriptBefore)
+      if (boundary < 0) this.transcriptBefore = ''
+      const total = boundary < 0 ? all.length : boundary
+      const rows = boundOverlayTranscript(all.slice(Math.max(0, total - TRANSCRIPT_ROWS), total), window.hasMore === true || total > TRANSCRIPT_ROWS)
+      return {
+        rows, hasOlder: total > rows.length || (window.hasMore === true && binding.session.loadOlder !== undefined),
+        olderPage: boundary >= 0, ready: lifecycle?.openState === 'open',
+        error: lifecycle?.openState === 'open' ? '' : 'transcript-history-pending',
+      }
     } catch { return { rows: [], ready: false, error: 'transcript-unavailable' } }
+  }
+
+  private history(direction: unknown, sessionId: unknown): string {
+    if (typeof sessionId !== 'string' || sessionId === '' || sessionId !== this.sessionId()) return fail('session-mismatch')
+    if (direction === 'latest') { this.transcriptBefore = ''; return ok({}) }
+    if (direction !== 'older') return fail('invalid-history-direction')
+    const binding = this.faces.sessions?.()?.binding?.(sessionId)
+    if (binding === undefined) return fail('transcript-unavailable')
+    const page = this.transcriptOf(sessionId)
+    const anchor = page.rows[0]?.id
+    if (!page.hasOlder) return fail('no-older-history')
+    return this.begin(JSON.stringify(['history', sessionId, anchor]), async () => {
+      try {
+        const before = binding.eventSource.getSnapshot()
+        if (anchor === undefined || this.transcriptRows(sessionId, before)[0]?.id === anchor) {
+          if (!before.hasMore || binding.session.loadOlder === undefined) return fail('no-older-history')
+          await this.withSendDeadline(binding.session.loadOlder(), 8000, 'history-timeout')
+        }
+        const current = this.faces.sessions?.()?.binding?.(sessionId)
+        if (this.sessionId() !== sessionId || current?.session !== binding.session || current.eventSource !== binding.eventSource) return fail('session-generation-changed')
+        const after = binding.eventSource.getSnapshot()
+        if (anchor !== undefined && this.transcriptRows(sessionId, after).findIndex(row => row.id === anchor) > 0) this.transcriptBefore = anchor
+        else if (before === after) return fail('no-older-history')
+        return ok({})
+      } catch (error) { return failWith('history', error) }
+    })
   }
 
   private signalStateChanged(): void {
@@ -420,7 +479,7 @@ export class OverlayHost {
     this.stateNotification = setTimeout(() => { this.stateNotification = undefined; if (this.stateWatching && !this.disposed) console.info('[dsh-overlay-state-changed]') }, 100)
   }
   private readonly unknownSendChecks = new Map<string, { check(): void; dispose(): void }>()
-  dispose(): void { this.watchState(false); this.disposed = true; this.thumbnails.clear(); for (const pending of this.unknownSendChecks.values()) pending.dispose(); this.unknownSendChecks.clear(); for (const drop of [...this.draftOwners]) drop() }
+  dispose(): void { this.watchState(false); this.disposed = true; for (const pending of this.unknownSendChecks.values()) pending.dispose(); this.unknownSendChecks.clear(); for (const drop of [...this.draftOwners]) drop() }
   private readonly incomingStates = new Map<string, string>()
   private readonly incomingReads = new Set<string>()
   /** 读命令的并发合并：原生可能连点几次「命令抽屉」，不能并发开多轮上游菜单。 */
@@ -438,6 +497,8 @@ export class OverlayHost {
     return {
       version: OVERLAY_HOST_VERSION,
       watchState: (enabled: unknown) => this.watchState(enabled),
+      previewAttachment: (id: unknown, sessionId: unknown) => this.selectPreview(id, sessionId),
+      history: (direction: unknown, sessionId: unknown) => this.history(direction, sessionId),
       operation: (id: unknown) => this.operation(id),
       incoming: (id: unknown) => this.incoming(id),
       openWorkspace: (id: unknown) => this.openWorkspace(id),
@@ -445,8 +506,9 @@ export class OverlayHost {
       sessions: () => this.sessions(),
       commands: () => this.commandsJson(),
       execute: (line: unknown, sessionId: unknown) => this.execute(line, sessionId),
-      send: (text: unknown, sessionId: unknown) => this.send(text, sessionId),
-      removeAttachment: (index: unknown) => this.removeAttachment(index),
+      send: (text: unknown, sessionId: unknown, operationId?: unknown) => this.send(text, sessionId, operationId),
+      removeAttachment: (id: unknown, sessionId?: unknown) => this.removeAttachment(id, sessionId),
+      retryAttachment: (id: unknown, sessionId: unknown) => this.retryAttachment(id, sessionId),
       openSession: (sessionId: unknown) => this.openSession(sessionId),
       newSession: () => this.newSession(),
     }
@@ -484,6 +546,8 @@ export class OverlayHost {
         busy: row?.running === true,
         transcript: transcript.rows,
         transcriptReady: transcript.ready,
+        transcriptHasOlder: transcript.hasOlder === true,
+        transcriptOlderPage: transcript.olderPage === true,
         transcriptError: transcript.error,
         attachments: this.attachmentsOf(inputState),
         draft: typeof inputState?.draft === 'string' ? inputState.draft : '',
@@ -622,12 +686,17 @@ export class OverlayHost {
 
   private waitForForeground(): Promise<void> {
     if (document.visibilityState === 'visible') return Promise.resolve()
-    return new Promise<void>((resolve, reject) => {
-      const done = () => { window.clearTimeout(timer); document.removeEventListener('visibilitychange', changed) }
-      const changed = () => { if (document.visibilityState === 'visible') { done(); resolve() } }
-      const timer = window.setTimeout(() => { done(); reject(new Error('commands-foreground-required')) }, 10000)
+    return this.withSendDeadline(new Promise<void>((resolve) => {
+      const changed = () => {
+        if (document.visibilityState === 'visible') {
+          document.removeEventListener('visibilitychange', changed)
+          clearTimeout(cleanup)
+          resolve()
+        }
+      }
+      const cleanup = setTimeout(() => document.removeEventListener('visibilitychange', changed), 10000)
       document.addEventListener('visibilitychange', changed)
-    })
+    }), 10000, 'commands-foreground-required')
   }
 
   // ── 动作面 ────────────────────────────────────────────────────────────────
@@ -668,10 +737,10 @@ export class OverlayHost {
     return this.operations.get(id) ?? JSON.stringify({ pending: true, unknown: true, operationId: id, error: 'operation-not-found' })
   }
 
-  private begin(key: string, run: (signal: AbortSignal) => Promise<string>): string {
+  private begin(key: string, run: (signal: AbortSignal) => Promise<string>, requestedOperationId?: string): string {
     const existing = this.activeOperationKeys.get(key)
     if (existing !== undefined) return this.operations.get(existing)!
-    const operationId = this.instanceId + '-overlay-' + String(++this.operationSequence)
+    const operationId = requestedOperationId ?? this.instanceId + '-overlay-' + String(++this.operationSequence)
     const pending = JSON.stringify({ pending: true, operationId })
     this.operations.set(operationId, pending)
     this.activeOperationKeys.set(key, operationId)
@@ -758,12 +827,15 @@ export class OverlayHost {
   }
 
   /** The input rail gives up this batch synchronously; the browser registry retains its bytes. */
-  send(text: unknown, expectedSessionId: unknown = this.sessionId()): string {
+  send(text: unknown, expectedSessionId: unknown = this.sessionId(), requestedOperationId?: unknown): string {
     try {
       if (this.disposed) return fail('host-disposed')
       if (typeof text !== 'string') return fail('invalid-text')
       const id = this.sessionId()
       if (id === '' || id !== expectedSessionId) return fail('session-mismatch')
+      const knownId = typeof requestedOperationId === 'string' && /^native-send-[a-f0-9-]{36}$/u.test(requestedOperationId)
+        ? requestedOperationId : undefined
+      if (knownId !== undefined && this.operations.has(knownId)) return this.operations.get(knownId)!
       const key = JSON.stringify(['send', id, text])
       const existing = this.activeOperationKeys.get(key)
       if (existing !== undefined) return this.operations.get(existing)!
@@ -774,10 +846,15 @@ export class OverlayHost {
       const ids = [...state.attachmentIds ?? []]
       if (text.trim() === '' && ids.length === 0) return fail('empty-message')
       if (ids.length > 0 && input.addAttachments === undefined) return fail('attachment-admission-unavailable')
+      const receipts = new Map<string, string>()
       if (conversation.resolveDraftAttachments !== undefined && conversation.fileUploads !== undefined) {
         const drafts = conversation.resolveDraftAttachments(ids), uploads = conversation.fileUploads.getSnapshot()
         if (drafts.length !== ids.length) return fail('attachment-not-found')
         if (drafts.some(draft => (draft.kind === 'file' || uploads[draft.id] !== undefined) && uploads[draft.id]?.status !== 'ready')) return fail('attachment-not-ready')
+        for (const attachmentId of ids) {
+          const upload = uploads[attachmentId]
+          if (upload?.status === 'ready' && upload.receiptId) receipts.set(attachmentId, upload.receiptId)
+        }
       }
       const reference = this.faces.sessions?.()?.retain?.(id, { source: 'workspaceOperation' })
       const requestId = crypto.randomUUID()
@@ -786,7 +863,9 @@ export class OverlayHost {
       this.sending.add(id)
       // JS cannot interleave a user input event inside this batch. Guard refusals must not submit.
       for (const attachmentId of ids) {
-        if (!input.removeAttachment(attachmentId)) { detachFailed = true; break }
+        try {
+          if (!input.removeAttachment(attachmentId)) { detachFailed = true; break }
+        } catch { detachFailed = true; break }
         detached.push(attachmentId)
       }
       const lifecycle = new AbortController()
@@ -823,10 +902,19 @@ export class OverlayHost {
           if (detachFailed) { await this.restoreAttachments(input, detached, lifecycle.signal); return fail('attachment-detach-refused') }
           const target = (binding?.session ?? session) as OverlaySessionFace
           if (ids.length > 0 && conversation.serializeDraftAttachments !== undefined && target.prompt !== undefined) {
-            // Public serialization and Session admission have no visual-frame dependency.
-            const serialized = await this.withSendDeadline(conversation.serializeDraftAttachments(ids), 8000, 'attachment-serialization-timeout', lifecycle.signal)
+            // Match sendSession: refer to already uploaded bytes, including images. Only
+            // inline drafts need encoding, and the captured attachment order is preserved.
+            const inlineIds = ids.filter(attachmentId => !receipts.has(attachmentId))
+            const inline = inlineIds.length === 0 ? [] : [...(await this.withSendDeadline(
+              conversation.serializeDraftAttachments(inlineIds), 8000, 'attachment-serialization-timeout', lifecycle.signal,
+            )).attachments]
+            if (inline.length !== inlineIds.length) throw new Error('attachment-serialization-incomplete')
+            const attachments = ids.map(attachmentId => {
+              const receiptId = receipts.get(attachmentId)
+              return receiptId === undefined ? inline.shift() : { type: 'file', receiptId }
+            })
             if (this.faces.sessions?.()?.sessionOf?.(scope) !== session) { await this.restoreAttachments(input, detached, lifecycle.signal); return fail('session-generation-changed') }
-            const content = [...serialized.attachments, ...(text === '' ? [] : [{ type: 'text', text }])]
+            const content = [...attachments, ...(text === '' ? [] : [{ type: 'text', text }])]
             invoked = true
             const receipt = await target.prompt(content, 'queue', lifecycle.signal, requestId)
             if (accepted) return ok({ requestId })
@@ -850,7 +938,7 @@ export class OverlayHost {
           if (!finished) await this.restoreAttachments(input, detached, lifecycle.signal)
           return failWith('send', error)
         } finally { if (!uncertain || accepted) finish(this.disposed) }
-      })
+      }, knownId)
       operationId = (JSON.parse(raw) as { operationId: string }).operationId
       this.unknownSendChecks.set(operationId, {
         dispose: () => finish(true),
@@ -942,13 +1030,28 @@ export class OverlayHost {
     })
   }
 
-  removeAttachment(id: unknown): string {
+  retryAttachment(id: unknown, expectedSessionId: unknown): string {
     try {
+      const sessionId = this.sessionId()
+      if (sessionId === '' || sessionId !== expectedSessionId) return fail('session-mismatch')
+      const conversation = this.faces.conversation?.()
+      if (typeof id !== 'string' || !this.inputFacade(sessionId)?.state?.getSnapshot?.()?.attachmentIds?.includes(id)
+        || conversation?.retryFileUpload === undefined || conversation.fileUploads?.getSnapshot()[id]?.status !== 'error') return fail('attachment-not-retryable')
+      conversation.retryFileUpload(sessionId, id)
+      return ok({})
+    } catch (error) { return failWith('retryAttachment', error) }
+  }
+
+  removeAttachment(id: unknown, expectedSessionId: unknown = this.sessionId()): string {
+    try {
+      if (this.sessionId() !== expectedSessionId) return fail('session-mismatch')
       if (typeof id !== 'string' || id === '') return fail('invalid-attachment-id')
       const input = this.requireInput()
       if (input === undefined) return fail('composer-unavailable')
       if (!(input.state?.getSnapshot?.()?.attachmentIds ?? []).includes(id)) return fail('attachment-not-found')
-      return input.removeAttachment(id) ? ok({}) : fail('attachment-remove-refused')
+      if (!input.removeAttachment(id)) return fail('attachment-remove-refused')
+      this.faces.conversation?.()?.releaseDraftAttachment?.(id)
+      return ok({})
     } catch (error) { return failWith('removeAttachment', error) }
   }
 
@@ -1027,6 +1130,18 @@ export class OverlayHost {
     return this.inputFacade(sessionId)?.state?.getSnapshot?.()
   }
 
+  private thumbnailRequested = ""
+  private readonly thumbnails = new Map<string, string>()
+  private readonly thumbnailPending = new Set<string>()
+
+  private selectPreview(id: unknown, expectedSessionId: unknown): string {
+    if (typeof id !== "string" || this.sessionId() !== expectedSessionId) return fail("session-mismatch")
+    const state = this.inputFacade(this.sessionId())?.state?.getSnapshot?.()
+    if (!(state?.attachmentIds ?? []).includes(id)) return fail("attachment-not-found")
+    this.thumbnailRequested = id
+    return ok({})
+  }
+
   private thumbnailOf(attachment: OverlayAttachmentLike): string {
     const cached = this.thumbnails.get(attachment.id)
     if (cached !== undefined) return cached
@@ -1063,17 +1178,19 @@ export class OverlayHost {
   }
 
   /** 草稿附件 → 线上形态（名字取 File.name；拿不到就空串，不编）。 */
-  private attachmentsOf(inputState: OverlayInputStateLike | undefined): Array<{ id: string; name: string; kind: 'image' | 'file'; thumbnail?: string }> {
+  private attachmentsOf(inputState: OverlayInputStateLike | undefined): Array<{ id: string; name: string; kind: 'image' | 'file'; thumbnail?: string; status?: string }> {
     const ids = inputState?.attachmentIds
     if (!Array.isArray(ids) || ids.length === 0) return []
     const conversation = this.faces.conversation?.()
     if (conversation?.resolveDraftAttachments === undefined) return []
     try {
+      const uploads = conversation.fileUploads?.getSnapshot()
       return conversation.resolveDraftAttachments(ids).map((attachment) => ({
         id: attachment.id,
         name: attachment.file?.name ?? '',
         kind: attachment.kind === 'image' ? 'image' : 'file',
-        ...(attachment.kind === 'image' ? { thumbnail: this.thumbnailOf(attachment) } : {}),
+        ...(uploads?.[attachment.id] === undefined ? {} : { status: uploads[attachment.id]!.status }),
+        ...(attachment.kind === 'image' && attachment.id === this.thumbnailRequested ? { thumbnail: this.thumbnailOf(attachment) } : {}),
       }))
     } catch {
       return []

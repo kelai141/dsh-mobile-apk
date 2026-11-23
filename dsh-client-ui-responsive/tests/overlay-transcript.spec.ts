@@ -36,6 +36,38 @@ describe('real overlay transcript projection', () => {
     f.host.dispose()
   })
 
+  it('pages older history under the original session and returns to the latest bounded page', async () => {
+    const f = fixture()
+    const entries = Array.from({ length: 92 }, (_, i) => user(i + 1, 'row-' + (i + 1)))
+    f.a.set({ entries: entries.slice(40), hasMore: true })
+    const loadOlder = vi.fn(async () => { f.a.set({ entries, hasMore: false }) })
+    f.bindings.A.session.loadOlder = loadOlder
+    const api = f.host.api()
+    async function older() {
+      const ticket = JSON.parse(api.history('older', 'A'))
+      await vi.waitFor(() => expect(JSON.parse(api.operation(ticket.operationId)).ok).toBe(true))
+      return JSON.parse(api.state())
+    }
+    let state = JSON.parse(api.state())
+    expect(state.transcript).toHaveLength(40)
+    expect(state.transcript[0].text).toBe('row-53')
+    state = await older()
+    expect(state.transcript.map((row: { text: string }) => row.text)).toEqual(entries.slice(40, 52).map((_, i) => 'row-' + (41 + i)))
+    expect(loadOlder).not.toHaveBeenCalled()
+    state = await older()
+    expect(state.transcript).toHaveLength(40)
+    expect(state.transcript[0].text).toBe('row-1')
+    expect(state.transcriptHasOlder).toBe(false)
+    expect(state.transcriptOlderPage).toBe(true)
+    expect(loadOlder).toHaveBeenCalledOnce()
+    expect(JSON.parse(api.history('latest', 'A')).ok).toBe(true)
+    expect(JSON.parse(api.state()).transcript[0].text).toBe('row-53')
+    document.documentElement.setAttribute(SESSION_ID_ATTRIBUTE, 'B')
+    expect(JSON.parse(api.history('older', 'A')).error).toBe('session-mismatch')
+    expect(JSON.parse(api.state()).transcript[0].text).toBe('B only')
+    f.host.dispose()
+  })
+
   it('excludes unpaired/malformed tools, reasoning, and injected context from actual dialog', () => {
     const rows = projectOverlayTranscript('A', { entries: [
       user(1, 'human'), entry('tool/result', 2, { content: [{ type: 'text', text: 'secret tool' }] }),

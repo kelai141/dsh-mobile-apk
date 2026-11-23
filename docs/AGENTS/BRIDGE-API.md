@@ -77,6 +77,12 @@ tier-2（`isolationTier=process-suffix`）把浏览器视图放在 `:browser` �
 
 页面历史不是新增JavascriptInterface：原受控OverlayPageHost.state读取公开SessionBinding.eventSource，transcript合同为role=user/assistant/tool，工具字段toolName/arguments/result/state及truncated；字段与全JSON UTF8共享上限、真实配对和安全渲染唯一细节见[设计§5.5](<docs/overlay-refactor-2026-11/design.md>)。debug UI快照仅既有debuggable诊断面，不注册模型工具、不作为可信业务输入。新增桥必须跑对称门禁，源码/静态绿不替代设备验收；**CURRENT VERIFICATION PENDING**。
 
+### 悬浮窗页面宿主
+
+原生通过 [OverlayPageHost.kt](<app/src/main/java/com/dsharnessmobile/shell/OverlayPageHost.kt>) 求值 [overlay-host.ts](<dsh-client-ui-responsive/src/client/mobile/overlay-host.ts>)。附件状态来自浏览器草稿和上传存储。预览、删除和重试都校验会话及附件 ID。预览按点击回传单张有界 JPEG，附件栏默认使用本地 SVG。上传完的文件和图片以存储凭据提交。原生发起附件发送时提供操作 ID，可用 operation(id) 核对原操作。
+
+卡片历史按当前会话读取公开事件窗口。history("older", sessionId) 在本地窗口内分页，必要时触发上游 loadOlder()。history("latest", sessionId) 回到最新页。每页最多 40 条，序列化后的历史 JSON 最多 24 KiB。
+
 ## 3. 历史增量（不作为当前构建或验收证据）
 
 ## 0.13.3 W2/W3/W10 桥协议增量

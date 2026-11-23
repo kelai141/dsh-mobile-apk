@@ -138,8 +138,8 @@ class OverlayV2RecreationTest {
   @Test fun receiptChecksOriginalSessionAndRequestBeforeAnnouncingSuccess() {
     val receipt = body("private fun onAttachmentReceipt(", "private fun onAttachmentResult(")
     assertTrue(receipt.contains("receipt.sessionId != svc.activeSessionId"))
-    assertTrue(receipt.contains("receipt.requestId !in ids"))
-    assertTrue(receipt.indexOf("receipt.requestId !in ids") < receipt.indexOf("onAttachmentResult("))
+    assertTrue(receipt.contains("receipt.requestId.isEmpty()"))
+    assertTrue(receipt.indexOf("receipt.requestId.isEmpty()") < receipt.indexOf("onAttachmentResult("))
     assertTrue("switching active sid cannot strand the original window's temporary flags",
       receipt.indexOf("restoreAttachmentInteraction(receipt.sessionId, receipt.requestId)") <
         receipt.indexOf("receipt.sessionId != svc.activeSessionId"))
@@ -156,7 +156,7 @@ class OverlayV2RecreationTest {
     assertFalse("returning from picker must leave the delivery identity live", restore.contains("attachmentRequestIds"))
     val receipt = body("private fun onAttachmentReceipt(", "private fun onAttachmentResult(")
     val pending = receipt.indexOf("""receipt.error == "attachment-pending"""")
-    val consume = receipt.indexOf("ids.remove(receipt.requestId)")
+    val consume = receipt.indexOf("attachmentRecheckAttempts.remove(receipt.requestId)")
     assertTrue(pending >= 0 && consume > pending)
     assertTrue(receipt.substring(pending, consume).contains("return"))
   }
@@ -199,7 +199,7 @@ class OverlayV2RecreationTest {
     }
     val screen = section("  private fun screen()", "  private fun dimenPx(")
     assertTrue("physical top must not jump when system bars toggle visibility",
-      screen.contains("getInsetsIgnoringVisibility(WindowInsets.Type.systemBars())"))
+      screen.contains("getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())"))
     assertFalse(screen.contains(".getInsets(WindowInsets.Type.systemBars())"))
     assertTrue(screen.contains("statusBar = insets.top"))
     assertTrue(screen.contains("navBar = insets.bottom"))
@@ -210,9 +210,9 @@ class OverlayV2RecreationTest {
     assertTrue("must update actual input frame before its dependent windows", moved >= 0)
     assertTrue("picker lease cannot gain/rebuild sheet or chip members", tail.contains("if (attachmentInteraction == null) {"))
     val dependencies = tail.substringAfter("if (attachmentInteraction == null) {")
-    val cap = "composer?.setMaxDrawerHeightPx((OverlayWindowFrames.availableHeightPx(s) * .4f).toInt())"
+    val cap = "syncDrawerWindow()"
     assertTrue("rotation must recalculate the sheet's real available-height cap", dependencies.contains(cap))
-    assertTrue(dependencies.indexOf(cap) < dependencies.indexOf("syncDrawerWindow()"))
+    assertTrue(dependencies.indexOf(cap) < dependencies.indexOf("composer?.view?.post {"))
     assertTrue("chip positioning waits for the input's updated on-screen frame", dependencies.contains("composer?.view?.post {"))
     assertTrue(dependencies.contains("if (!destroyed && !uiSuspended && !hostForeground) syncChipWindows()"))
     val chips = section("  private fun syncChipWindows()", "  private fun syncDrawerWindow()")
@@ -231,13 +231,12 @@ class OverlayV2RecreationTest {
     val configEnd = text.indexOf("  private fun scheduleRender()", configStart)
     val config = text.substring(configStart, configEnd)
     val configMutants = listOf(
-      config.replace("composer?.setMaxDrawerHeightPx((OverlayWindowFrames.availableHeightPx(s) * .4f).toInt())", "Unit"),
       config.replace("      syncDrawerWindow()", ""),
       config.replace("    if (attachmentInteraction == null) {", "    if (true) {"),
       config.replace("composer?.view?.post {", "run {"),
     )
     val mutants = configMutants.map { text.substring(0, configStart) + it + text.substring(configEnd) } +
-      text.replace("getInsetsIgnoringVisibility(WindowInsets.Type.systemBars())", "getInsets(WindowInsets.Type.systemBars())")
+      text.replace("getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())", "getInsets(WindowInsets.Type.systemBars())")
     for (mutated in mutants) {
       assertNotEquals("configuration negative must change real production wiring", text, mutated)
       var rejected = false

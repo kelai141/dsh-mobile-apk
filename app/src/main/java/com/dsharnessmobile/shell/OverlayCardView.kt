@@ -141,6 +141,25 @@ internal class OverlayCardView(
     visibility = View.GONE
   }
 
+  private val historyControls = LinearLayout(context).apply {
+    setPadding(dp(10), 0, dp(10), 0)
+    gravity = Gravity.CENTER_HORIZONTAL
+    visibility = View.GONE
+  }
+  private val olderHistory = historyButton("older", UiText.t(context, "加载更早", "Load older"))
+  private val latestHistory = historyButton("latest", UiText.t(context, "返回最新", "Latest"))
+
+  private fun historyButton(direction: String, label: String) = TextView(context).apply {
+    tag = "overlay-card-history-$direction"
+    text = label
+    textSize = 12f
+    gravity = Gravity.CENTER
+    setPadding(dp(12), 0, dp(12), 0)
+    setTextColor(colorTextPrimary)
+    setOnClickListener { listener.onCardHistory(direction) }
+    historyControls.addView(this, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)))
+  }
+
   /** 待答区按 pending 列表结构重建（结构变化才发生，不是每次 render）。 */
   private val pendingColumn = LinearLayout(context).apply {
     tag = "overlay-card-pending"
@@ -189,6 +208,7 @@ internal class OverlayCardView(
     addView(rowsColumn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     addView(footerLine, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     addView(pendingColumn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    addView(historyControls, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     addView(transcriptColumn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
   }
   private val scrollView = ScrollView(context).apply {
@@ -412,6 +432,13 @@ internal class OverlayCardView(
     rowsColumn.visibility = if (data.transcript.any { it.role == "tool" } || data.rows.isEmpty()) View.GONE else View.VISIBLE
     renderRows(data.rows)
     renderPending(data.pending)
+    historyControls.visibility = if (data.historyOlder || data.historyLatest) View.VISIBLE else View.GONE
+    olderHistory.visibility = if (data.historyOlder) View.VISIBLE else View.GONE
+    latestHistory.visibility = if (data.historyLatest) View.VISIBLE else View.GONE
+    olderHistory.isEnabled = !data.historyLoading
+    latestHistory.isEnabled = !data.historyLoading
+    olderHistory.setTextIfChanged(if (data.historyLoading) UiText.t(context, "加载中…", "Loading…")
+      else UiText.t(context, "加载更早", "Load older"))
     renderTranscript(data.transcript)
     if (transcriptRows != previousTranscript || (bodyChanged && transcriptRows.isNotEmpty())) {
       pendingTranscriptScroll = scroll
@@ -963,6 +990,7 @@ internal class OverlayCardView(
     total += childHeightWithMargins(headerRow, width)
     if (thinkingLine.visibility != View.GONE) total += childHeightWithMargins(thinkingLine, width)
     if (rowsColumn.visibility != View.GONE) total += childHeightWithMargins(rowsColumn, width)
+    if (historyControls.visibility != View.GONE) total += childHeightWithMargins(historyControls, width)
     if (transcriptColumn.visibility != View.GONE) total += childHeightWithMargins(transcriptColumn, width)
     if (footerLine.visibility != View.GONE) total += childHeightWithMargins(footerLine, width)
     if (pendingColumn.visibility != View.GONE) total += childHeightWithMargins(pendingColumn, width)

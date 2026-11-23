@@ -7,6 +7,7 @@ import android.graphics.Region
 import android.util.Base64
 import android.widget.ImageView
 import android.graphics.drawable.GradientDrawable
+import android.widget.FrameLayout
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
@@ -373,7 +374,9 @@ internal class OverlayComposer(
   /** 当前是否 busy（发送按钮语义由它切换；render 里更新）。 */
   private var busy = false
   private var sendEnabled = false
-  private var attachmentSignature = ""
+  private var renderedAttachments = emptyList<OverlayAttachmentChip>()
+  private var sendRecheck = false
+  private var previewId: String? = null
   private var hasReadyAttachments = false
 
   /**
@@ -392,11 +395,12 @@ internal class OverlayComposer(
     workspaceChip.contentDescription = workspaceChip.text
     sessionChip.contentDescription = sessionChip.text
 
-    hasReadyAttachments = data.attachments.any { !it.pending }
-    val signature = data.attachments.joinToString("\u0001") { it.id + "\u0002" + it.kind + "\u0002" + it.name + "\u0002" + it.thumbnail + "\u0002" + it.pending }
-    if (signature != attachmentSignature) {
-      attachmentSignature = signature
-      renderAttachments(data.attachments)
+    hasReadyAttachments = data.attachments.isNotEmpty()
+    sendRecheck = data.sendRecheck
+    if (data.attachments != renderedAttachments) {
+      renderedAttachments = data.attachments
+      if (renderedAttachments.none { it.id == previewId }) previewId = null
+      renderAttachments(renderedAttachments)
     }
 
     busy = data.busy && !data.answeringQuestion
@@ -559,6 +563,16 @@ internal class OverlayComposer(
   /** 编排层注入「当前是选择器（会话/工作区）还是命令/附件」：前者显示搜索框、隐藏瓦片。 */
   fun setPickerMode(enabled: Boolean) = drawer.setPickerMode(enabled)
 
+  fun setSheetDragHandler(handler: (OverlayDragPhase, Float) -> Boolean) { drawer.onSheetDrag = handler }
+  fun drawerAtTop(): Boolean = drawer.atTop()
+  fun resetDrawerScroll() = drawer.view.scrollTo(0, 0)
+
+  fun prepareCommandSheet() {
+    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+    imm?.hideSoftInputFromWindow(view.windowToken, 0)
+    focusRoot()
+  }
+
   /** 编排层以可用屏高40%注入；0表示几何未就绪，不显示无上限列表。 */
   fun setMaxDrawerHeightPx(maxHeightPx: Int) {
     val next = maxHeightPx.coerceAtLeast(0)
@@ -628,7 +642,7 @@ internal class OverlayComposer(
     //   2. 引擎运行 —— "方块"，表示可以随时暂停；
     //   3. 引擎运行 + 输入框有文字 —— 切回"发送"（箭头），用来插话。
     // 换句话说：只有「运行中且没字」才是方块。把空闲也算成方块会让人以为一直在跑。
-    val hasDraft = hasSendableDraft()
+    val hasDraft = hasSendableDraft() || sendRecheck
     val showStop = busy && !hasDraft
     actionButton.setGlyph(
       if (showStop) OverlayActionGlyphView.Glyph.STOP else OverlayActionGlyphView.Glyph.SEND,
@@ -645,81 +659,91 @@ internal class OverlayComposer(
   }
 
   private fun renderAttachments(items: List<OverlayAttachmentChip>) {
+    val scrollX = attachScroll.scrollX
     attachColumn.removeAllViews()
-    if (items.isEmpty()) {
-      attachScroll.visibility = View.GONE
-      return
-    }
-    for ((index, chip) in items.withIndex()) {
+    attachScroll.visibility = if (items.isEmpty()) View.GONE else View.VISIBLE
+    for (chip in items) {
       attachColumn.addView(
-        attachmentChip(chip, index),
-        LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(8) },
+        attachmentChip(chip),
+        LinearLayout.LayoutParams(dp(100), ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(8) },
       )
     }
-    attachScroll.visibility = View.VISIBLE
+    attachScroll.scrollTo(scrollX, 0)
   }
 
-  private fun attachmentChip(item: OverlayAttachmentChip, index: Int): View {
+  private fun attachmentChip(item: OverlayAttachmentChip): View {
     val name = TextView(context).apply {
       textSize = 11f
       setTextColor(colorTextPrimary)
-      maxLines = 1
-      ellipsize = android.text.TextUtils.TruncateAt.END
-      text = overlaySingleLine(item.name)
-      // 文件保持名称/类型；图片在同chip显示实际缩略图，并可点按放大。
-      contentDescription = if (item.kind == "image") {
-        UiText.t(context, "图片附件 ", "Image attachment ") + overlaySingleLine(item.name)
-      } else {
-        UiText.t(context, "文件附件 ", "File attachment ") + overlaySingleLine(item.name)
+      setSingleLine()
+      ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+      gravity = Gravity.CENTER
+      text = OverlayAttachmentIcons.fileName(item.name)
+      contentDescription = item.name
+    }
+    val artwork = ImageView(context).apply {
+      tag = "overlay-attachment-preview"
+      scaleType = ImageView.ScaleType.FIT_CENTER
+      val fallback = OverlayAttachmentIcons.drawable(context, item.name)
+      val thumbnail = overlayThumbnailData(item.thumbnail)
+      val bitmap = if (item.id != previewId || thumbnail.isEmpty()) null else runCatching {
+        val bytes = Base64.decode(thumbnail.substringAfter(","), Base64.DEFAULT)
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth !in 1..256 || bounds.outHeight !in 1..256) null
+        else BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+      }.getOrNull()
+      if (bitmap == null) setImageDrawable(fallback) else setImageBitmap(bitmap)
+      if (item.kind == "image" && !item.pending) {
+        contentDescription = UiText.t(context, "预览图片：", "Preview image: ") + item.name
+        setOnClickListener {
+          previewId = if (previewId == item.id) null else item.id
+          if (previewId == item.id && thumbnail.isEmpty()) listener.onComposerPreviewAttachment(item.id)
+          renderAttachments(renderedAttachments)
+        }
       }
     }
-    val remove = TextView(context).apply {
-      tag = "overlay-composer-attachment-remove"
-      text = "\u00D7"
-      textSize = 14f
-      setTextColor(colorTextSecondary)
-      gravity = Gravity.CENTER
-      minWidth = dp(24)
-      minHeight = dp(24)
-      contentDescription = UiText.t(context, "移除附件", "Remove attachment")
-      isClickable = true
-      setOnClickListener { listener.onComposerRemoveAttachment(index) }
+    val artworkRow = FrameLayout(context).apply {
+      addView(artwork, FrameLayout.LayoutParams(dp(56), dp(44), Gravity.CENTER))
+      if (!item.pending) {
+        val remove = TextView(context).apply {
+          tag = "overlay-composer-attachment-remove"
+          text = "\u00D7"
+          textSize = 16f
+          gravity = Gravity.CENTER
+          setTextColor(colorTextSecondary)
+          contentDescription = UiText.t(context, "移除附件", "Remove attachment") + " " + item.name
+          setOnClickListener { listener.onComposerRemoveAttachment(item.id) }
+        }
+        addView(remove, FrameLayout.LayoutParams(dp(28), dp(36), Gravity.TOP or Gravity.END))
+      }
     }
+    val extension = OverlayAttachmentIcons.extension(item.name).uppercase(java.util.Locale.ROOT).take(10)
     return LinearLayout(context).apply {
-      orientation = LinearLayout.HORIZONTAL
-      gravity = Gravity.CENTER_VERTICAL
-      setPadding(dp(10), 0, dp(4), 0)
+      orientation = LinearLayout.VERTICAL
+      gravity = Gravity.CENTER_HORIZONTAL
+      setPadding(dp(4), dp(2), dp(4), dp(5))
       background = GradientDrawable().apply {
-        cornerRadius = context.resources.getDimension(R.dimen.ds_radius_pill)
+        cornerRadius = dp(12).toFloat()
         setColor(colorChip)
         setStroke(dp(1), colorBorder)
       }
-      if (item.kind == "image") {
-        val thumbnail = overlayThumbnailData(item.thumbnail)
-        val bitmap = try {
-          if (thumbnail.isEmpty()) null else {
-            val bytes = Base64.decode(thumbnail.substringAfter(","), Base64.DEFAULT)
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-            if (bounds.outWidth !in 1..256 || bounds.outHeight !in 1..256) null else BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-          }
-        } catch (_: IllegalArgumentException) { null }
-        if (bitmap != null) {
-          val preview = ImageView(context).apply {
-            tag = "overlay-attachment-preview"
-            setImageBitmap(bitmap)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            contentDescription = UiText.t(context, "预览图片：", "Preview image: ") + item.name
-            setOnClickListener {
-              val expanded = layoutParams.width == dp(40)
-              layoutParams = LinearLayout.LayoutParams(dp(if (expanded) 160 else 40), dp(if (expanded) 160 else 40))
-            }
-          }
-          addView(preview, LinearLayout.LayoutParams(dp(40), dp(40)))
-        } else name.text = UiText.t(context, "图片（预览不可用）：", "Image (preview unavailable): ") + name.text
+      addView(artworkRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)))
+      val label = TextView(context).apply {
+        textSize = 10f
+        setSingleLine()
+        ellipsize = android.text.TextUtils.TruncateAt.END
+        setTextColor(colorTextSecondary)
+        gravity = Gravity.CENTER
+        text = if (item.failed) UiText.t(context, "重试上传", "Retry upload")
+          else item.status.ifEmpty { extension.ifEmpty { UiText.t(context, "文件", "File") } }
+        if (item.failed) {
+          contentDescription = text.toString() + " " + item.name
+          setOnClickListener { listener.onComposerRetryAttachment(item.id) }
+        }
       }
-      addView(name, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(4) })
-      if (!item.pending) addView(remove, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginStart = dp(2) })
+      addView(label, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(22)))
+      addView(name, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     }
   }
 

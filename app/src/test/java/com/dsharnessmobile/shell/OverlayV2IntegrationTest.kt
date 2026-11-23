@@ -154,7 +154,7 @@ class OverlayV2IntegrationTest {
     assertTrue(v2.contains("leaveQuestionAnswer(false)"))
   }
 
-  @Test fun nativePreviewAcceptsOnlySmallJpegProjectionAndActualViewCanExpand() {
+  @Test fun nativePreviewAcceptsOnlySmallJpegProjectionAndFallsBackToLocalSvg() {
     assertEquals("", overlayThumbnailData("https://example.com/image.png"))
     assertEquals("", overlayThumbnailData("data:image/svg+xml;base64,AAAA"))
     assertEquals("", overlayThumbnailData("data:image/jpeg;base64," + "A".repeat(50000)))
@@ -162,7 +162,8 @@ class OverlayV2IntegrationTest {
     val composer = source("OverlayComposer.kt")
     assertTrue(composer.contains("bounds.outWidth !in 1..256 || bounds.outHeight !in 1..256"))
     assertTrue(composer.contains("setImageBitmap(bitmap)"))
-    assertTrue(composer.contains("dp(if (expanded) 160 else 40)"))
+    assertTrue(composer.contains("if (bitmap == null) setImageDrawable(fallback) else setImageBitmap(bitmap)"))
+    assertTrue(composer.contains("listener.onComposerPreviewAttachment(item.id)"))
   }
 
   @Test fun currentWorkspaceLabelUsesTheCurrentSessionNotTheCreationOverride() {
@@ -205,7 +206,7 @@ class OverlayV2IntegrationTest {
     assertTrue("subscription alone cannot render newly arrived transcript when only capsule is visible",
       callback.contains(pillRender))
     val renderAt = callback.indexOf(pillRender)
-    for (settled in listOf("if (destroyed || generation != pageReadGeneration) return@state", "pageState = s", "pageState = null"))
+    for (settled in listOf("if (destroyed || generation != pageReadGeneration) return@state", "pageState = s"))
       assertTrue("capsule must render only after the current callback settles " + settled,
         callback.indexOf(settled) in 0 until renderAt)
     assertFalse("capsule refresh cannot depend on composer/card visibility",
@@ -322,8 +323,11 @@ class OverlayV2IntegrationTest {
     assertTrue(restore.contains("lp.flags = flags; lp.alpha = morphInteractionAlpha"))
     val sheet = method("syncDrawerWindow")
     assertTrue(sheet.contains("val contentHeight = c.measureDrawerHeightPx(contentWidth)"))
-    assertTrue("picker may grow to 55%; commands retain their 40% cap",
-      sheet.contains("OverlayWindowFrames.availableHeightPx(screen) * if (picker) .55f else .4f"))
+    assertTrue(sheet.contains("OverlayWindowFrames.availableHeightPx(screen) * .55f"))
+    val commands = method("syncCommandSheet")
+    assertTrue(commands.contains("y = s.navBarPx"))
+    assertTrue(commands.contains("Slot.DRAWER_SCRIM"))
+    assertTrue(commands.contains(".coerceIn(1, max)"))
     assertTrue(sheet.contains("maxOf(contentHeight, minimumHeight).coerceIn(1, maxHeight)"))
     assertTrue("drawer bottom must stay above the openers", sheet.contains("screen.heightPx - chipRowTop + gapPx"))
     assertFalse(sheet.contains("composerParams?.y ="))
@@ -344,7 +348,8 @@ class OverlayV2IntegrationTest {
       text.replace("      c.applyMorph(", "      c.updateMorphTouchableRegion()\n      c.applyMorph("),
       text.replace("screen.heightPx - chipRowTop + gapPx", "screen.heightPx - chipRowTop - gapPx"),
       text.replace("maxOf(contentHeight, minimumHeight).coerceIn(1, maxHeight)", "contentHeight"),
-      text.replace("if (picker) .55f else .4f", ".55f"),
+      text.replace("OverlayWindowFrames.availableHeightPx(screen) * .55f", "OverlayWindowFrames.availableHeightPx(screen)"),
+      text.replace("y = s.navBarPx\n    }\n    val width", "y = 0\n    }\n    val width"),
     )
     for (mutated in mutants) {
       assertNotEquals("negative must alter actual region/coverage wiring", text, mutated)

@@ -3,6 +3,8 @@ package com.dsharnessmobile.shell
 import android.content.Context
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.view.View
 import android.widget.FrameLayout
 import android.view.ViewGroup
@@ -36,7 +38,6 @@ internal class OverlayCommandDrawer(
 ) {
 
   private val density = context.resources.displayMetrics.density
-  private val colorSurface = ContextCompat.getColor(context, R.color.ds_surface)
   private val colorChip = ContextCompat.getColor(context, R.color.ds_chip)
   private val colorBorder = ContextCompat.getColor(context, R.color.ds_border)
   private val colorHairline = ContextCompat.getColor(context, R.color.ds_hairline)
@@ -164,6 +165,12 @@ internal class OverlayCommandDrawer(
   }
 
   private var maxHeightPx = 0
+  var onSheetDrag: ((OverlayDragPhase, Float) -> Boolean)? = null
+
+  private val slop = ViewConfiguration.get(context).scaledTouchSlop
+  private var startX = 0f
+  private var startY = 0f
+  private var draggingSheet = false
 
   /** 行出现过渡执行器：只动 alpha/translationY，不改布局与窗口几何。 */
   private val reveal = OverlayRevealPlayer(risePx = OverlayMotionSpec.ROW_RISE_DP * density)
@@ -173,6 +180,42 @@ internal class OverlayCommandDrawer(
 
   /** 整体滚动；测量硬上限由可用高40%注入，不让附件瓦片把列表/滚动热区挤出屏幕。 */
   val view: View = object : ScrollView(context) {
+    override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
+      when (event.actionMasked) {
+        MotionEvent.ACTION_DOWN -> {
+          startX = event.rawX
+          startY = event.rawY
+          draggingSheet = false
+        }
+        MotionEvent.ACTION_MOVE -> {
+          val dy = event.rawY - startY
+          if (kotlin.math.abs(dy) > slop && kotlin.math.abs(dy) > kotlin.math.abs(event.rawX - startX) &&
+            onSheetDrag?.invoke(OverlayDragPhase.DOWN, dy) == true) {
+            draggingSheet = true
+            return true
+          }
+        }
+      }
+      return super.onInterceptTouchEvent(event)
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+      if (!draggingSheet && event.actionMasked == MotionEvent.ACTION_MOVE) {
+        val dy = event.rawY - startY
+        if (kotlin.math.abs(dy) > slop && onSheetDrag?.invoke(OverlayDragPhase.DOWN, dy) == true) draggingSheet = true
+      }
+      if (!draggingSheet) return super.onTouchEvent(event)
+      val phase = when (event.actionMasked) {
+        MotionEvent.ACTION_MOVE -> OverlayDragPhase.MOVE
+        MotionEvent.ACTION_UP -> OverlayDragPhase.UP
+        MotionEvent.ACTION_CANCEL -> OverlayDragPhase.CANCEL
+        else -> return true
+      }
+      onSheetDrag?.invoke(phase, event.rawY - startY)
+      if (phase != OverlayDragPhase.MOVE) draggingSheet = false
+      return true
+    }
+
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
       val parentMode = View.MeasureSpec.getMode(heightMeasureSpec)
       val parentSize = View.MeasureSpec.getSize(heightMeasureSpec)
@@ -182,7 +225,6 @@ internal class OverlayCommandDrawer(
   }.apply {
     tag = "overlay-drawer-scroll"
     // A settled sheet must cover the unchanged composer and other-app text, not blend with it.
-    setBackgroundColor(colorSurface)
     isFillViewport = false
     overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
     addView(contentColumn, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -196,6 +238,8 @@ internal class OverlayCommandDrawer(
   }
 
   /** 上一次渲染的列表签名：列表文本没变就不重建行（本类被高频 render 时不产生子树重建）。 */
+  fun atTop(): Boolean = !view.canScrollVertically(-1)
+
   private var lastSignature: String? = null
   /** 空列表/加载/失败态的展示文案；变化时必须重绘，不能沿用旧标签。 */
   private var lastEmptyLabel = ""
@@ -205,7 +249,7 @@ internal class OverlayCommandDrawer(
     // this.attachRow 会读到未初始化字段。
     attachRow.addView(attachTile("camera", UiText.t(context, "拍照", "Camera")))
     attachRow.addView(attachTile("photo", UiText.t(context, "照片", "Photos")))
-    attachRow.addView(attachTile("file", UiText.t(context, "文件", "Files")))
+    attachRow.addView(attachTile("file", UiText.t(context, "本地文件", "Local files")))
     onCreate()
   }
 

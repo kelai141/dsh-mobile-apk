@@ -126,13 +126,14 @@ class OverlayFloatingComposerTest {
     assertTrue(render.contains("commands = data.commands"))
   }
   private fun assertIndependentSheetContract(v2: String) {
-    val sync = section(v2, "private fun syncDrawerWindow()", "private fun hideDrawer(")
+    val sync = section(v2, "private fun syncCommandSheet(", "private fun syncDrawerWindow()")
     assertTrue(sync.contains("windows.add(OverlayWindows.Slot.DRAWER, c.drawerView, lp)"))
     assertTrue(sync.contains("windows.update(OverlayWindows.Slot.DRAWER, lp)"))
-    assertTrue(sync.contains("Gravity.BOTTOM or Gravity.START"))
+    assertTrue(sync.contains("Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL"))
     assertTrue(sync.contains("SOFT_INPUT_ADJUST_NOTHING"))
-    assertTrue(sync.contains("lp.y = screen.navBarPx"))
-    assertTrue(sync.contains(".4f"))
+    assertTrue(sync.contains("y = s.navBarPx"))
+    assertTrue(sync.contains("commandSheetHeightPx("))
+    assertTrue(sync.contains("Slot.DRAWER_SCRIM"))
     for (forbidden in listOf("composerParams", "Slot.COMPOSER", "refreshComposerWindowHeight(",
       "c.view.translationY", "c.view.layoutParams", "MATCH_PARENT", "prepareAttachmentUi("))
       assertFalse("opening a sheet cannot move/resize/reparent input: " + forbidden, sync.contains(forbidden))
@@ -143,7 +144,7 @@ class OverlayFloatingComposerTest {
     assertFalse(composer.contains("drawerParams"))
   }
 
-  @Test fun independentSheetCoversInputWithoutChangingItsFrameOrCreatingAFullScreenTouchLayer() {
+  @Test fun independentSheetAndScrimCoverInputWithoutChangingItsFrame() {
     assertIndependentSheetContract(source("OverlayV2.kt"))
   }
 
