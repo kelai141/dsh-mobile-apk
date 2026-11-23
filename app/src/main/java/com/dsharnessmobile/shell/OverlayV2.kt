@@ -581,6 +581,7 @@ internal class OverlayV2(private val svc: OverlayService) {
       c.view.translationY = 0f
     }
     startClockIfNeeded()
+    updatePageWatching()
     refreshPageState()
   }
 
@@ -603,6 +604,7 @@ internal class OverlayV2(private val svc: OverlayService) {
         cardParams = null
         cardExpanded = false
         manualCardHeightDp = null
+        updatePageWatching()
       }
     }
     if (!animated || c == null || !DSUiAnimationsEnabled()) {
@@ -1076,6 +1078,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     // 重建过程中不要再推进代次：重建自己会重新挂窗，这里的代次只服务于「旧窗口的延迟 focus」。
     if (!recreatingViews) composerWindowGeneration++
     val focusGeneration = composerWindowGeneration
+    updatePageWatching()
     refreshPageState()
     refreshCommands()
     val canFocus = {
@@ -2817,6 +2820,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     OverlayAttachmentBus.recheckPending(svc.activeSessionId)
     if (destroyed || uiSuspended || !observingPage() || pageStateRefreshQueued) return
     pageStateRefreshQueued = true
+    updatePageWatching()
     main.postDelayed({
       pageStateRefreshQueued = false
       if (!destroyed && !uiSuspended && observingPage()) refreshPageState()

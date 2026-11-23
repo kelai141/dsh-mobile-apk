@@ -1713,6 +1713,7 @@ class MainActivity : ComponentActivity() {
             }
             LogCollector.isPageReadyMessage(text) -> {
               overlayDocumentReady = true
+              OverlayService.instance?.v2?.onPageStateInvalidated()
               pageRecovery.pageReady()
               engineFlow.onPageReadyReported(text)
               onSplashPageReady()
