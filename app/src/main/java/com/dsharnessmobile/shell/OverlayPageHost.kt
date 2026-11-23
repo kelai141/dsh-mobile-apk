@@ -233,7 +233,7 @@ internal object OverlayPageHost {
   internal fun openSession(sessionId: String, onResult: (Boolean) -> Unit) = action("openSession", jsArg(sessionId), onResult)
 
   /** 请求页面新建会话；会话落点由页面决定，原生只跟随 sessionId 变化。 */
-  internal fun newSession(onResult: (Boolean) -> Unit) = action("newSession", "", onResult) { onResult(false) }
+  internal fun newSession(onResult: (Boolean) -> Unit) = action("newSession", "", onResult, onUnknown = { onResult(false) })
 
   /**
    * 解析 evaluateJavascript 的回包（**纯函数**，JVM 可测）。
