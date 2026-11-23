@@ -456,7 +456,7 @@ class OverlayV2ViewContractTest {
     assertFalse("选择卡片不能成为输入根子节点", root.contains("addView(drawer"))
     assertFalse(composer.contains("private val drawerHost"))
     val independent = composer.substringAfter("val drawerView: View =").substringBefore("  val view: View =")
-    assertTrue(independent.contains("addView(drawer.view, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))"))
+    assertTrue(independent.contains("addView(drawer.view, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))"))
     val measure = composer.substringAfter("fun measureDrawerHeightPx(widthPx: Int)").substringBefore("fun isDrawerOpen()")
     assertTrue(measure.contains("View.MeasureSpec.makeMeasureSpec(widthPx.coerceAtLeast(0), View.MeasureSpec.EXACTLY)"))
     assertTrue(measure.contains("View.MeasureSpec.makeMeasureSpec(maxDrawerHeightPx, View.MeasureSpec.AT_MOST)"))
@@ -472,7 +472,7 @@ class OverlayV2ViewContractTest {
     assertTrue(viewport.startsWith(" object : ScrollView(context) {"))
     assertTrue(viewport.contains("override fun onMeasure("))
     assertTrue(viewport.contains("minOf(maxHeightPx, parentSize)"))
-    assertTrue(viewport.contains("View.MeasureSpec.makeMeasureSpec(limit, View.MeasureSpec.AT_MOST)"))
+    assertTrue(viewport.contains("View.MeasureSpec.makeMeasureSpec(limit, mode)"))
     assertTrue(viewport.contains("addView(contentColumn,"))
   }
 

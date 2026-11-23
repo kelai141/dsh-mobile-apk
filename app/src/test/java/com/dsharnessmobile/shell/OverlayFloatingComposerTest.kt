@@ -111,7 +111,7 @@ class OverlayFloatingComposerTest {
     val drawer = source("OverlayCommandDrawer.kt")
     assertTrue(drawer.contains("override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int)"))
     assertTrue(drawer.contains("minOf(maxHeightPx, parentSize)"))
-    assertTrue(drawer.contains("View.MeasureSpec.makeMeasureSpec(limit, View.MeasureSpec.AT_MOST)"))
+    assertTrue(drawer.contains("View.MeasureSpec.makeMeasureSpec(limit, mode)"))
     assertTrue(drawer.contains("addView(contentColumn"))
     assertTrue(drawer.contains("if (signature == lastSignature) return"))
   }

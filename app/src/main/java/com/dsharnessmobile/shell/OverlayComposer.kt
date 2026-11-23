@@ -234,7 +234,7 @@ internal class OverlayComposer(
       setStroke(dp(1), colorBorder)
     }
     clipToOutline = true
-    addView(drawer.view, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    addView(drawer.view, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
   }
 
   /**
@@ -261,6 +261,8 @@ internal class OverlayComposer(
     if (fluxFloating == floating) return
     fluxFloating = floating
     drawerView.background = sheetBackground(floating)
+    drawer.view.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+      if (floating) ViewGroup.LayoutParams.WRAP_CONTENT else ViewGroup.LayoutParams.MATCH_PARENT)
   }
 
   private var fluxFloating = false

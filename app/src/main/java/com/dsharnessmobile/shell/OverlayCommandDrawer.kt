@@ -220,7 +220,8 @@ internal class OverlayCommandDrawer(
       val parentMode = View.MeasureSpec.getMode(heightMeasureSpec)
       val parentSize = View.MeasureSpec.getSize(heightMeasureSpec)
       val limit = if (parentMode == View.MeasureSpec.UNSPECIFIED) maxHeightPx else minOf(maxHeightPx, parentSize)
-      super.onMeasure(widthMeasureSpec, View.MeasureSpec.makeMeasureSpec(limit, View.MeasureSpec.AT_MOST))
+      val mode = if (parentMode == View.MeasureSpec.EXACTLY) View.MeasureSpec.EXACTLY else View.MeasureSpec.AT_MOST
+      super.onMeasure(widthMeasureSpec, View.MeasureSpec.makeMeasureSpec(limit, mode))
     }
   }.apply {
     tag = "overlay-drawer-scroll"
