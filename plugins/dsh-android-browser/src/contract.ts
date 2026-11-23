@@ -136,7 +136,7 @@ export interface ToolContract {
 export const BROWSER_TOOL_CONTRACTS: readonly ToolContract[] = [
   { name: BROWSER_TOOLS.tier, params: '{}', returns: '{ok,tier,viewportRoute,identityRoute,factsSource,uaChAvailable,androidxWebkitAvailable,densityOverrideSupported,browserWebViewAvailable,cdpEnabled,reasons[],degradedNotes[],tools[],ops[],routes[],viewportPresets[],identityProfiles[]}', permission: 'read' },
   { name: BROWSER_TOOLS.open, params: '{url:string, viewport?:string, identity?:string, tabId?:string}', returns: '{ok,tabId,url,title,loadState,reason?,pageGeneration,appliedViewport?,appliedIdentity?}', permission: 'approval' },
-  { name: BROWSER_TOOLS.snapshot, params: '{delta?:boolean}', returns: '{ok,tabId,pageGeneration,surface,url,title,viewport,nodes:[{ref,role,name,bounds,inView,disabled}],truncated}', permission: 'read' },
+  { name: BROWSER_TOOLS.snapshot, params: '{delta?:boolean}', returns: '{ok,tabId,pageGeneration,surface,url,title,loadState,reason?,viewport,nodes:[{ref,role,name,bounds,inView,disabled}],truncated}', permission: 'read' },
   { name: BROWSER_TOOLS.click, params: '{ref:string}', returns: '{ok,url,changed,pageGeneration,loadState,title,reason?}', permission: 'approval' },
   { name: BROWSER_TOOLS.type, params: '{ref:string, text:string, replace?:boolean}', returns: '{ok,url,value,pageGeneration,loadState,title,reason?}', permission: 'approval' },
   { name: BROWSER_TOOLS.press, params: '{key:string}', returns: '{ok,url,canGoBack,loadState,title,reason?}', permission: 'approval' },
