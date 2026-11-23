@@ -241,6 +241,25 @@ fn shared_browser_keeps_its_dom_arguments_without_android_display_authority() {
 }
 
 #[test]
+fn browser_refs_are_dispatched_to_browser_host_without_android_node_access() {
+    let mut core = controller();
+    assert_eq!(call(&mut core, facts("virtual-only", 0, "no"))["ok"], true);
+    let tap = json!({"kind":"tap","ref":"bx1","tabId":"tab-1","pageGeneration":7});
+    let text = json!({"kind":"text","ref":"bx2","tabId":"tab-1","pageGeneration":7,"text":"中文","replace":false});
+    for (id, args) in [("browser-tap", tap), ("browser-text", text)] {
+        let prepared = call(&mut core, json!({"protocolVersion":1,"kind":"prepare",
+            "operation":"browserInput","callId":id,"epoch":"900","args":args}));
+        assert_eq!(prepared["code"], "prepared", "{prepared}");
+        assert_eq!(prepared["plan"]["backend"], "browserHost", "{prepared}");
+        assert_eq!(prepared["plan"]["args"], args);
+        assert!(prepared["plan"].get("nodeTarget").is_none(), "{prepared}");
+        let committed = call(&mut core, json!({"protocolVersion":1,"kind":"commit","callId":id}));
+        assert_eq!(committed["dispatch"], "permitted", "{committed}");
+        assert_eq!(committed["plan"]["args"], args);
+    }
+}
+
+#[test]
 fn virtual_tools_follow_native_permission_and_validate_their_own_geometry() {
     let mut core = controller();
     let mut input = facts("virtual-only", 0, "no");
