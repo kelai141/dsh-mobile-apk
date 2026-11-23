@@ -134,6 +134,7 @@ class OverlayFloatingComposerTest {
     assertTrue(sync.contains("y = s.navBarPx"))
     assertTrue(sync.contains("commandSheetHeightPx("))
     assertTrue(sync.contains("Slot.DRAWER_SCRIM"))
+    assertTrue(sync.contains("FLAG_NOT_TOUCH_MODAL"))
     for (forbidden in listOf("composerParams", "Slot.COMPOSER", "refreshComposerWindowHeight(",
       "c.view.translationY", "c.view.layoutParams", "MATCH_PARENT", "prepareAttachmentUi("))
       assertFalse("opening a sheet cannot move/resize/reparent input: " + forbidden, sync.contains(forbidden))

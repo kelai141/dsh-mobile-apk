@@ -1613,7 +1613,8 @@ internal class OverlayV2(private val svc: OverlayService) {
     )).coerceIn(1, max)
     c.setMaxDrawerHeightPx(height)
     c.setSheetDragHandler(::handleCommandSheetDrag)
-    val flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
+    val flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+      WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
     fun params(width: Int, h: Int, extra: Int) = WindowManager.LayoutParams(
       width, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags or extra, PixelFormat.TRANSLUCENT,
     ).apply {
