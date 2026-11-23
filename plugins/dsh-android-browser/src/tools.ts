@@ -539,31 +539,26 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           surface: { type: 'string' },
           url: { type: 'string' },
           title: { type: 'string' },
+          loadState: { type: 'string' },
+          reason: { type: 'string' },
           viewport: { type: 'object', additionalProperties: true },
           nodes: { type: 'array', items: SNAPSHOT_NODE_SCHEMA },
           truncated: { type: 'boolean' },
         }),
         render: (_args, v: Record<string, unknown>) => {
           const nodes = Array.isArray(v.nodes) ? v.nodes : []
+          const loadState = loadStateOf(v)
           // 必须把 ref 行显式渲染出来（用户实报：只报计数时 click/type 完全不可用）。
           const blocks: Array<{ type: 'text'; text: string }> = [
             // title 此前 schema 已声明却从不渲染（G2a-4 实测命中）：模型看不到当前是哪一页。
             { type: 'text', text: '快照 ' + String(nodes.length) + ' 个可交互节点（' + renderUrl(v.url) + '，代次 ' + String(v.pageGeneration)
-              + '）' + renderTitle(v) },
+              + '）' + renderTitle(v) + renderLoadState(v) },
             { type: 'text', text: renderSnapshotNodes(nodes) },
           ]
-          // 节点极少时给出**可执行的**下一步（0.14.0 模拟器实锤）。
-          //
-          // 现象：移动档下打开 B 站（m.bilibili.com），snapshot 只回 1-2 个节点，search 框之外什么都拿不到，
-          // 于是 browser_click 无从下手，模型反复 snapshot/wait 直到放弃。
-          // 真因**不是**选择器太窄（实测该站 1339 个元素里 cursor:pointer 为 0，内容是 JS 委托的非语义 div），
-          // 而是站点按 UA 返回了非语义的移动版页面。换桌面身份档后同一 URL 直接给 135 个可交互节点。
-          // 这个「换档」是模型自己推不出来的（它只看到「这页没元素」），必须在返回里点明。
-          if (nodes.length <= 3) {
-            blocks.push({ type: 'text', text:
-              '可交互节点过少（' + String(nodes.length) + ' 个）：该站很可能按 UA 返回了非语义的移动版页面（内容用非语义 div + JS 事件委托，快照取不到）。'
-              + '建议先 browser_set_identity { profile: "linux-desktop" } 再 browser_navigate 同一地址——实测同一页面可交互节点会从 1-2 个升到上百个。'
-              + '若仍不足，用 browser_get_text 读正文或 browser_screenshot 看画面。' })
+          if (loadState === 'loading') {
+            blocks.push({ type: 'text', text: '页面仍在加载。用 browser_wait 等页面稳定后重新取快照。' })
+          } else if (loadState === 'loaded' && nodes.length <= 3) {
+            blocks.push({ type: 'text', text: '当前快照中的可交互节点较少。可用 browser_get_text 读正文，或用 browser_screenshot 查看页面。' })
           }
           return blocks
         },
@@ -586,6 +581,8 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           surface: typeof result.data.surface === 'string' ? result.data.surface : 'browser',
           url: typeof result.data.url === 'string' ? result.data.url : '',
           title: typeof result.data.title === 'string' ? result.data.title : '',
+          loadState: loadStateOf(result.data),
+          ...(typeof result.data.reason === 'string' && result.data.reason !== '' ? { reason: result.data.reason } : {}),
           viewport: (result.data.viewport ?? {}) as Payload,
           nodes,
           truncated: result.data.truncated === true,

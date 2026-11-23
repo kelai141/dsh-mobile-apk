@@ -98,6 +98,7 @@ async function driveWithSnapshotPrimer(toolName, args, datas) {
     ...datas,
     [BROWSER_OPS.js]: {
       url: OK_URL, title: 'Example Domain', pageGeneration: 1,
+      ...datas[BROWSER_OPS.js],
       nodes: [{ ref: 'bx1', role: 'link', name: 'a' }],
     },
   })
@@ -140,7 +141,7 @@ function requiredArgs(tool, url) {
 }
 
 /** 所有 browser_* 工具的两态 op 桩（通用判据用）。 */
-const stateStub = (state) => ({ [BROWSER_OPS.state]: state, [BROWSER_OPS.open]: { ...state } })
+const stateStub = (state) => ({ [BROWSER_OPS.state]: state, [BROWSER_OPS.open]: { ...state }, [BROWSER_OPS.js]: state })
 
 // ── 定点反证：issue #232 四处漏网 ─────────────────────────────────────────────
 
@@ -207,6 +208,26 @@ test('K-2 附带：schema 声明且值存在的 url/title 必须在 render 中�
     if (typeof typeValue.url === 'string' && typeValue.url !== '') {
       assert.ok(typeText.includes(typeValue.url), BROWSER_TOOLS.type + '：已声明且存在的 url 必须可观察：' + typeText)
     }
+  }
+})
+
+test('snapshot reports loading before suggesting how to handle a sparse page', async () => {
+  const nodes = [{ ref: 'bx1', role: 'link', name: 'Learn more' }]
+  for (const loadState of ['loading', 'loaded', undefined]) {
+    const { tool, value } = await drive(BROWSER_TOOLS.snapshot, {}, {
+      [BROWSER_OPS.js]: { ...LOADED_STATE, loadState, nodes },
+    })
+    assert.deepEqual(validateJsonSchemaValue(tool.output.schema, value, 'value') ?? [], [])
+    assert.equal(value.loadState, loadState ?? 'unknown')
+    assert.deepEqual(value.nodes, nodes)
+    const text = renderedText(tool, value)
+    assert.match(text, new RegExp('loadState=' + (loadState ?? 'unknown')))
+    assert.doesNotMatch(text, /非语义/)
+    if (loadState === 'loading') {
+      assert.match(text, /browser_wait/)
+      assert.doesNotMatch(text, /browser_set_identity/)
+    }
+    if (loadState === 'loaded') assert.match(text, /browser_get_text/)
   }
 })
 
