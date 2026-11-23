@@ -628,6 +628,43 @@ describe('background attachment admission without a visual frame', () => {
     host.dispose()
   })
 
+  it('retries only a failed scoped attachment and sends mixed ready receipts in draft order', async () => {
+    const fake = fakeInput({ attachmentIds: ['image', 'note'] })
+    const scope = {}
+    const prompt = vi.fn(async (..._args: unknown[]) => ({ ok: true, value: { accepted: true } }))
+    const session = { sessionId: 's1', prompt }
+    let failed = true
+    const retryFileUpload = vi.fn(() => { failed = false })
+    const host = new OverlayHost({
+      sessions: () => ({ scope: () => scope, sessionOf: () => session }),
+      conversation: () => ({
+        input: { for: () => fake.input },
+        sendSession: vi.fn(async () => ({ kind: 'error' as const })),
+        resolveDraftAttachments: () => [{ kind: 'image', id: 'image' }, { kind: 'file', id: 'note' }],
+        fileUploads: { getSnapshot: () => ({
+          image: { status: 'ready', receiptId: 'image-receipt' },
+          note: failed ? { status: 'error' } : { status: 'ready', receiptId: 'note-receipt' },
+        }) },
+        retryFileUpload,
+        serializeDraftAttachments: vi.fn(async () => { throw new Error('must reuse receipts') }),
+      }),
+    }, () => 's1')
+    expect(parse(host.send('mixed', 's1')).error).toBe('attachment-not-ready')
+    expect(fake.input.state.getSnapshot().attachmentIds).toEqual(['image', 'note'])
+    expect(parse(host.retryAttachment('note', 'other')).ok).toBe(false)
+    expect(parse(host.retryAttachment('note', 's1')).ok).toBe(true)
+    expect(parse(host.retryAttachment('note', 's1')).ok).toBe(false)
+    expect(retryFileUpload).toHaveBeenCalledOnce()
+    expect(retryFileUpload).toHaveBeenCalledWith('s1', 'note')
+    expect((await settled(host, host.send('mixed', 's1'))).ok).toBe(true)
+    expect(prompt.mock.calls[0]?.[0]).toEqual([
+      { type: 'file', receiptId: 'image-receipt' },
+      { type: 'file', receiptId: 'note-receipt' },
+      { type: 'text', text: 'mixed' },
+    ])
+    host.dispose()
+  })
+
   it('explicit image capability rejection preserves original code/message and restores the exact rail', async () => {
     const f = fixture(async () => ({ ok: false, error: { code: 'session/attachment-invalid', message: 'Model does not support images' } }))
     const result = await settled(f.host, f.host.send('', 's1'))

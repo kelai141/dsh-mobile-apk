@@ -152,6 +152,7 @@ internal object OverlayPageHost {
     var unknownShown: Boolean = false,
     var polling: Boolean = false,
     var cancelled: Boolean = false,
+    val observeLate: Boolean = false,
   )
   private val pendingActions = LinkedHashMap<String, PendingAction>()
 
@@ -165,7 +166,7 @@ internal object OverlayPageHost {
       val obj = parseHostReply(raw)
       if (obj?.has("ok") == true && !obj.optBoolean("pending", false)) { onResult(parseOk(obj)); return@eval }
       val id = obj?.optString("operationId", "").orEmpty().ifEmpty { expectedId ?: "unconfirmed-" + java.util.UUID.randomUUID().toString() }
-      val pending = PendingAction(id, onUnknown, onResult)
+      val pending = PendingAction(id, onUnknown, onResult, observeLate = expectedId != null)
       pendingActions[id] = pending
       if (obj == null && expectedId == null) { unknown(pending); return@eval }
       pollOperation(pending, android.os.SystemClock.uptimeMillis() + 30000L, 100L)
@@ -185,7 +186,12 @@ internal object OverlayPageHost {
 
   private fun pollOperation(action: PendingAction, deadline: Long, delay: Long) {
     if (action.cancelled) return
-    if (!available() || android.os.SystemClock.uptimeMillis() >= deadline) { action.polling = false; unknown(action); return }
+    if (!available()) { action.polling = false; unknown(action); return }
+    val expired = android.os.SystemClock.uptimeMillis() >= deadline
+    if (expired) {
+      unknown(action)
+      if (!action.observeLate) { action.polling = false; return }
+    }
     action.polling = true
     eval(callExpression("operation", jsArg(action.id))) { raw ->
       if (action.cancelled) return@eval
@@ -196,7 +202,7 @@ internal object OverlayPageHost {
       if (obj.optBoolean("pending", false)) {
         if (obj.optBoolean("unknown", false)) unknown(action)
         val nextDelay = (delay * 2L).coerceAtMost(1000L)
-        main.postDelayed({ pollOperation(action, deadline, nextDelay) }, delay)
+        main.postDelayed({ pollOperation(action, deadline, nextDelay) }, if (expired) 3000L else delay)
       } else {
         action.polling = false
         pendingActions.remove(action.id)

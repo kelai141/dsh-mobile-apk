@@ -2813,6 +2813,7 @@ internal class OverlayV2(private val svc: OverlayService) {
 
   /** 页面状态被宿主置为失效：节流后重取一次，避免抖动期反复拉取。 */
   internal fun onPageStateInvalidated() {
+    if (attachmentSendUnconfirmed) OverlayPageHost.recheckPendingActions()
     OverlayAttachmentBus.recheckPending(svc.activeSessionId)
     if (destroyed || uiSuspended || !observingPage() || pageStateRefreshQueued) return
     pageStateRefreshQueued = true
