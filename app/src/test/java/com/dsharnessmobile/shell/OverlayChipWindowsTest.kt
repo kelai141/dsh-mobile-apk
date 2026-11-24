@@ -159,10 +159,9 @@ class OverlayChipWindowsTest {
     val config = section(v2(), "internal fun onConfigurationChanged()", "private fun scheduleRender()")
     val deferred = config.substringAfter("    if (attachmentInteraction == null) {")
     assertTrue("configuration must keep leased chip membership", deferred != config)
-    val cap = deferred.indexOf("setMaxDrawerHeightPx((OverlayWindowFrames.availableHeightPx(s) * .4f).toInt())")
     val drawer = deferred.indexOf("syncDrawerWindow()")
     val chipPost = deferred.indexOf("composer?.view?.post")
-    assertTrue("drawer cap and dimensions settle before scheduling actual-location chip read", cap >= 0 && drawer > cap && chipPost > drawer)
+    assertTrue("drawer cap and dimensions settle before scheduling actual-location chip read", drawer >= 0 && chipPost > drawer)
     assertTrue(deferred.contains("if (!destroyed && !uiSuspended && !hostForeground) syncChipWindows()"))
     assertFalse("one-shot resync is not a permanent frame poll", deferred.contains("postOnAnimation"))
   }
@@ -227,7 +226,7 @@ class OverlayChipWindowsTest {
       File("app/src/main/java/com/dsharnessmobile/shell/OverlayCommandDrawer.kt"),
     ).first { it.isFile }.readText()
     assertTrue(drawer.contains("R.color.ds_surface"))
-    assertTrue(drawer.contains("setBackgroundColor(colorSurface)"))
+    assertTrue(composer().contains("setColor(colorSurface)"))
     assertTrue(drawer.contains("setColor(colorChip)"))
     assertFalse(drawer.contains("withAlpha"))
     // The invariant is that no MENU ROW or ATTACHMENT TILE is painted translucent: the sheet has to

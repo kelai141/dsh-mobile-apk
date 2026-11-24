@@ -156,6 +156,9 @@ internal data class OverlayCardData(
   val running: Boolean,
   val transcript: List<OverlayTranscriptRow> = emptyList(),
   val answerLine: String = "",
+  val historyOlder: Boolean = false,
+  val historyLatest: Boolean = false,
+  val historyLoading: Boolean = false,
 )
 
 /**
@@ -185,6 +188,8 @@ internal data class OverlayAttachmentChip(
   val id: String = "",
   val thumbnail: String = "",
   val pending: Boolean = false,
+  val status: String = "",
+  val failed: Boolean = false,
 )
 
 /** 仅接收页面投影的48KiB以内JPEG缩略图；拒绝URL/原图/SVG及畸形base64。 */
@@ -209,6 +214,7 @@ internal data class OverlayComposerData(
   val pendingHint: String,
   val busy: Boolean,
   val sendEnabled: Boolean,
+  val sendRecheck: Boolean = false,
   val answeringQuestion: Boolean = false,
   val drawerEmptyLabel: String = "",
 )
@@ -224,6 +230,8 @@ internal data class OverlayComposerData(
  */
 internal interface OverlayCardListener {
   /** 点右上角关闭按钮：只收卡片窗，不动 Agent（§4.2）。 */
+  fun onCardHistory(direction: String) = Unit
+
   fun onCardCollapse()
 
   /**
@@ -284,7 +292,9 @@ internal interface OverlayComposerListener {
   /** kind 固定 "camera" / "photo" / "file"。 */
   fun onComposerAttach(kind: String)
 
-  fun onComposerRemoveAttachment(index: Int)
+  fun onComposerRemoveAttachment(id: String)
+  fun onComposerRetryAttachment(id: String) = Unit
+  fun onComposerPreviewAttachment(id: String) = Unit
 
   fun onComposerWorkspaceChip()
 

@@ -19,8 +19,8 @@ class OverlayAttachProxyContractTest {
     assertTrue(code.contains("if (savedInstanceState != null)"))
     assertTrue(code.contains("""getString("raw")"""))
     assertTrue(code.contains("""getString("target")"""))
-    assertTrue(code.contains("processTargetedIncomingPath(this, staged, sessionId, requestId"))
-    assertTrue(code.contains("OverlayPageHost.pollIncoming(requestId)"))
+    assertTrue(code.contains("processTargetedIncomingPath(context, staged, selectedSession, selectedRequest"))
+    assertTrue(code.contains("OverlayPageHost.pollIncoming(receipt.requestId)"))
     assertTrue(code.contains(""""draft-ready" ->"""))
   }
 
@@ -39,10 +39,9 @@ class OverlayAttachProxyContractTest {
 
   @Test fun delayedAttachmentAdmissionIsPendingAndRecheckedUnderOriginalIdentity() {
     val code = source("java/com/dsharnessmobile/shell/OverlayAttachProxyActivity.kt")
-    assertTrue(code.contains("if (remaining <= 0) { pendingResult(); return }"))
     assertTrue(code.contains("val sessionId: String, val requestId: String"))
-    assertTrue(code.contains("existing(sessionId, kind) != null"))
-    assertTrue(code.contains("OverlayAttachmentBus.recheckPending(sessionId); return"))
+    assertTrue(code.contains("!checking.add(receipt.requestId)"))
+    assertFalse(code.contains("existing(sessionId, kind) != null"))
     assertTrue(code.contains("requests.size >= 64"))
     assertTrue(code.contains("requests.remove(requestId)"))
     val pending = code.substringAfter("private fun pendingResult()").substringBefore("private fun fail")

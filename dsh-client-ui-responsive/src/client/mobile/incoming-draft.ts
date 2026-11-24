@@ -60,14 +60,14 @@ interface FetchResponse {
 export type IncomingDraftFetch = (input: string, init?: RequestInit) => Promise<FetchResponse>
 
 /** Bound fetch and its consumed body together, even when the transport ignores abort. */
-async function incomingDeadline<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+async function incomingDeadline<T>(operation: (signal: AbortSignal) => Promise<T>, timeoutMs = 4000): Promise<T> {
   const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       reject(new Error('incoming request timed out'))
       controller.abort()
-    }, 4000)
+    }, timeoutMs)
   })
   try {
     return await Promise.race([operation(controller.signal), timeout])
@@ -217,7 +217,7 @@ export class IncomingDraftConsumer {
     this.busy = true
     document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'fetching')
     try {
-      for (const [ticket, outcome] of [...this.pendingAcks]) await this.finish(ticket, outcome)
+      await runBounded([...this.pendingAcks], IncomingDraftConsumer.POLL_CONCURRENCY, ([ticket, outcome]) => this.finish(ticket, outcome))
       const payload = await incomingDeadline(async signal => {
         const response = await this.fetchImpl('/api/android/file-incoming', { credentials: 'same-origin', cache: 'no-store', signal })
         return response.ok ? response.json().catch(() => null) : null
@@ -487,11 +487,15 @@ export class IncomingDraftConsumer {
         }
         ticket = claim.ticket as string
         // A slow same-ticket content read is not an explicit removal; retain its original attempt.
-        const content = await this.fetchImpl('/api/android/file-incoming/content?ticket=' + encodeURIComponent(ticket), {
-          credentials: 'same-origin', cache: 'no-store',
-        })
-        if (!content.ok) throw new Error('incoming content HTTP ' + content.status)
-        const blob = await content.blob()
+        const readContent = () => incomingDeadline(async signal => {
+          const content = await this.fetchImpl('/api/android/file-incoming/content?ticket=' + encodeURIComponent(ticket), {
+            credentials: 'same-origin', cache: 'no-store', signal,
+          })
+          if (!content.ok) throw new Error('incoming content HTTP ' + content.status)
+          return content.blob()
+        }, 15000)
+        // Content reads are idempotent for the same live ticket.
+        const blob = await readContent().catch(() => readContent())
         const file = new File([blob], claim.name as string, { type: item.mediaType ?? 'application/octet-stream' })
         const attached = this.runtime.attachGenericFile(sessionId, file)
         document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'attached:' + String(attached))
@@ -517,7 +521,7 @@ export class IncomingDraftConsumer {
         method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, signal,
         body: JSON.stringify({ ticket, outcome }),
       }))
-      if (response.ok) this.pendingAcks.delete(ticket)
+      if (response.ok || response.status === 404 || response.status === 410) this.pendingAcks.delete(ticket)
     } catch {
       // The draft is browser-owned; an acknowledgement failure cannot recreate or send it.
     }

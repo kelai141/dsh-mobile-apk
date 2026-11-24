@@ -22,6 +22,7 @@ internal data class OverlayScreen(
   val statusBarPx: Int,
   val navBarPx: Int,
   val density: Float,
+  val sideInsetsPx: Int = 0,
 )
 
 /**
@@ -130,6 +131,12 @@ internal object OverlayWindowFrames {
     // 用户的比例是硬上限；横屏可读性由内部滚动解决，不得用180dp地板突破32%/40%。
     return byRatio.coerceAtMost(available)
   }
+
+  fun cardDragMinimumPx(screen: OverlayScreen): Int =
+    dpPx(96f, screen.density).coerceIn(1, cardHeightLimitPx(screen, true).coerceAtLeast(1))
+
+  fun commandSheetHeightPx(safeHeight: Int, expanded: Boolean): Int =
+    (safeHeight.coerceAtLeast(1) * if (expanded) .88f else .48f).toInt().coerceAtLeast(1)
 
   /**
    * 按内容测量高度算出窗口高度：先量化到 4dp 档，再夹进 [下限, 上限]。

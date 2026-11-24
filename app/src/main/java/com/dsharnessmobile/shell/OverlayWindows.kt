@@ -40,7 +40,8 @@ internal class OverlayWindows(
     COMPOSER("composer", 5),
     WORKSPACE("workspace", 6),
     SESSION("session", 7),
-    DRAWER("drawer", 8),
+    DRAWER_SCRIM("drawer-scrim", 8),
+    DRAWER("drawer", 9),
   }
 
   private class Held(val view: View, val params: WindowManager.LayoutParams)

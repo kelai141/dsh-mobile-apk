@@ -20,6 +20,8 @@ import android.widget.LinearLayout
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * 悬浮球 v2（PRD-overlay-v2，rev5 定稿）。v1 四问题 + 状态建模错误全部结构性修复：
@@ -296,7 +298,6 @@ class OverlayService : Service() {
     languagePrefs.registerOnSharedPreferenceChangeListener(languageListener)
     switchOverlayUi()
     live.startWatcher()
-    probeEngine()
     scheduleProbe()
     panel.startMux()
     // 常驻 INFINITE 动画（光环呼吸 / 待答呼吸 / 状态行扫光）订阅动效开关：
@@ -337,11 +338,8 @@ class OverlayService : Service() {
     stopSelf()
   }
 
-  /** 该 rootIntent 是否指向本应用的主入口任务（用户真从最近任务划掉的那一个）。 */
-  private fun isMainTaskIntent(intent: Intent?): Boolean =
-    isMainTaskSignal(intent?.action, intent?.categories)
-
   override fun onDestroy() {
+    probeExecutor.shutdownNow()
     rpcLifecycleClosed = true
     pendingTextSend?.releaseCallbacks()
     pendingTextSend = null
@@ -808,47 +806,43 @@ class OverlayService : Service() {
 
   // ── 引擎探活（引擎维，应用级） ────────────────────────────────────
 
-  private fun probeEngine() {
-    Thread {
-      val running = EngineProbe.check().optBoolean("running", false)
-      main.post {
-        engineRunning = running
-        // 引擎从离线恢复在线时状态行必须自己改回去（2026-10-29 真机缺陷）：探活 tick 只在
-        // `!running` 分支里直接改文案，恢复在线时**没有任何人**把它改回来 —— 面板开着、引擎已经起来，
-        // 状态行仍写着「引擎离线」，只有关掉重开面板才变（用户会以为引擎挂了去重启）。
-        // 走分支链刷新：完成态/待答态/忙态的让位规则全在 updateBallOnly() 里，不能在这里另写判断。
-        if (expanded && running) panel.updateBallOnly()
-        // 乐观忙态 45s 未获 live 事件确认 → 回退空闲（轮次未真正启动，如引擎拒绝/会话异常）
-        if (optimisticBusyExpired() && expanded) updateBallOnly()
-        // 必须走 deriveHalo()：此 tick 每 10s 一次，自带判定会漏 PENDING 把待答光环盖回白色
-        setHalo(deriveHalo())
-        cachedV2?.onEngineRunning(running)
-        if (expanded && !running) {
-          // 块H-A1：完成态分支在 updateBallOnly 的分支链里**优先于** else 常态分支（详档 §5.1），
-          // 而本处是绕过分支链的直接赋值——两者必须同口径，否则完成文案会被每 10s 的探活
-          // tick 覆写成「引擎离线」。故有完成文案时交由分支链负责（详档 §6.3 回归面）。
-          // S2-14（本批修）：**待答态同样要排除**。旧判据只看完成文案，于是球处在
-          // 「等待你的回答…」（question/approval 待处理）时，只要引擎此刻探活失败，
-          // 这句最要紧的话就被 tick 覆写成「引擎离线」——用户正要作答的提示被抹掉。
-          // 判据统一：有更具体的话要说（完成态 / 待答态）时，本处一律让位给分支链。
-          if (completionLabel().isEmpty() && pendingKind.isEmpty()) {
-            panel.statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false); it.setTextColor(0xFFE04848.toInt()); it.text = UiText.t(this@OverlayService, "引擎离线", "Engine offline") }
-          }
-        }
-      }
-    }.start()
+  private val probeExecutor = Executors.newSingleThreadScheduledExecutor { task ->
+    Thread(task, "dsh-overlay-engine-probe")
   }
 
-  private var probeHandle: Runnable? = null
   private fun scheduleProbe() {
-    probeHandle?.let { main.removeCallbacks(it) }
-    probeHandle = Runnable {
-      probeEngine()
-      // 探活常驻条件：旧实现看 rootView（球窗）；v2 没有 v1 球窗，改看「任一套 UI 在跑」。
-      // 漏掉这一条会让 v2 下的探活只跑一次、此后引擎状态永不更新（10s tick 断链）。
-      if (rootView != null || v2 != null) main.postDelayed(probeHandle!!, 10_000)
+    // Keep the periodic worker off the UI thread, including subsequent probe scheduling.
+    probeExecutor.scheduleWithFixedDelay({ probeEngine() }, 0, 10, TimeUnit.SECONDS)
+  }
+
+  private fun probeEngine() {
+    val running = EngineProbe.check().optBoolean("running", false)
+    main.post {
+      if (instance !== this) return@post
+      engineRunning = running
+      // 引擎从离线恢复在线时状态行必须自己改回去（2026-10-29 真机缺陷）：探活 tick 只在
+      // `!running` 分支里直接改文案，恢复在线时**没有任何人**把它改回来 —— 面板开着、引擎已经起来，
+      // 状态行仍写着「引擎离线」，只有关掉重开面板才变（用户会以为引擎挂了去重启）。
+      // 走分支链刷新：完成态/待答态/忙态的让位规则全在 updateBallOnly() 里，不能在这里另写判断。
+      if (expanded && running) panel.updateBallOnly()
+      // 乐观忙态 45s 未获 live 事件确认 → 回退空闲（轮次未真正启动，如引擎拒绝/会话异常）
+      if (optimisticBusyExpired() && expanded) updateBallOnly()
+      // 必须走 deriveHalo()：此 tick 每 10s 一次，自带判定会漏 PENDING 把待答光环盖回白色
+      setHalo(deriveHalo())
+      cachedV2?.onEngineRunning(running)
+      if (expanded && !running) {
+        // 块H-A1：完成态分支在 updateBallOnly 的分支链里**优先于** else 常态分支（详档 §5.1），
+        // 而本处是绕过分支链的直接赋值——两者必须同口径，否则完成文案会被每 10s 的探活
+        // tick 覆写成「引擎离线」。故有完成文案时交由分支链负责（详档 §6.3 回归面）。
+        // S2-14（本批修）：**待答态同样要排除**。旧判据只看完成文案，于是球处在
+        // 「等待你的回答…」（question/approval 待处理）时，只要引擎此刻探活失败，
+        // 这句最要紧的话就被 tick 覆写成「引擎离线」——用户正要作答的提示被抹掉。
+        // 判据统一：有更具体的话要说（完成态 / 待答态）时，本处一律让位给分支链。
+        if (completionLabel().isEmpty() && pendingKind.isEmpty()) {
+          panel.statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false); it.setTextColor(0xFFE04848.toInt()); it.text = UiText.t(this@OverlayService, "引擎离线", "Engine offline") }
+        }
+      }
     }
-    main.postDelayed(probeHandle!!, 10_000)
   }
 
   // ── 停止 / 发送（P4 修复 + 插话） ─────────────────────────────────
@@ -1350,22 +1344,17 @@ class OverlayService : Service() {
   }
 
   companion object {
-    /**
-     * 主任务判据的对外可测入口（测试锁判据本身，不看 Android 桩副作用）。
-     *
-     * 现场实测：点「文件」拉起取件后浮窗连球带窗全灭、草稿被清空。真因是 [onTaskRemoved]
-     * 无条件自停，把取件代理那个只活一两秒的透明任务当成「用户划掉主任务」。
-     */
-    internal fun isMainTaskIntentForTest(action: String?, categories: Collection<String>?): Boolean =
-      isMainTaskSignal(action, categories)
+    internal fun isMainTaskIntent(intent: Intent?): Boolean =
+      isMainTaskSignal(intent?.action, intent?.categories, intent?.component?.className)
 
     /**
-     * 纯判据：只有 MAIN + LAUNCHER 的 rootIntent 才算用户主动关闭主任务。
+     * 主任务可由桌面入口启动，也可由显式指向 MainActivity 的 Intent 启动。
      *
      * 抽成不碰 Intent 的纯函数，是因为 Robolectric 的 Intent 桩不记录 categories，
      * 直接在桩上断言会让这条关键回归无法真正判红。
      */
-    internal fun isMainTaskSignal(action: String?, categories: Collection<String>?): Boolean {
+    internal fun isMainTaskSignal(action: String?, categories: Collection<String>?, componentClassName: String? = null): Boolean {
+      if (componentClassName != null) return componentClassName == MainActivity::class.java.name
       if (action != Intent.ACTION_MAIN) return false
       return categories?.contains(Intent.CATEGORY_LAUNCHER) == true
     }

@@ -60,7 +60,33 @@ internal object WebViewPolyfill {
       "};" +
       "}" +
       "}catch(e){}" +
+      UTC_TIME_ZONE_SHIM +
       "})();"
+
+  /**
+   * WebView 124 may expose Android's GMT as "+00:00". The engine accepts UTC
+   * or an IANA name through the shared prompt/retry client. This equivalent
+   * spelling change leaves nonzero offsets, named zones and formatting intact.
+   */
+  internal val UTC_TIME_ZONE_SHIM: String
+    get() = """
+      try {
+        var proto = Intl.DateTimeFormat.prototype;
+        var original = proto.resolvedOptions;
+        var sample = original.call(new Intl.DateTimeFormat()).timeZone;
+        if (sample === '+00:00' || sample === '-00:00') {
+          Object.defineProperty(proto, 'resolvedOptions', {
+            value: function resolvedOptions() {
+              var options = original.call(this);
+              if (options.timeZone === '+00:00' || options.timeZone === '-00:00') options.timeZone = 'UTC';
+              return options;
+            },
+            configurable: true,
+            writable: true
+          });
+        }
+      } catch (error) {}
+    """.trimIndent()
 
   /**
    * 自检表达式：返回缺失的能力名列表（空数组 = 全部可用）。

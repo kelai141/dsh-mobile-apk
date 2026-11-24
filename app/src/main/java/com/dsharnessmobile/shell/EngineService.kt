@@ -93,6 +93,9 @@ class EngineService : Service() {
    *  requestShutdown（userShutdown 标记 + 停看门狗 + 停引擎）+ stopSelf（撤前台通知，
    *  onDestroy 释放 wakelock / 停日志）；START_STICKY 重投递被 userShutdown 门拦截。 */
   override fun onTaskRemoved(rootIntent: Intent?) {
+    super.onTaskRemoved(rootIntent)
+    // Closing the standalone attachment picker removes its task as well.
+    if (!OverlayService.isMainTaskIntent(rootIntent)) return
     try {
       FileIncoming.cleanupTmp(this)
     } catch (_: Exception) {
@@ -104,7 +107,6 @@ class EngineService : Service() {
     requestShutdown()
     stopSelf()
     LogCollector.log("dsh-file-open", "onTaskRemoved: full shutdown (swipe-away = user close)")
-    super.onTaskRemoved(rootIntent)
   }
 
   override fun onDestroy() {

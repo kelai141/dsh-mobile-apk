@@ -1,13 +1,11 @@
 package com.dsharnessmobile.shell
 
 import android.Manifest
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -42,11 +40,11 @@ internal object OverlayAttachmentBus {
     requests[receipt.requestId] = receipt
     return true
   }
-  internal fun existing(sessionId: String, kind: String): Receipt? = requests.values.firstOrNull { it.sessionId == sessionId && it.kind == kind }
 
   internal fun deliver(kind: String, path: String, error: String, sessionId: String = "", requestId: String = "") {
     val receipt = Receipt(kind, path, error, sessionId, requestId)
     if (requestId.isNotEmpty()) {
+      if (requestId !in requests && error == "attachment-pending") return
       if (error == "attachment-pending") requests[requestId] = receipt else requests.remove(requestId)
     }
     android.os.Handler(android.os.Looper.getMainLooper()).post {
@@ -114,7 +112,6 @@ internal class OverlayAttachProxyActivity : androidx.activity.ComponentActivity(
     /** 从 Service 拉起取件代理。startActivity 需要 NEW_TASK（Service 不是 Activity 上下文）。 */
     internal fun start(context: Context, kind: String, sessionId: String, requestId: String = java.util.UUID.randomUUID().toString()) {
       if (sessionId.isBlank()) { OverlayAttachmentBus.deliver(kind, "", "session-unavailable", sessionId); return }
-      if (OverlayAttachmentBus.existing(sessionId, kind) != null) { OverlayAttachmentBus.recheckPending(sessionId); return }
       if (!OverlayAttachmentBus.remember(OverlayAttachmentBus.Receipt(kind, "", "picking", sessionId, requestId))) {
         OverlayAttachmentBus.deliver(kind, "", "too-many-pending", sessionId, requestId)
         return
@@ -177,15 +174,20 @@ internal class OverlayAttachProxyActivity : androidx.activity.ComponentActivity(
       if (uri == null) fail("cancelled") else importUri(uri)
     }
     if (savedInstanceState != null) {
-      if (stagedName.isNotEmpty()) awaitDraftReady(60)
+      if (stagedName.isNotEmpty()) pendingResult()
       else if (processing) fail("interrupted")
       return // ActivityResultRegistry restores the outstanding picker; never launch it twice.
     }
-    when (kind) {
-      KIND_CAMERA -> startCamera()
-      KIND_PHOTO -> photoLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-      KIND_FILE -> fileLauncher.launch(arrayOf("*/*"))
-      else -> fail("unsupported-kind")
+    try {
+      when (kind) {
+        KIND_CAMERA -> startCamera()
+        KIND_PHOTO -> photoLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        KIND_FILE -> fileLauncher.launch(arrayOf("*/*"))
+        else -> fail("unsupported-kind")
+      }
+    } catch (error: Exception) {
+      LogCollector.log("dsh-overlay", "attachment picker failed: " + error.javaClass.simpleName)
+      fail("launch-failed")
     }
   }
 
@@ -231,7 +233,7 @@ internal class OverlayAttachProxyActivity : androidx.activity.ComponentActivity(
     }
     processing = true
     cameraIo.execute {
-      val ok = PhotoCapture.compress(raw, target)
+      val ok = runCatching { PhotoCapture.compress(raw, target) }.getOrNull()
       if (ok == null) {
         // 压缩失败：保留原图（与 PhotoCaptureController 同口径），并如实报错。
         PhotoCapture.keepRaw(raw)
@@ -251,7 +253,7 @@ internal class OverlayAttachProxyActivity : androidx.activity.ComponentActivity(
     processing = true
     pickedMediaType = overlayAttachmentMediaType(kind, try { contentResolver.getType(uri) } catch (_: Throwable) { null })
     cameraIo.execute {
-      val copied = FileIncoming.copyIn(this, uri)
+      val copied = runCatching { FileIncoming.copyIn(this, uri) }.getOrNull()
       runOnUiThread {
         if (copied == null) fail("copy-failed") else handOff(copied, kind)
       }
@@ -264,40 +266,35 @@ internal class OverlayAttachProxyActivity : androidx.activity.ComponentActivity(
    * @param file 拍照成品（在 cacheDir/attachments）或 copyIn 的返回值（已在临时工作区）。
    */
   private fun handOff(file: File, handOffKind: String) {
-    val staged = if (file.parentFile?.canonicalFile == FileIncoming.tmpWorkspace(this).canonicalFile) {
-      file
-    } else {
-      // 拍照成品在 cacheDir：复制进来件工作区（同一段投递链要求文件先在里面）。
-      val dir = FileIncoming.tmpWorkspace(this)
-      val dest = File(dir, FileIncoming.uniqueName(dir, FileIncoming.sanitizeName(file.name)))
-      try {
-        file.inputStream().use { input -> dest.outputStream().use { out -> input.copyTo(out) } }
-      } catch (t: Throwable) {
-        LogCollector.log("dsh-overlay", "attach stage failed: " + (t.message ?: t.javaClass.simpleName))
-        fail("copy-failed")
-        return
-      }
-      dest
-    }
-    stagedName = staged.name
-    OverlayAttachmentBus.remember(OverlayAttachmentBus.Receipt(kind, stagedName, "attachment-pending", sessionId, requestId))
-    val mediaType = overlayAttachmentMediaType(handOffKind, pickedMediaType)
-    FileIncoming.processTargetedIncomingPath(this, staged, sessionId, requestId, mediaType) { accepted ->
-      // A lost POST reply can still have enqueued the exact request. Resolve by requestId.
-      awaitDraftReady(if (accepted) 60 else 12)
-    }
-  }
-
-  /** Success means the page admitted this request into its exact target draft, not merely queued. */
-  private fun awaitDraftReady(remaining: Int) {
     if (completed || isDestroyed) return
-    if (remaining <= 0) { pendingResult(); return }
-    OverlayPageHost.pollIncoming(requestId) { state ->
-      when (state) {
-        "draft-ready" -> { completed = true; OverlayAttachmentBus.deliver(kind, stagedName, "", sessionId, requestId); finish() }
-        "removed" -> fail("attachment-not-ready")
-        "unknown" -> fail("attachment-not-ready")
-        else -> android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ awaitDraftReady(remaining - 1) }, 500L)
+    val context = applicationContext
+    val selectedKind = kind
+    val selectedSession = sessionId
+    val selectedRequest = requestId
+    val mediaType = overlayAttachmentMediaType(handOffKind, pickedMediaType)
+    cameraIo.execute {
+      val staged = runCatching {
+        val dir = FileIncoming.tmpWorkspace(context)
+        if (file.parentFile?.canonicalFile == dir.canonicalFile) file
+        else {
+          val dest = File(dir, FileIncoming.uniqueName(dir, FileIncoming.sanitizeName(file.name)))
+          file.copyTo(dest)
+        }
+      }.getOrElse { error ->
+        LogCollector.log("dsh-overlay", "attachment staging failed: " + error.javaClass.simpleName)
+        runOnUiThread { fail("copy-failed") }
+        return@execute
+      }
+      runOnUiThread {
+        if (completed || isDestroyed) return@runOnUiThread
+        stagedName = staged.name
+        completed = true
+        FileIncoming.processTargetedIncomingPath(context, staged, selectedSession, selectedRequest, mediaType) { accepted ->
+          // A lost POST reply may have enqueued this exact request.
+          if (!accepted) LogCollector.log("dsh-overlay", "attachment queue receipt unconfirmed")
+          OverlayAttachmentBus.deliver(selectedKind, staged.name, "attachment-pending", selectedSession, selectedRequest)
+        }
+        finish()
       }
     }
   }

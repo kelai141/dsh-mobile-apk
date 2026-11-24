@@ -316,7 +316,7 @@ class OverlayPickerInteractionTest {
     assertTrue(launch > start.indexOf("prepareAttachmentUi("))
     assertTrue(start.substring(launch).substringBefore("\n").contains("requestId"))
     assertTrue("registration must precede synchronous launch-error delivery",
-      start.indexOf(".add(requestId)") in 0 until launch)
+      start.indexOf("prepareAttachmentUi(") in 0 until launch)
     assertTrue("failed yield may not launch the Activity", start.contains("if (!prepareAttachmentUi(sid, mapped, requestId)) return"))
     val restore = body(text, "restoreAttachmentInteraction")
     assertTrue("recovery is finite, not an indefinite refresh timer", restore.contains("attachmentRestoreAttempts++ <"))

@@ -139,7 +139,7 @@ class OverlayV2ViewContractTest {
     val sync = v2.substringAfter("private fun syncDrawerWindow()").substringBefore("private fun hideDrawer(")
     assertTrue("选择卡片必须交给独立窗口而非撑高输入根", sync.contains("windows.add(OverlayWindows.Slot.DRAWER, c.drawerView, lp)"))
     assertTrue(sync.contains("c.measureDrawerHeightPx(contentWidth)"))
-    assertTrue(sync.contains("OverlayWindowFrames.availableHeightPx(screen) * if (picker) .55f else .4f"))
+    assertTrue(sync.contains("OverlayWindowFrames.availableHeightPx(screen) * .55f"))
     assertTrue(sync.contains("lp.height = h.coerceAtMost((chipRowTop - gapPx - screen.statusBarPx)"))
     assertTrue(sync.contains("if (picker) (224f * screen.density).toInt()"))
     assertTrue(v2.contains("(360f * screen.density).toInt().coerceIn(1, available)"))
@@ -456,7 +456,7 @@ class OverlayV2ViewContractTest {
     assertFalse("选择卡片不能成为输入根子节点", root.contains("addView(drawer"))
     assertFalse(composer.contains("private val drawerHost"))
     val independent = composer.substringAfter("val drawerView: View =").substringBefore("  val view: View =")
-    assertTrue(independent.contains("addView(drawer.view, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))"))
+    assertTrue(independent.contains("addView(drawer.view, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))"))
     val measure = composer.substringAfter("fun measureDrawerHeightPx(widthPx: Int)").substringBefore("fun isDrawerOpen()")
     assertTrue(measure.contains("View.MeasureSpec.makeMeasureSpec(widthPx.coerceAtLeast(0), View.MeasureSpec.EXACTLY)"))
     assertTrue(measure.contains("View.MeasureSpec.makeMeasureSpec(maxDrawerHeightPx, View.MeasureSpec.AT_MOST)"))
@@ -472,7 +472,7 @@ class OverlayV2ViewContractTest {
     assertTrue(viewport.startsWith(" object : ScrollView(context) {"))
     assertTrue(viewport.contains("override fun onMeasure("))
     assertTrue(viewport.contains("minOf(maxHeightPx, parentSize)"))
-    assertTrue(viewport.contains("View.MeasureSpec.makeMeasureSpec(limit, View.MeasureSpec.AT_MOST)"))
+    assertTrue(viewport.contains("View.MeasureSpec.makeMeasureSpec(limit, mode)"))
     assertTrue(viewport.contains("addView(contentColumn,"))
   }
 

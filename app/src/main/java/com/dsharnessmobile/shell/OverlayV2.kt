@@ -124,6 +124,8 @@ internal class OverlayV2(private val svc: OverlayService) {
   /** 会话选择器里「新建会话」行的稳定 id，不会与真实会话 id 冲突。 */
   private val newConversationItemId = "__dsh_new_conversation__"
   private var cardExpanded = false
+  private var manualCardHeightDp: Float? = null
+  private var cardDragStartPx = 0
   private var cardAutoCollapseQueued = false
   private val cardAutoCollapse = Runnable {
     cardAutoCollapseQueued = false
@@ -522,8 +524,9 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (card == null) {
       val view = OverlayCardView(svc, object : OverlayCardListener {
         override fun onCardCollapse() = hideCard()
+        override fun onCardHistory(direction: String) = navigateCardHistory(direction)
         override fun onCardHandleDrag(phase: OverlayDragPhase, dyPx: Float, velocityPxPerS: Float) =
-          handleCardHandleDrag(phase, dyPx, velocityPxPerS)
+          handleCardHandleDrag(phase, dyPx)
         override fun onCardPendingAction(eventId: String, kind: String, approve: Boolean) =
           onPendingAction(eventId, kind, approve)
 
@@ -543,7 +546,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     hidePill(false)
     val s = screen()
     val contentH = c.measureContentHeightPx(OverlayWindowFrames.cardWidthPx(s))
-    val targetH = OverlayWindowFrames.cardHeightPx(contentH, s, cardExpanded)
+    val targetH = cardTargetHeight(contentH, s)
     val lp = WindowManager.LayoutParams(
       OverlayWindowFrames.cardWidthPx(s), targetH,
       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -578,6 +581,7 @@ internal class OverlayV2(private val svc: OverlayService) {
       c.view.translationY = 0f
     }
     startClockIfNeeded()
+    updatePageWatching()
     refreshPageState()
   }
 
@@ -590,6 +594,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (!cardVisible()) return
     stopClock()
     val c = card
+    resizeAnimator?.cancel(); resizeAnimator = null
     val generation = ++cardWindowGeneration
     cardClosing = true
     val finish = {
@@ -598,6 +603,8 @@ internal class OverlayV2(private val svc: OverlayService) {
         windows.remove(OverlayWindows.Slot.CARD)
         cardParams = null
         cardExpanded = false
+        manualCardHeightDp = null
+        updatePageWatching()
       }
     }
     if (!animated || c == null || !DSUiAnimationsEnabled()) {
@@ -647,54 +654,67 @@ internal class OverlayV2(private val svc: OverlayService) {
     showPill(anchor)
   }
 
-  private fun handleCardHandleDrag(phase: OverlayDragPhase, dyPx: Float, velocityPxPerS: Float) {
-    val c = card ?: return
+  private fun cardTargetHeight(contentPx: Int, screen: OverlayScreen): Int {
+    val limit = OverlayWindowFrames.cardHeightLimitPx(screen, true).coerceAtLeast(1)
+    return manualCardHeightDp?.let { (it * screen.density).toInt().coerceIn(OverlayWindowFrames.cardDragMinimumPx(screen), limit) }
+      ?: OverlayWindowFrames.cardHeightPx(contentPx, screen, cardExpanded).coerceAtLeast(1)
+  }
+
+  private fun handleCardHandleDrag(phase: OverlayDragPhase, dyPx: Float) {
+    val lp = cardParams ?: return
+    val s = screen()
+    val min = OverlayWindowFrames.cardDragMinimumPx(s)
+    val max = OverlayWindowFrames.cardHeightLimitPx(s, true).coerceAtLeast(min)
     when (phase) {
-      OverlayDragPhase.DOWN -> Unit
-      OverlayDragPhase.MOVE -> c.setHandleOffsetPx(dyPx.coerceIn(-48f * screen().density, 48f * screen().density))
-      OverlayDragPhase.UP, OverlayDragPhase.CANCEL -> {
-        c.setHandleOffsetPx(0f)
-        if (phase == OverlayDragPhase.CANCEL) return
-        val density = screen().density
-        val fastUp = dyPx <= -48f * density && velocityPxPerS <= -500f * density
-        if (fastUp) {
-          collapseToPill()
-        } else if (dyPx >= 24f * density) {
-          setCardExpanded(true)
-        } else if (dyPx <= -24f * density && cardExpanded) {
-          setCardExpanded(false)
+      OverlayDragPhase.DOWN -> {
+        resizeAnimator?.cancel()
+        cardDragStartPx = lp.height
+        cardHandleDragging = true
+        updateCardAutoCollapse()
+      }
+      OverlayDragPhase.MOVE -> {
+        val height = (cardDragStartPx + dyPx).toInt().coerceIn(min, max)
+        if (lp.height != height) {
+          lp.height = height
+          windows.update(OverlayWindows.Slot.CARD, lp)
         }
+      }
+      OverlayDragPhase.UP, OverlayDragPhase.CANCEL -> {
+        if (!cardHandleDragging) return
+        cardHandleDragging = false
+        if (phase == OverlayDragPhase.CANCEL) {
+          animateCardHeight(cardDragStartPx.coerceIn(min, max))
+        } else if (dyPx < 0 && cardDragStartPx + dyPx <= min - 18f * s.density) {
+          settleCardMorph(collapse = true)
+        } else if (lp.height != cardDragStartPx) {
+          manualCardHeightDp = lp.height / s.density
+          cardExpanded = true
+        }
+        updateCardAutoCollapse()
       }
     }
   }
 
-  private fun setCardExpanded(expanded: Boolean) {
-    if (cardExpanded == expanded) return
-    cardExpanded = expanded
+  private fun animateCardHeight(target: Int) {
     val lp = cardParams ?: return
-    val c = card ?: return
-    val s = screen()
-    val target = OverlayWindowFrames.cardHeightPx(c.measureContentHeightPx(lp.width), s, expanded)
-    animateWindowHeight(OverlayWindows.Slot.CARD, lp, target, CARD_RESIZE_ANIM_MS)
-    lastResizeAt = SystemClock.uptimeMillis()
-  }
-
-  private fun animateWindowHeight(slot: OverlayWindows.Slot, lp: WindowManager.LayoutParams, target: Int, durationMs: Long) {
     if (lp.height == target) return
+    resizeAnimator?.cancel()
     if (!DSUiAnimationsEnabled()) {
       lp.height = target
-      windows.update(slot, lp)
+      windows.update(OverlayWindows.Slot.CARD, lp)
       return
     }
-    val from = lp.height
-    val anim = android.animation.ValueAnimator.ofInt(from, target)
-    anim.duration = durationMs
-    anim.interpolator = DsUi.ease
-    anim.addUpdateListener { a ->
-      lp.height = a.animatedValue as Int
-      windows.update(slot, lp)
+    resizeAnimator = android.animation.ValueAnimator.ofInt(lp.height, target).apply {
+      duration = CARD_RESIZE_ANIM_MS
+      interpolator = DsUi.ease
+      addUpdateListener { animator ->
+        if (cardParams === lp && !cardClosing) {
+          lp.height = animator.animatedValue as Int
+          windows.update(OverlayWindows.Slot.CARD, lp)
+        }
+      }
+      start()
     }
-    anim.start()
   }
 
   /** 内容变化后按量化档重算卡片高度（≥120ms 间隔，避免事件风暴 resize 抖动）。 */
@@ -703,12 +723,13 @@ internal class OverlayV2(private val svc: OverlayService) {
     val c = card ?: return
     val s = screen()
     val content = c.measureContentHeightPx(lp.width)
-    val target = OverlayWindowFrames.cardHeightPx(content, s, cardExpanded)
+    if (cardHandleDragging || morphAnimator?.isRunning == true || cardClosing) return
+    val target = cardTargetHeight(content, s)
     if (target == lp.height) return
     val now = SystemClock.uptimeMillis()
     if (now - lastResizeAt < OverlayWindowFrames.CARD_RESIZE_MIN_INTERVAL_MS) return
     lastResizeAt = now
-    animateWindowHeight(OverlayWindows.Slot.CARD, lp, target, CARD_RESIZE_ANIM_MS)
+    animateCardHeight(target)
   }
 
   // ── 状态药丸 ────────────────────────────────────────────────────────────
@@ -881,6 +902,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     // tell a keyboard tap from a tap on the other app while the IME is shown.
     // The input can keep focus after Back or a picker round trip hides the IME.
     if (event.rawX == 0f && event.rawY == 0f && (pickerOpen() || composerImeVisible())) return
+    if (windows.contains(OverlayWindows.Slot.DRAWER_SCRIM)) return
     // 一次点击会向每个浮窗各发一次 OUTSIDE；按 downTime 去重，否则同一击会先收 sheet 再收输入区。
     if (event.downTime == outsideHandledDownTime) return
     outsideHandledDownTime = event.downTime
@@ -940,7 +962,13 @@ internal class OverlayV2(private val svc: OverlayService) {
       override fun onComposerSend(text: String) = sendText(text)
       override fun onComposerStop() = svc.requestStop()
       override fun onComposerAttach(kind: String) = startAttachment(kind)
-      override fun onComposerRemoveAttachment(index: Int) = removeAttachment(index)
+      override fun onComposerRemoveAttachment(id: String) = removeAttachment(id)
+      override fun onComposerRetryAttachment(id: String) = retryAttachment(id)
+      override fun onComposerPreviewAttachment(id: String) {
+        if (attachmentsForSend().any { it.id == id && it.kind == "image" }) {
+          OverlayPageHost.previewAttachment(id, svc.activeSessionId) { ok -> if (ok) refreshPageState() }
+        }
+      }
       override fun onComposerWorkspaceChip() = openWorkspacePicker()
       override fun onComposerSessionChip() = openSessionPicker()
       override fun onComposerCommand(line: String) = onDrawerPick(line)
@@ -1050,12 +1078,13 @@ internal class OverlayV2(private val svc: OverlayService) {
     // 重建过程中不要再推进代次：重建自己会重新挂窗，这里的代次只服务于「旧窗口的延迟 focus」。
     if (!recreatingViews) composerWindowGeneration++
     val focusGeneration = composerWindowGeneration
+    updatePageWatching()
     refreshPageState()
     refreshCommands()
     val canFocus = {
       composer === c && composerVisible() &&
         composerWindowGeneration == focusGeneration &&
-        !destroyed && !uiSuspended && !hostForeground && !composerClosing && attachmentInteraction == null
+        !destroyed && !uiSuspended && !hostForeground && !composerClosing && attachmentInteraction == null && drawerMode != DrawerMode.COMMANDS
     }
     if (focusInput) main.post { if (canFocus()) c.focusInput(canFocus) }
     else if (attaching && canFocus()) c.focusRoot()
@@ -1113,6 +1142,8 @@ internal class OverlayV2(private val svc: OverlayService) {
 
   /** 发送在飞标记：迟到的发送回执不得清掉用户新输入的内容（见 sendText 的守卫）。 */
   private var sending = false
+  private var attachmentSendUnconfirmed = false
+  private var checkingSendDraft = false
 
   /**
    * 发送输入框内容。
@@ -1126,11 +1157,35 @@ internal class OverlayV2(private val svc: OverlayService) {
    */
   private fun sendText(text: String) {
     if (sending) return
+    if (attachmentSendUnconfirmed) {
+      OverlayPageHost.recheckPendingActions()
+      svc.flashStatus(t("正在核对上一次发送结果", "Checking the previous send"))
+      return
+    }
+    if (checkingSendDraft) return
+    val session = svc.activeSessionId
+    if (session.isNotEmpty() && OverlayPageHost.available()) {
+      checkingSendDraft = true
+      val generation = sessionGeneration
+      val draft = composer?.inputText()
+      OverlayPageHost.state { state ->
+        checkingSendDraft = false
+        if (destroyed || generation != sessionGeneration || composer?.inputText() != draft) return@state
+        if (state?.sessionId != session) {
+          svc.flashStatus(t("暂时无法核对附件，请重试", "Could not check attachments. Try again."))
+          return@state
+        }
+        sendCheckedText(text, state.attachments)
+      }
+    } else sendCheckedText(text)
+  }
+
+  private fun sendCheckedText(text: String, checked: List<OverlayPageHost.PageAttachment>? = null) {
     val trimmed = text.trim()
     val sentSession = svc.activeSessionId
     var admittedSession = sentSession
     // 纯附件消息允许空文本：只要页面草稿里认领到了附件，就不该被「空文本」拦掉。
-    val attachments = pageState?.takeIf { it.sessionId == sentSession }?.attachments ?: emptyList()
+    val attachments = checked ?: pageState?.takeIf { it.sessionId == sentSession }?.attachments.orEmpty()
     if (trimmed.isEmpty() && attachments.isEmpty()) return
     val sentDraft = composer?.inputText().orEmpty()
     val sentGeneration = sessionGeneration
@@ -1142,6 +1197,10 @@ internal class OverlayV2(private val svc: OverlayService) {
       OverlayAttachmentBus.recheckPending(sentSession)
       svc.flashStatus(if (attachmentsPending.any { attachmentReviewRequired(it.requestId) }) attachmentReviewMessage()
         else t("附件仍在认领中，请稍后", "Attachment still being claimed"))
+      return
+    }
+    if (attachments.any { it.status == "error" || it.status == "uploading" }) {
+      svc.flashStatus(t("请先处理未上传完成的附件", "Resolve unfinished attachments first"))
       return
     }
     // 页面不可用时不能把「带附件的消息」降级成纯文本发出去：附件留在草稿里，
@@ -1172,11 +1231,19 @@ internal class OverlayV2(private val svc: OverlayService) {
     if (attachments.isNotEmpty() && OverlayPageHost.available()) {
       // 附件在页面草稿里（file-incoming 管线由页面认领），所以整条消息也必须由页面提交，
       // 否则附件会被留在草稿里发不出去（design.md §8.3 的附件口径）。
-      OverlayPageHost.send(trimmed, sentSession) { ok ->
+      OverlayPageHost.send(trimmed, sentSession, onUnknown = {
+        if (!destroyed) {
+          sending = false
+          attachmentSendUnconfirmed = true
+          scheduleRender()
+          svc.flashStatus(t("发送结果待确认，点发送复核", "Send unconfirmed. Tap Send to check"))
+        }
+      }) { ok ->
+        attachmentSendUnconfirmed = false
         settled(ok)
+        refreshPageState()
         if (ok) {
           svc.markBusyOptimistic()
-          refreshPageState()
         } else {
           // 页面侧失败时用壳侧接口复核一次：可能消息其实已受理，只是页面回执丢了。
           svc.recheckTextSendOutcome()
@@ -1217,18 +1284,10 @@ internal class OverlayV2(private val svc: OverlayService) {
       toast(t("会话尚未就绪，请稍后再试", "Session not ready, try again"))
       return
     }
-    val previousAttachment = OverlayAttachmentBus.existing(sid, mapped)
-    if (previousAttachment != null) {
-      OverlayAttachmentBus.recheckPending(sid)
-      toast(if (attachmentReviewRequired(previousAttachment.requestId)) attachmentReviewMessage()
-        else t("前一个附件仍在处理", "The previous attachment is still processing"))
-      return
-    }
     val requestId = java.util.UUID.randomUUID().toString()
     if (!prepareAttachmentUi(sid, mapped, requestId)) return
     // 取件菜单已经完成选择。保留输入窗及草稿，收起菜单再让系统接管。
     closeDrawer(animated = false)
-    attachmentRequestIds.getOrPut(sid) { LinkedHashSet() }.add(requestId)
     OverlayAttachProxyActivity.start(svc, mapped, sid, requestId)
   }
 
@@ -1286,24 +1345,23 @@ internal class OverlayV2(private val svc: OverlayService) {
    */
   private fun onAttachmentReceipt(receipt: OverlayAttachmentBus.Receipt) {
     restoreAttachmentInteraction(receipt.sessionId, receipt.requestId)
-    val ids = attachmentRequestIds[receipt.sessionId] ?: return
-    if (receipt.requestId !in ids) return
+    if (receipt.requestId.isEmpty()) return
     if (receipt.error == "attachment-pending") {
       scheduleRender()
       val attempts = attachmentRecheckAttempts[receipt.requestId] ?: 0
-      if (attempts < 128) {
+      if (attempts < 100) {
         attachmentRecheckAttempts[receipt.requestId] = attempts + 1
         main.postDelayed({
-          if (!destroyed && attachmentRequestIds[receipt.sessionId]?.contains(receipt.requestId) == true) {
+          if (!destroyed) {
             OverlayAttachmentBus.recheckPending(receipt.sessionId)
           }
         }, minOf(5_000L, 1_500L * (attempts + 1)))
+      } else {
+        OverlayAttachmentBus.deliver(receipt.kind, "", "attachment-timeout", receipt.sessionId, receipt.requestId)
       }
       return
     }
     attachmentRecheckAttempts.remove(receipt.requestId)
-    ids.remove(receipt.requestId)
-    if (ids.isEmpty()) attachmentRequestIds.remove(receipt.sessionId)
     if (receipt.sessionId != svc.activeSessionId) return
     scheduleRender()
     onAttachmentResult(receipt.kind, receipt.path, receipt.error)
@@ -1329,6 +1387,7 @@ internal class OverlayV2(private val svc: OverlayService) {
         "camera-unavailable" -> t("未找到可用的相机", "No camera app available")
         "camera-busy" -> t("相机被占用，请稍后重试", "Camera is busy; try again")
         "compress-failed" -> t("照片处理失败，原图已保留", "Photo processing failed; the original is kept")
+        "attachment-timeout" -> t("附件添加超时，请重新添加", "Attachment timed out. Add it again.")
         "copy-failed" -> t("文件读取失败", "Could not read the file")
         "cancelled" -> t("已取消", "Cancelled")
         else -> t("附件添加失败", "Could not add the attachment")
@@ -1337,18 +1396,20 @@ internal class OverlayV2(private val svc: OverlayService) {
     }
   }
 
-  private fun removeAttachment(index: Int) {
-    if (!OverlayPageHost.available()) {
-      toast(t("仅供主界面管理附件", "Manage attachments in the main app"))
-      return
-    }
-    val ids = (pageState?.attachments ?: emptyList()).map { it.id }
-    if (index !in ids.indices) return
-    OverlayPageHost.removeAttachment(ids[index]) { ok ->
+  private fun removeAttachment(id: String) {
+    val session = svc.activeSessionId
+    if (attachmentsForSend().none { it.id == id }) return
+    OverlayPageHost.removeAttachment(id, session) { ok ->
       if (ok) refreshPageState() else svc.flashStatus(t("删除附件失败", "Could not remove the attachment"))
     }
   }
 
+  private fun retryAttachment(id: String) {
+    if (attachmentsForSend().none { it.id == id && it.status == "error" }) return
+    OverlayPageHost.retryAttachment(id, svc.activeSessionId) { ok ->
+      if (ok) refreshPageState() else toast(t("无法重试附件", "Could not retry the attachment"))
+    }
+  }
 
   /** Each opener toggles its own surface. Back returns from the active surface to the input. */
   private fun toggleDrawer() {
@@ -1360,12 +1421,19 @@ internal class OverlayV2(private val svc: OverlayService) {
     }
     if (pickerOpen()) closeDrawer(animated = false)
     drawerMode = DrawerMode.COMMANDS
+    commandSheetExpanded = false
+    composer?.prepareCommandSheet()
+    composer?.resetDrawerScroll()
     refreshCommands()
     renderComposer()
     syncDrawerWindow()
   }
 
   private fun onComposerBackPressed() {
+    if (drawerMode == DrawerMode.COMMANDS && commandSheetExpanded) {
+      settleCommandSheet(false)
+      return
+    }
     if (closeDrawer(animated = true)) return
     if (messageDraftBeforeAnswer != null) {
       leaveQuestionAnswer(false)
@@ -1439,6 +1507,8 @@ internal class OverlayV2(private val svc: OverlayService) {
   private fun closeDrawer(animated: Boolean): Boolean {
     if (drawerMode == DrawerMode.NONE) return false
     val wasPicker = pickerOpen()
+    sheetHeightAnimator?.cancel(); sheetHeightAnimator = null
+    sheetDragHeight = null
     drawerRetryToken++
     drawerMode = DrawerMode.NONE
     drawerLoading = false
@@ -1492,15 +1562,115 @@ internal class OverlayV2(private val svc: OverlayService) {
     return (composerTop - chipHeight - composer.chipGapPx).coerceAtLeast(screen.statusBarPx)
   }
 
+  private fun handleCommandSheetDrag(phase: OverlayDragPhase, dy: Float): Boolean {
+    val c = composer ?: return false
+    val lp = drawerParams ?: return false
+    if (drawerMode != DrawerMode.COMMANDS) return false
+    val safeHeight = OverlayWindowFrames.availableHeightPx(screen())
+    val peek = OverlayWindowFrames.commandSheetHeightPx(safeHeight, false)
+    val max = OverlayWindowFrames.commandSheetHeightPx(safeHeight, true)
+    when (phase) {
+      OverlayDragPhase.DOWN -> {
+        if (dy < 0 && commandSheetExpanded || dy > 0 && !c.drawerAtTop()) return false
+        sheetHeightAnimator?.cancel()
+        sheetDragStart = lp.height
+      }
+      OverlayDragPhase.MOVE -> {
+        sheetDragHeight = (sheetDragStart - dy).toInt().coerceIn((peek / 2).coerceAtLeast(1), max)
+        syncDrawerWindow()
+      }
+      OverlayDragPhase.UP -> {
+        val threshold = 28 * screen().density
+        if (!commandSheetExpanded && dy > threshold) closeDrawer(animated = true)
+        else settleCommandSheet(if (kotlin.math.abs(dy) < threshold) commandSheetExpanded else dy < 0)
+      }
+      OverlayDragPhase.CANCEL -> settleCommandSheet(commandSheetExpanded)
+    }
+    return true
+  }
+
+  private fun settleCommandSheet(expanded: Boolean) {
+    val from = drawerParams?.height ?: return
+    sheetHeightAnimator?.cancel()
+    commandSheetExpanded = expanded
+    val target = OverlayWindowFrames.commandSheetHeightPx(OverlayWindowFrames.availableHeightPx(screen()), expanded)
+    sheetDragHeight = null
+    if (!DSUiAnimationsEnabled() || from == target) { syncDrawerWindow(); return }
+    sheetHeightAnimator = android.animation.ValueAnimator.ofInt(from, target).apply {
+      duration = 200
+      interpolator = DsUi.ease
+      addUpdateListener {
+        if (drawerMode == DrawerMode.COMMANDS) {
+          sheetDragHeight = (it.animatedValue as Int).takeUnless { height -> height == target }
+          syncDrawerWindow()
+        }
+      }
+      start()
+    }
+  }
+
+  private fun syncCommandSheet(c: OverlayComposer, s: OverlayScreen) {
+    val max = OverlayWindowFrames.commandSheetHeightPx(OverlayWindowFrames.availableHeightPx(s), true)
+    val height = (sheetDragHeight ?: OverlayWindowFrames.commandSheetHeightPx(
+      OverlayWindowFrames.availableHeightPx(s), commandSheetExpanded,
+    )).coerceIn(1, max)
+    c.setMaxDrawerHeightPx(height)
+    c.setSheetDragHandler(::handleCommandSheetDrag)
+    val flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+      WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+    fun params(width: Int, h: Int, extra: Int) = WindowManager.LayoutParams(
+      width, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags or extra, PixelFormat.TRANSLUCENT,
+    ).apply {
+      if (Build.VERSION.SDK_INT >= 30) setFitInsetsTypes(0)
+      gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+      softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+      y = s.navBarPx
+    }
+    val width = (s.widthPx - s.sideInsetsPx * 2).coerceAtLeast(1)
+    val scrimParams = params(width, OverlayWindowFrames.availableHeightPx(s).coerceAtLeast(1), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+    val scrim = windows.view(OverlayWindows.Slot.DRAWER_SCRIM)
+    if (scrim == null) {
+      val backdrop = View(svc).apply {
+        setBackgroundColor(0x33000000)
+        contentDescription = t("关闭附件与命令", "Close attachments and commands")
+        setOnClickListener { closeDrawer(animated = true) }
+      }
+      if (!windows.add(OverlayWindows.Slot.DRAWER_SCRIM, backdrop, scrimParams)) { closeDrawer(false); return }
+    } else {
+      val old = windows.params(OverlayWindows.Slot.DRAWER_SCRIM)
+      if (old == null || old.width != scrimParams.width || old.height != scrimParams.height || old.y != scrimParams.y) {
+        windows.update(OverlayWindows.Slot.DRAWER_SCRIM, scrimParams)
+      }
+    }
+    val previous = drawerParams
+    if (previous != null && previous.width == width && previous.height == height && previous.y == s.navBarPx && previous.flags == flags) return
+    val lp = params(width, height, 0)
+    drawerParams = lp
+    c.drawerView.setOnTouchListener(null)
+    if (!windows.contains(OverlayWindows.Slot.DRAWER)) {
+      drawerWindowGeneration++
+      if (!windows.add(OverlayWindows.Slot.DRAWER, c.drawerView, lp)) { closeDrawer(false); return }
+      c.drawerView.requestFocus()
+      c.fadeDrawerIn()
+    } else windows.update(OverlayWindows.Slot.DRAWER, lp)
+  }
+
   private fun syncDrawerWindow() {
     val c = composer ?: return
+    if (drawerMode == DrawerMode.NONE) return
     if (drawerClosing) { c.fadeDrawerIn(); drawerClosing = false }
+    if (drawerMode == DrawerMode.COMMANDS) {
+      c.setPickerMode(false)
+      c.setDrawerFloating(false)
+      syncCommandSheet(c, screen())
+      return
+    }
     // 代次只在「真的新建 sheet 窗口」时推进。无条件自增会让正在收起的动画失效 ——
     // 任何一次几何同步（转屏、键盘高度变化、chip 重排）都会把 remove 回调变成空操作，
     // sheet 就永远留在屏上，用户点空白也关不掉。
     val screen = screen()
     val picker = pickerOpen()
-    val maxHeight = (OverlayWindowFrames.availableHeightPx(screen) * if (picker) .55f else .4f)
+    val maxHeight = (OverlayWindowFrames.availableHeightPx(screen) * .55f)
       .toInt().coerceAtLeast(1)
     c.setMaxDrawerHeightPx(maxHeight)
     // Both standalone surfaces leave the original opener accessible below them.
@@ -1528,8 +1698,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     }
     val previousGeometry = listOf(lp.width, lp.height, lp.x, lp.y, lp.flags)
     drawerParams = lp
-    lp.flags = if (picker) lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
-      else lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+    lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
     lp.width = OverlayWindowFrames.composerWidthPx(screen)
     lp.height = h
     lp.x = (OverlayWindowFrames.COMPOSER_SIDE_MARGIN_DP * screen.density).toInt()
@@ -1608,17 +1777,22 @@ internal class OverlayV2(private val svc: OverlayService) {
       // 代次护栏：关闭动画期间用户可能又打开了 sheet，迟到的旧回调不得移除那一个新的。
       if (generation == drawerWindowGeneration) {
         windows.remove(OverlayWindows.Slot.DRAWER)
+        windows.remove(OverlayWindows.Slot.DRAWER_SCRIM)
         drawerParams = null
         drawerClosing = false
       }
     }
-    if (!animated || !c.isDrawerOpen()) { remove(); return }
+    if (!animated || !c.isDrawerOpen() || !windows.contains(OverlayWindows.Slot.DRAWER)) { remove(); return }
     drawerClosing = true
     c.animateDrawerOut(remove)
   }
 
 
   private var drawerParams: WindowManager.LayoutParams? = null
+  private var commandSheetExpanded = false
+  private var sheetDragHeight: Int? = null
+  private var sheetDragStart = 0
+  private var sheetHeightAnimator: android.animation.ValueAnimator? = null
   private var lastComposerMeasuredHeight = 0
 
 
@@ -1791,13 +1965,16 @@ internal class OverlayV2(private val svc: OverlayService) {
       else -> {
         // 命令：走页面真源执行（不硬编码任何命令清单）
         if (OverlayPageHost.available()) {
-          val requestEpoch = drawerRetryToken
-          OverlayPageHost.execute(name) { ok ->
+          val session = svc.activeSessionId
+          closeDrawer(animated = false)
+          OverlayPageHost.execute(name, session, onUnknown = {
+            svc.flashStatus(t("命令结果待确认", "Command result unconfirmed"))
+          }) { ok ->
             if (ok) {
-              if (drawerMode == DrawerMode.COMMANDS && drawerRetryToken == requestEpoch) closeDrawer(animated = true)
               toast(t("已执行", "Command sent"))
             } else svc.flashStatus(t("命令执行失败", "Command failed"))
           }
+          svc.jumpToApp()
         } else {
           toast(t("命令需要主界面在线", "Commands need the main app"))
         }
@@ -2016,6 +2193,9 @@ internal class OverlayV2(private val svc: OverlayService) {
       else c.setInputText("")
     }
     sessionGeneration++
+    historyLoading = false
+    refreshCommands()
+    if (cardVisible()) renderCard()
     refreshPageState()
     scheduleRender()
   }
@@ -2052,7 +2232,7 @@ internal class OverlayV2(private val svc: OverlayService) {
       lp.width = OverlayWindowFrames.cardWidthPx(s)
       lp.x = (OverlayWindowFrames.CARD_SIDE_MARGIN_DP * s.density).toInt()
       lp.y = OverlayWindowFrames.cardTopPx(s)
-      card?.let { c -> lp.height = OverlayWindowFrames.cardHeightPx(c.measureContentHeightPx(lp.width), s, cardExpanded) }
+      card?.let { c -> lp.height = cardTargetHeight(c.measureContentHeightPx(lp.width), s) }
       windows.update(OverlayWindows.Slot.CARD, lp)
     }
     pillParams?.let { lp ->
@@ -2069,7 +2249,6 @@ internal class OverlayV2(private val svc: OverlayService) {
     // 依赖输入窗几何的窗口必须在输入窗落位之后再算，且取件租约期间一律不动：
     // 租约正把 flags/alpha 降级，此时 add/update sheet 或 chip 会破坏它的原子性。
     if (attachmentInteraction == null) {
-      composer?.setMaxDrawerHeightPx((OverlayWindowFrames.availableHeightPx(s) * .4f).toInt())
       syncDrawerWindow()
       // chip 的坐标来自输入窗的真实屏幕位置，必须等这一帧布局完成后再读。
       // 这里只排一次校正，不做逐帧轮询。
@@ -2110,9 +2289,30 @@ internal class OverlayV2(private val svc: OverlayService) {
     }
   }
 
+  private var historyLoading = false
+
+  private fun navigateCardHistory(direction: String) {
+    if (historyLoading || !OverlayPageHost.available()) return
+    val session = svc.activeSessionId
+    val generation = sessionGeneration
+    historyLoading = true
+    renderCard()
+    val done: (Boolean) -> Unit = { ok ->
+      if (!destroyed && generation == sessionGeneration) {
+        historyLoading = false
+        if (ok) refreshPageState() else {
+          toast(t("暂时无法加载更多历史", "Could not load more history"))
+          renderCard()
+        }
+      }
+    }
+    OverlayPageHost.history(direction, session, onUnknown = { done(false) }, onResult = done)
+  }
+
   private fun renderCard() {
     val c = card ?: return
     val english = UiText.isEnglish(svc)
+    val history = pageState?.takeIf { it.sessionId == svc.activeSessionId }
     val elapsed = if (model.agent == OverlayAgentState.RUNNING && model.turnStartedAt > 0L) {
       val sec = ((System.currentTimeMillis() - model.turnStartedAt) / 1000L).coerceAtLeast(0L)
       " · " + sec + "s"
@@ -2156,7 +2356,16 @@ internal class OverlayV2(private val svc: OverlayService) {
         answerLine = model.headline,
         toolCount = model.toolCount,
         rows = rows,
-        footerLine = "",
+        footerLine = when {
+          svc.activeSessionId.isEmpty() || history?.transcript?.isNotEmpty() == true -> ""
+          history?.transcriptReady == true -> t("暂无历史消息", "No conversation history")
+          history?.transcriptError == "transcript-history-error" -> t("无法加载会话历史", "Conversation history unavailable")
+          else -> t("正在加载会话历史", "Loading conversation history")
+        },
+        transcript = history?.transcript.orEmpty(),
+        historyOlder = history?.transcriptHasOlder == true,
+        historyLatest = history?.transcriptOlderPage == true,
+        historyLoading = historyLoading,
         pending = pendingActions,
         running = model.agent == OverlayAgentState.RUNNING,
       ),
@@ -2181,14 +2390,18 @@ internal class OverlayV2(private val svc: OverlayService) {
       svc.activeSessionId.isNotBlank() -> untitledSession(svc.activeSessionId)
       else -> t("新会话", "New session")
     }
-    val attachments = attachmentsForSend().map { OverlayAttachmentChip(it.name, it.kind, it.id, it.thumbnail) } +
+    val attachments = attachmentsForSend().map { OverlayAttachmentChip(it.name, it.kind, it.id, it.thumbnail, status = when (it.status) {
+      "uploading" -> t("上传中", "Uploading")
+      "error" -> t("上传失败", "Upload failed")
+      else -> ""
+    }, failed = it.status == "error") } +
       OverlayAttachmentBus.pending(svc.activeSessionId)
         .filter { it.error == "attachment-pending" && it.path.isNotBlank() }
         .map { item ->
           val status = if (attachmentReviewRequired(item.requestId)) attachmentReviewMessage() else t("添加中", "Adding")
-          val name = item.path.substringAfterLast('/') + " · " + status
+          val name = item.path.substringAfterLast('/')
           val kind = if (item.kind == "camera" || item.kind == "photo") "image" else "file"
-          OverlayAttachmentChip(name, kind, item.requestId, pending = true)
+          OverlayAttachmentChip(name, kind, item.requestId, pending = true, status = status)
         }
     val items = when (drawerMode) {
       DrawerMode.SESSIONS -> buildList {
@@ -2210,6 +2423,11 @@ internal class OverlayV2(private val svc: OverlayService) {
         drawerMode == DrawerMode.WORKSPACES -> t("暂无工作区", "No workspaces")
         else -> t("没有匹配的会话", "No matching sessions")
       }
+      DrawerMode.COMMANDS -> when {
+        commandsLoading -> t("正在加载命令…", "Loading commands…")
+        commandsError -> t("无法加载命令，请重新打开菜单", "Could not load commands. Reopen the menu.")
+        else -> t("暂无命令", "No commands")
+      }
       else -> ""
     }
     val pendingHint = model.pending.firstOrNull()?.title.orEmpty()
@@ -2223,6 +2441,7 @@ internal class OverlayV2(private val svc: OverlayService) {
         busy = svc.sessionBusy,
         drawerEmptyLabel = drawerEmptyLabel,
         sendEnabled = !sending,
+        sendRecheck = attachmentSendUnconfirmed,
       ),
     )
     c.setDrawerOpen(drawerMode != DrawerMode.NONE)
@@ -2284,13 +2503,12 @@ internal class OverlayV2(private val svc: OverlayService) {
           pageSessionBeforeNewConversation = null
           if (s.sessionId.isNotEmpty() && s.sessionId != svc.activeSessionId) svc.adoptPageSession(s.sessionId)
         }
-      } else {
-        pageState = null
       }
       // 只靠订阅是刷不出新到达的转录的：胶囊只有一格文本，页面状态回来时必须显式重渲染，
       // 否则用户看到的永远是他上次展开时的旧输出。
       if (composerVisible()) renderComposer()
       if (pillVisible()) renderPill()
+      if (cardVisible()) renderCard()
       onDone?.invoke()
     }
   }
@@ -2302,11 +2520,23 @@ internal class OverlayV2(private val svc: OverlayService) {
     null
   }
 
+  private var commandsReadGeneration = 0
+  private var commandsLoading = false
+  private var commandsError = false
+
   private fun refreshCommands() {
-    if (!OverlayPageHost.available()) return
-    OverlayPageHost.commands { list ->
-      if (destroyed) return@commands
-      pageCommands = list
+    if (drawerMode != DrawerMode.COMMANDS) return
+    val generation = ++commandsReadGeneration
+    val session = svc.activeSessionId
+    commandsLoading = true
+    commandsError = false
+    pageCommands = emptyList()
+    OverlayPageHost.commandsOrNull(isCurrent = {
+      !destroyed && drawerMode == DrawerMode.COMMANDS && generation == commandsReadGeneration && session == svc.activeSessionId
+    }) { list ->
+      pageCommands = list.orEmpty()
+      commandsLoading = false
+      commandsError = list == null
       if (composerVisible()) renderComposer()
     }
   }
@@ -2472,7 +2702,6 @@ internal class OverlayV2(private val svc: OverlayService) {
   private var attachmentInteractionSession = ""
   private var attachmentInteractionRequestId = ""
   private var attachmentRestoreAttempts = 0
-  private val attachmentRequestIds = HashMap<String, MutableSet<String>>()
   private var recreatingViews = false
   // 「动作已发出但还没被确认」的窗口期：Service 回滚草稿时据此拒绝重复提交。
   private var sendPending = false
@@ -2537,6 +2766,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     windows.remove(OverlayWindows.Slot.PILL)
     windows.remove(OverlayWindows.Slot.COMPOSER)
     windows.remove(OverlayWindows.Slot.DRAWER)
+    windows.remove(OverlayWindows.Slot.DRAWER_SCRIM)
     hideChipWindows()
     return snapshot
   }
@@ -2587,8 +2817,11 @@ internal class OverlayV2(private val svc: OverlayService) {
 
   /** 页面状态被宿主置为失效：节流后重取一次，避免抖动期反复拉取。 */
   internal fun onPageStateInvalidated() {
+    if (attachmentSendUnconfirmed) OverlayPageHost.recheckPendingActions()
+    OverlayAttachmentBus.recheckPending(svc.activeSessionId)
     if (destroyed || uiSuspended || !observingPage() || pageStateRefreshQueued) return
     pageStateRefreshQueued = true
+    updatePageWatching()
     main.postDelayed({
       pageStateRefreshQueued = false
       if (!destroyed && !uiSuspended && observingPage()) refreshPageState()
@@ -2621,6 +2854,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     val hadCard = cardVisible()
     val hadPill = pillVisible()
     val savedExpanded = cardExpanded
+    val savedManualHeight = manualCardHeightDp
     val savedDrawer = drawerMode
     val savedEntryX = entryParams?.x ?: entryX
     val savedEntryY = entryParams?.y ?: entryY
@@ -2647,6 +2881,7 @@ internal class OverlayV2(private val svc: OverlayService) {
       composer = null; composerParams = null
       entryX = savedEntryX; entryY = savedEntryY
       cardExpanded = savedExpanded
+      manualCardHeightDp = savedManualHeight
       drawerMode = savedDrawer
       if (hadEntry && !entryHiddenByUser) {
         showEntry()
@@ -2705,6 +2940,7 @@ internal class OverlayV2(private val svc: OverlayService) {
     var h = dm.heightPixels
     var statusBar = 0
     var navBar = 0
+    var sideInsets = 0
     if (Build.VERSION.SDK_INT >= 30) {
       try {
         val metrics = svc.wm.currentWindowMetrics
@@ -2712,9 +2948,10 @@ internal class OverlayV2(private val svc: OverlayService) {
         h = metrics.bounds.height()
         // 用 IgnoringVisibility 而不是 getInsets：系统栏显示/隐藏时后者会让 top 跳变，
         // 卡片/胶囊的物理位置跟着抖一下，用户看到的是"界面在跳"。
-        val insets = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars())
+        val insets = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
         statusBar = insets.top
         navBar = insets.bottom
+        sideInsets = maxOf(insets.left, insets.right)
       } catch (_: Throwable) {
         statusBar = dimenPx("status_bar_height")
         navBar = dimenPx("navigation_bar_height")
@@ -2723,7 +2960,7 @@ internal class OverlayV2(private val svc: OverlayService) {
       statusBar = dimenPx("status_bar_height")
       navBar = dimenPx("navigation_bar_height")
     }
-    return OverlayScreen(w, h, statusBar, navBar, dm.density)
+    return OverlayScreen(w, h, statusBar, navBar, dm.density, sideInsets)
   }
 
 
