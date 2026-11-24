@@ -2531,8 +2531,9 @@ internal class OverlayV2(private val svc: OverlayService) {
     commandsLoading = true
     commandsError = false
     pageCommands = emptyList()
-    OverlayPageHost.commandsOrNull { list ->
-      if (destroyed || generation != commandsReadGeneration || session != svc.activeSessionId) return@commandsOrNull
+    OverlayPageHost.commandsOrNull(isCurrent = {
+      !destroyed && drawerMode == DrawerMode.COMMANDS && generation == commandsReadGeneration && session == svc.activeSessionId
+    }) { list ->
       pageCommands = list.orEmpty()
       commandsLoading = false
       commandsError = list == null

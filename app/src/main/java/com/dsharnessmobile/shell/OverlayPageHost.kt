@@ -123,13 +123,22 @@ internal object OverlayPageHost {
     }
   }
 
-  internal fun commandsOrNull(onResult: (List<PageCommand>?) -> Unit) {
-    val deadline = android.os.SystemClock.uptimeMillis() + 5000L
+  private val commandLoadingErrors = setOf(
+    "commands-not-ready", "session-not-ready", "composer-unavailable", "composer-busy",
+    "commands-menu-busy", "commands-aborted", "commands-menu-aborted", "session-generation-changed",
+  )
+
+  internal fun commandsOrNull(isCurrent: () -> Boolean, onResult: (List<PageCommand>?) -> Unit) {
+    // The page can spend up to four seconds each on the session and the command source.
+    val deadline = android.os.SystemClock.uptimeMillis() + 10_000L
     fun read() {
+      if (!isCurrent()) return
       eval(callExpression("commands", "")) { raw ->
+        if (!isCurrent()) return@eval
         val obj = parseHostReply(raw)
         if (obj?.optBoolean("ok", false) == true) onResult(parseCommands(obj))
-        else if (obj?.optString("error") == "commands-not-ready" && android.os.SystemClock.uptimeMillis() < deadline) main.postDelayed({ read() }, 100L)
+        else if ((obj == null || obj.optString("error") in commandLoadingErrors) &&
+          android.os.SystemClock.uptimeMillis() < deadline) main.postDelayed({ read() }, 250L)
         else onResult(null)
       }
     }
@@ -187,17 +196,25 @@ internal object OverlayPageHost {
   private fun pollOperation(action: PendingAction, deadline: Long, delay: Long) {
     if (action.cancelled) return
     if (!available()) { action.polling = false; unknown(action); return }
-    val expired = android.os.SystemClock.uptimeMillis() >= deadline
+    val now = android.os.SystemClock.uptimeMillis()
+    val expired = now >= deadline
     if (expired) {
       unknown(action)
-      if (!action.observeLate) { action.polling = false; return }
+      if (!action.observeLate || now >= deadline + 90_000L) { action.polling = false; return }
     }
     action.polling = true
     eval(callExpression("operation", jsArg(action.id))) { raw ->
       if (action.cancelled) return@eval
       val obj = parseHostReply(raw)
       if (obj == null || obj.optString("error") == "operation-not-found") {
-        action.polling = false; unknown(action); return@eval
+        unknown(action)
+        if (action.observeLate) {
+          // A background WebView may lose an evaluation reply. Recheck the same ticket without resending.
+          main.postDelayed({ pollOperation(action, deadline, delay) }, if (expired) 3000L else 1000L)
+        } else {
+          action.polling = false
+        }
+        return@eval
       }
       if (obj.optBoolean("pending", false)) {
         if (obj.optBoolean("unknown", false)) unknown(action)
