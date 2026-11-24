@@ -711,7 +711,10 @@ impl<J: Journal> Controller<J> {
         if let Err(error) = validate_args(&self.policy, &plan, &args) {
             return rejection_json(error.code(), error.detail(), screen_id.as_deref());
         }
-        let node = match args.get("ref").and_then(Value::as_str).map(|reference| self.resolve_node(&plan, reference)).transpose() {
+        // Browser DOM refs belong to BrowserHost, which validates the tab and page generation.
+        let android_ref = args.get("ref").and_then(Value::as_str)
+            .filter(|_| !matches!(plan.target, PlanTarget::BrowserWorkspace));
+        let node = match android_ref.map(|reference| self.resolve_node(&plan, reference)).transpose() {
             Ok(node) => node,
             // The call has no lifecycle record and no platform permit at this point.
             Err(error) => return rejection_json(error.code(), error.detail(), plan.target.alias()),
