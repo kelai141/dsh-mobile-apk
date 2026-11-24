@@ -34,23 +34,24 @@ class OverlayServiceLifecycleTest {
    *
    * 现场实测：点「文件」拉起取件后，浮窗连球带窗全部消失、草稿被清空。真因是这里无条件
    * stopSelf()，把「代理任务结束」当成「用户划掉主任务」。这条测试锁住判据本身：
-   * 只有 MAIN/LAUNCHER 的 rootIntent 才算主任务，代理任务与系统取件任务都不算。
+   * 桌面入口和显式打开的 MainActivity 都算主任务，代理任务与系统取件任务都不算。
    */
   @Test
-  fun onlyMainLauncherTaskRemovalCountsAsUserDismissal() {
+  fun onlyMainActivityTaskRemovalCountsAsUserDismissal() {
     assertTrue(
       "用户从最近任务划掉主入口才算主动关闭",
-      OverlayService.isMainTaskIntentForTest(Intent.ACTION_MAIN, listOf(Intent.CATEGORY_LAUNCHER)),
+      OverlayService.isMainTaskSignal(Intent.ACTION_MAIN, listOf(Intent.CATEGORY_LAUNCHER)),
     )
     assertFalse(
       "取件代理任务消失不得拆浮窗",
-      OverlayService.isMainTaskIntentForTest("com.dsharnessmobile.shell.ACTION_OVERLAY_START", null),
+      OverlayService.isMainTaskSignal(null, null, OverlayAttachProxyActivity::class.java.name),
     )
-    assertFalse("系统取件窗口没有 rootIntent", OverlayService.isMainTaskIntentForTest(null, null))
+    assertFalse("系统取件窗口没有 rootIntent", OverlayService.isMainTaskSignal(null, null))
     assertFalse(
       "只有 MAIN 但没有 LAUNCHER 分类不算主任务",
-      OverlayService.isMainTaskIntentForTest(Intent.ACTION_MAIN, emptyList()),
+      OverlayService.isMainTaskSignal(Intent.ACTION_MAIN, emptyList()),
     )
+    assertTrue("显式启动的主窗口也是主任务", OverlayService.isMainTaskSignal(null, null, MainActivity::class.java.name))
   }
 
   @Test

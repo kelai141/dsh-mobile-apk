@@ -338,10 +338,6 @@ class OverlayService : Service() {
     stopSelf()
   }
 
-  /** 该 rootIntent 是否指向本应用的主入口任务（用户真从最近任务划掉的那一个）。 */
-  private fun isMainTaskIntent(intent: Intent?): Boolean =
-    isMainTaskSignal(intent?.action, intent?.categories)
-
   override fun onDestroy() {
     probeExecutor.shutdownNow()
     rpcLifecycleClosed = true
@@ -1348,22 +1344,17 @@ class OverlayService : Service() {
   }
 
   companion object {
-    /**
-     * 主任务判据的对外可测入口（测试锁判据本身，不看 Android 桩副作用）。
-     *
-     * 现场实测：点「文件」拉起取件后浮窗连球带窗全灭、草稿被清空。真因是 [onTaskRemoved]
-     * 无条件自停，把取件代理那个只活一两秒的透明任务当成「用户划掉主任务」。
-     */
-    internal fun isMainTaskIntentForTest(action: String?, categories: Collection<String>?): Boolean =
-      isMainTaskSignal(action, categories)
+    internal fun isMainTaskIntent(intent: Intent?): Boolean =
+      isMainTaskSignal(intent?.action, intent?.categories, intent?.component?.className)
 
     /**
-     * 纯判据：只有 MAIN + LAUNCHER 的 rootIntent 才算用户主动关闭主任务。
+     * 主任务可由桌面入口启动，也可由显式指向 MainActivity 的 Intent 启动。
      *
      * 抽成不碰 Intent 的纯函数，是因为 Robolectric 的 Intent 桩不记录 categories，
      * 直接在桩上断言会让这条关键回归无法真正判红。
      */
-    internal fun isMainTaskSignal(action: String?, categories: Collection<String>?): Boolean {
+    internal fun isMainTaskSignal(action: String?, categories: Collection<String>?, componentClassName: String? = null): Boolean {
+      if (componentClassName != null) return componentClassName == MainActivity::class.java.name
       if (action != Intent.ACTION_MAIN) return false
       return categories?.contains(Intent.CATEGORY_LAUNCHER) == true
     }
