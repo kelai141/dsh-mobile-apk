@@ -53,17 +53,17 @@ function onlyOwnCapsules(nodes: ArrayLike<Node>): boolean {
   return true
 }
 
-/** 扩展名 → MIME。未知一律空串，交给壳侧嗅探（见 android-bridge.ts 的 openFileExternal 注释）。 */
+/** 扩展名 → MIME。文本/代码统一 `text/plain` 避免安卓过滤器漏接，未知一律空串交壳侧解析。 */
 const MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
-  md: 'text/markdown',
+  md: 'text/plain',
   txt: 'text/plain',
-  json: 'application/json',
-  yml: 'text/yaml',
-  yaml: 'text/yaml',
+  json: 'text/plain',
+  yml: 'text/plain',
+  yaml: 'text/plain',
   html: 'text/html',
-  css: 'text/css',
-  js: 'text/javascript',
-  mjs: 'text/javascript',
+  css: 'text/plain',
+  js: 'text/plain',
+  mjs: 'text/plain',
   ts: 'text/plain',
   png: 'image/png',
   jpg: 'image/jpeg',

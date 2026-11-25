@@ -128,9 +128,9 @@ const FILE_PROVIDER_PATH_TAGS = new Set([
   'external-files-path', 'external-cache-path', 'external-media-path',
 ])
 const FILE_PROVIDER_CALLER_ALLOWLIST = new Map([
-  ['java/com/dsharnessmobile/shell/FileIncoming.kt', {
+  ['java/com/dsharnessmobile/shell/LegacyAttachmentPicker.kt', {
     references: 1,
-    reason: '外部阅读器出口；调用前由 isReaderAllowed 做运行时窄白名单校验',
+    reason: '旧版附件选择器暂存拷贝；落点是 cacheDir/legacy-uploads 的窄映射',
   }],
   ['java/com/dsharnessmobile/shell/LogShare.kt', {
     references: 1,
@@ -138,16 +138,12 @@ const FILE_PROVIDER_CALLER_ALLOWLIST = new Map([
   }],
   ['java/com/dsharnessmobile/shell/PathOpen.kt', {
     references: 1,
-    reason: '用户主动选择文件后的 chooser；这是 external-path 根映射的预期调用点',
+    reason: '唯一文件打开/分享 URI 签发入口（openChooser/FileExternalBridge/FileIncoming 共用）；'
+      + '强制先过 ChooserAllowlist.isHardDenied（禁 Android/data|obb 与 .dsh/.ssh 凭据）再核允许根',
   }],
   ['java/com/dsharnessmobile/shell/UpdateChecker.kt', {
     references: 1,
     reason: '安装器出口；APK 落在 Documents/dshdata 的更窄映射内',
-  }],
-  ['java/com/dsharnessmobile/shell/FileExternalBridge.kt', {
-    references: 2,
-    reason: '外部打开/转发出口；允许面与 PathOpen 共用（FileIncoming.isReaderAllowed + 外部存储根），'
-      + '参数只有设备路径 + MIME，不接受页面传 Uri，且父目录不可授权时干脆不提供目录项',
   }],
   ['java/com/dsharnessmobile/shell/PhotoCapture.kt', {
     references: 1,

@@ -55,7 +55,9 @@ function fixture(t, path, rogue = false, transform = null) {
   // 现在显式**注入**一条合成宽映射：判据要守的是「宽映射在场时调用点必须逐文件登记」，
   // 而这条判据与真实树里有没有那条映射无关。
   const paths = join(dir, 'app/src/main/res/xml/file_paths.xml')
+  // Strip any existing broad external_shared entry so each test case isolates the synthetic path under test.
   const original = readFileSync(paths, 'utf8')
+    .replace(/\s*<external-path\s+name="external_shared"[^>]*\/>/g, '')
   assert.ok(original.includes('</paths>'), 'fixture must inject the synthetic broad mapping')
   writeFileSync(paths, original.replace(
     '</paths>',

@@ -55,6 +55,72 @@ internal object ChooserAllowlist {
   }
 
   /**
+   * 绝对黑名单判定（永远先于白名单，守住 issue #1571 与应用机密红线）。
+   *
+   * 拒绝集合：
+   * 1. 外部共享存储裸根本身（如 `/storage/emulated/0`），防整盘根暴露；
+   * 2. 第三方应用私有目录与沙盒：`Android/data`、`Android/obb`、`Android/sandbox`、`Android/obj`；
+   * 3. 本应用私有配置与引擎凭据：`filesDir/home/.dsh` 除 `workspaces` 之外的全部内容；
+   * 4. Termux 常见密钥/凭据路径（`.ssh` / `.gnupg` / `.aws` / `.config/gh` / `.netrc` / `.npmrc` /
+   *    `.git-credentials` / `.pypirc`）及应用内部存储状态（`shared_prefs` / `databases` / `.engine-*`）。
+   */
+  fun isHardDenied(canonicalPath: String, filesDir: String?, externalRoots: List<String>): Boolean {
+    if (canonicalPath.isEmpty()) return true
+    for (rawExt in externalRoots) {
+      val extRoot = normalizeRoot(rawExt) ?: continue
+      if (canonicalPath == extRoot) return true
+      for (blocked in listOf("Android/data", "Android/obb", "Android/sandbox", "Android/obj")) {
+        if (isSameOrChild(canonicalPath, "$extRoot/$blocked")) return true
+      }
+    }
+    val appFiles = normalizeRoot(filesDir)
+    if (appFiles != null) {
+      val dshPrivate = "$appFiles/home/.dsh"
+      val workspaces = "$dshPrivate/workspaces"
+      if (isSameOrChild(canonicalPath, dshPrivate) && !isSameOrChild(canonicalPath, workspaces)) {
+        return true
+      }
+      for (secretDir in listOf("home/.ssh", "home/.gnupg", "home/.aws", "home/.config/gh")) {
+        if (isSameOrChild(canonicalPath, "$appFiles/$secretDir")) return true
+      }
+      for (secretFile in listOf("home/.netrc", "home/.npmrc", "home/.git-credentials", "home/.pypirc")) {
+        if (canonicalPath == "$appFiles/$secretFile") return true
+      }
+      for (internalDir in listOf("shared_prefs", "databases", "no_backup", "code_cache")) {
+        if (isSameOrChild(canonicalPath, "$appFiles/$internalDir")) return true
+      }
+      if (canonicalPath.startsWith("$appFiles/.engine-")) return true
+    }
+    return false
+  }
+
+  /**
+   * 统一安全策略：先核硬黑名单，再核允许根。
+   */
+  fun isAllowedByPolicy(
+    canonicalPath: String,
+    allowedRoots: List<String>,
+    filesDir: String?,
+    externalRoots: List<String>,
+  ): Boolean {
+    if (isHardDenied(canonicalPath, filesDir, externalRoots)) return false
+    return permitted(canonicalPath, allowedRoots)
+  }
+
+  private fun normalizeRoot(path: String?): String? {
+    val trimmed = path?.trim().orEmpty()
+    if (trimmed.isEmpty()) return null
+    val noTrailing = trimmed.trimEnd('/')
+    return if (noTrailing.isEmpty()) "/" else noTrailing
+  }
+
+  private fun isSameOrChild(canonicalPath: String, root: String): Boolean {
+    if (canonicalPath == root) return true
+    val prefix = if (root == "/") "/" else "$root/"
+    return canonicalPath.startsWith(prefix)
+  }
+
+  /**
    * 把「用户持久化授予的 SAF 树」折成可比较的允许根。
    *
    * `AndroidBridge.resolvePickedPath` 只做 docId → 真实路径的字符串映射；非 primary 卷会回
