@@ -317,6 +317,50 @@ export function apply(ctx: ClientContext): void {
     return () => { unbind(); capsule.detach() }
   }, 'ui-responsive: delivery file card capsule')
 
+  ctx.effect(() => injectStyle('sidebar-file-actions', SIDEBAR_FILE_ACTIONS_CSS), 'ui-responsive: sidebar file actions styles')
+  ctx.effect(() => injectStyle('file-path-copy', FILE_PATH_COPY_CSS), 'ui-responsive: file path long-press copy styles')
+  let fileActionMenu: SidebarFileActionMenu | undefined
+  let bubblesController: SidebarBubbles | undefined
+
+  ctx.inject(['locale'], (scope) => {
+    const fileActionsNamespace = 'androidSidebarFileActions'
+    const fileActionsT = scope.locale.bind(fileActionsNamespace)
+    scope.effect(() => scope.locale.register(fileActionsNamespace, { zh: fileActionsZh, en: fileActionsEn }), 'ui-responsive: sidebar file actions copy')
+    scope.effect(() => {
+      const menu = new SidebarFileActionMenu({
+        bridge: bridgeFace,
+        t: fileActionsT,
+        onWillOpen: () => { bubblesController?.closePopover() },
+      })
+      menu.attach()
+      fileActionMenu = menu
+      const unbind = scope.on('locale/change', () => { menu.setTranslate(fileActionsT) })
+      return () => {
+        unbind()
+        if (fileActionMenu === menu) fileActionMenu = undefined
+        menu.detach()
+      }
+    }, 'ui-responsive: sidebar file external/share light menu')
+    scope.effect(() => scope.slots.inject('sidebar.right.tab.document.actions', () => scope.slots.register({
+      name: 'sidebar.right.tab.document.actions',
+      id: 'android-document-file-actions',
+      locale: fileActionsNamespace,
+      inject: () => ({
+        openMenu: (anchor: HTMLElement, path: string) => { fileActionMenu?.openFor(anchor, path) },
+      }),
+    }, DocumentExternalMenuAction)), 'ui-responsive: desktop document toolbar file actions')
+
+    const pathCopyNamespace = 'androidFilePathCopy'
+    const pathCopyT = scope.locale.bind(pathCopyNamespace)
+    scope.effect(() => scope.locale.register(pathCopyNamespace, { zh: pathCopyZh, en: pathCopyEn }), 'ui-responsive: file path copy copy')
+    scope.effect(() => {
+      const pathCopy = new FilePathCopy(pathCopyT)
+      pathCopy.attach()
+      const unbind = scope.on('locale/change', () => { pathCopy.setTranslate(pathCopyT) })
+      return () => { unbind(); pathCopy.detach() }
+    }, 'ui-responsive: 450ms long-press preview path copy')
+  })
+
   // Upstream owns unsupported-format detection and places this slot below its hint.
   // Use its resolved absolutePath rather than guessing from the foreground Session.
   ctx.inject(['locale'], (scope) => {
@@ -651,12 +695,25 @@ export function apply(ctx: ClientContext): void {
           const target = sidebar.commandTarget(null)
           if (target !== undefined) sidebar.toggleFullscreen(target)
         },
+        onActiveTabChange: (tab, trailing) => {
+          const path = resolveFileTabPath(tab, sessionId => sessionCwd(scope.sessions.list.getSnapshot(), sessionId))
+          fileActionMenu?.update(trailing, path)
+        },
+        onOpenChange: (open) => {
+          if (open) fileActionMenu?.close()
+        },
         t,
       })
+      bubblesController = bubbles
       bubbles.attach()
       const unsubscribe = sidebar.mounted.subscribe(bubbles.refresh)
       const unlocale = scope.on('locale/change', bubbles.refresh)
-      return () => { unsubscribe(); unlocale(); bubbles.detach(); workspaces.detach(); if (mobileWorkspaces === workspaces) mobileWorkspaces = undefined }
+      return () => {
+        unsubscribe(); unlocale(); bubbles.detach(); workspaces.detach()
+        if (bubblesController === bubbles) bubblesController = undefined
+        fileActionMenu?.update(null, undefined)
+        if (mobileWorkspaces === workspaces) mobileWorkspaces = undefined
+      }
     }, 'ui-responsive: narrow right-panel bubble navigation')
   })
 
@@ -1141,3 +1198,11 @@ export function apply(ctx: ClientContext): void {
 // 放这里可以让上面所有既有符号锚点行号一个都不动（插在 import 区会让 `export function apply` 整体下移，
 // check-code-map 判 bad-anchor-content）。
 import { CustomProviderHint, CUSTOM_PROVIDER_NS, LOCALE_NS as providerHintNS, zh as providerHintZh, en as providerHintEn } from './models/provider-hint.tsx'
+import { sessionCwd } from './mobile/session-cwd.ts'
+import { SidebarFileActionMenu, resolveFileTabPath } from './mobile/sidebar-file-actions.ts'
+import { SIDEBAR_FILE_ACTIONS_CSS } from './mobile/sidebar-file-actions.css.ts'
+import { zh as fileActionsZh, en as fileActionsEn } from './mobile/sidebar-file-actions.locales.ts'
+import { DocumentExternalMenuAction } from './mobile/DocumentExternalMenuAction.tsx'
+import { FilePathCopy } from './mobile/file-path-copy.ts'
+import { FILE_PATH_COPY_CSS } from './mobile/file-path-copy.css.ts'
+import { zh as pathCopyZh, en as pathCopyEn } from './mobile/file-path-copy.locales.ts'

@@ -258,6 +258,26 @@ describe('narrow navigation over native tabs', () => {
     expect(add).toHaveBeenCalledTimes(1)
     expect(toggle().getAttribute('aria-expanded')).toBe('false')
   })
+  it('C2：顶栏左收起 / 中可点标题触发器 / 右尾槽 / 横屏全屏，展开时标题整栏浮起覆盖左右按钮', () => {
+    const header = panel.querySelector<HTMLElement>('.dsh-bubble-header')!
+    const children = [...header.children]
+    const collapse = header.querySelector<HTMLElement>('[data-dsh-collapse-proxy]')!
+    const trigger = toggle()
+    const trailing = header.querySelector<HTMLElement>('[data-dsh-bubble-trailing]')!
+    const mode = header.querySelector<HTMLElement>('[data-dsh-mode-proxy]')!
+    expect(children.indexOf(collapse)).toBeLessThan(children.indexOf(trigger))
+    expect(children.indexOf(trigger)).toBeLessThan(children.indexOf(trailing))
+    expect(children.indexOf(trailing)).toBeLessThan(children.indexOf(mode))
+    expect(trigger.querySelector('.dsh-bubble-chevron')).not.toBeNull()
+    expect(header.hasAttribute('data-expanded')).toBe(false)
+
+    trigger.click()
+    expect(header.hasAttribute('data-expanded')).toBe(true)
+    expect(trigger.getAttribute('aria-expanded')).toBe('true')
+    trigger.click()
+    expect(header.hasAttribute('data-expanded')).toBe(false)
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+  })
 })
 
 describe('native order commits and gesture separation', () => {

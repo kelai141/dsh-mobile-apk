@@ -23,13 +23,31 @@ html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel][dat
   visibility: visible;
   transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out);
 }
-html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-heading { min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 14px; }
+html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-trigger {
+  min-width: 0; flex: 1 1 0; height: 36px;
+  display: inline-flex; align-items: center; justify-content: flex-start; gap: 4px;
+  padding: 0 8px; border: 0; border-radius: 999px;
+  background: transparent; color: var(--dsw-alias-label-primary);
+  font: inherit; text-align: start; cursor: pointer; -webkit-tap-highlight-color: transparent;
+  overflow: hidden;
+  transition: background-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+}
+html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-trigger:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-heading {
+  min-width: 0; flex: 0 1 auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 14px;
+}
 html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-heading [data-dockkit-tab-title] { max-width: 100%; }
+html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-chevron {
+  width: 14px; height: 14px; flex: none; color: var(--dsw-alias-label-secondary);
+  transition: transform 160ms ease;
+}
 html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-control,
 html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-close {
   flex: none; display: inline-flex; align-items: center; justify-content: center;
-  width: 44px; height: 44px; border: 0; border-radius: 999px;
-  padding: 10px; color: var(--dsw-alias-label-secondary); background: transparent;
+  width: 40px; height: 40px; border: 0; border-radius: 999px;
+  padding: 8px; color: var(--dsw-alias-label-secondary); background: transparent;
   font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent;
 }
 html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-control svg,
@@ -37,8 +55,19 @@ html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .ds
 html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-control:disabled { opacity: .4; cursor: default; }
 html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-control:hover,
 html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-close:hover { background: var(--dsw-alias-interactive-bg-hover); }
+html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-header[data-expanded] .dsh-bubble-trigger,
 html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] [data-dsh-sidebar-bubbles-toggle][aria-expanded='true'] {
-  background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary);
+  position: absolute; left: 8px; right: 8px; top: 50%; transform: translateY(-50%); z-index: 3;
+  height: calc(var(--dsh-bubble-header-height, 48px) - 8px);
+  padding: 0 14px; justify-content: space-between;
+  background: var(--dsh-bubble-pill-selected); color: var(--dsh-bubble-pill-selected-text);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .18);
+}
+html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] [data-dsh-sidebar-bubbles-toggle][aria-expanded='true'] .dsh-bubble-chevron {
+  transform: rotate(180deg); color: var(--dsh-bubble-pill-selected-text);
+}
+html[data-dsh-device-form='phone-portrait'] [data-dsh-bubble-panel] [data-dsh-mode-proxy] {
+  display: none;
 }
 html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] .dsh-bubble-mask { position: absolute; inset: 0; z-index: 75; background: transparent; }
 html:not([data-dsh-device-form='desktop-landscape']) [data-dsh-bubble-panel] {

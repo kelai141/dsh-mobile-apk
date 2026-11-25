@@ -40,6 +40,10 @@ export interface SidebarBubblesOptions {
    * 横屏停靠列点「全屏」无任何反应）。装配方用服务 API 直调，目标取挂载会话的活动停靠窗格。
    */
   readonly toggleFullscreen?: () => void
+  /** C2 顶栏：当前焦点标签或右侧尾槽容器变化时通知外部动作按钮宿主。 */
+  readonly onActiveTabChange?: (tab: TabRecord | undefined, trailing: HTMLElement | null) => void
+  /** C2 顶栏：标签气泡弹层开合变化，用于互斥关闭 `[↗]` 轻菜单。 */
+  readonly onOpenChange?: (open: boolean) => void
 }
 interface BubbleTab {
   record: TabRecord
@@ -92,11 +96,11 @@ function glyph(kind: string): SVGSVGElement {
     vdisplay: 'M2 3h16v11H2zM10 14v3m-4 0h8',
     close: 'm6 6 8 8M14 6l-8 8',
     tool: 'M3 3h6v6H3zm8 0h6v6h-6zM3 11h6v6H3zm8 0h6v6h-6z',
-    dots: 'M4 9h1v2H4zM9.5 9h1v2h-1zM15 9h1v2h-1z',
+    chevron: 'M6 8l4 4 4-4',
   }
   const path = document.createElementNS(svg.namespaceURI, 'path')
   path.setAttribute('d', paths[kind] ?? paths.tool)
-  path.setAttribute('fill', kind === 'dots' ? 'currentColor' : 'none')
+  path.setAttribute('fill', 'none')
   path.setAttribute('stroke', 'currentColor')
   path.setAttribute('stroke-width', '1.4')
   path.setAttribute('stroke-linecap', 'round')
@@ -136,8 +140,11 @@ export class SidebarBubbles {
   private panel: HTMLElement | null = null
   private owner: SessionId | undefined
   private header: HTMLDivElement | null = null
-  private heading: HTMLDivElement | null = null
+  private heading: HTMLSpanElement | null = null
   private toggle: HTMLButtonElement | null = null
+  private trailing: HTMLDivElement | null = null
+  private lastActiveKey = ''
+  private lastTrailing: HTMLElement | null = null
   private popover: HTMLElement | null = null
   private list: HTMLUListElement | null = null
   private actions: HTMLDivElement | null = null
@@ -260,16 +267,35 @@ export class SidebarBubbles {
     if (this.press && !this.tabs.some(tab => tab.record.id === this.press?.tab)) this.cancelPress()
     this.syncRows()
     const current = this.tabs.find(tab => tab.record.id === this.options.workspaces?.activeId) ?? this.tabs.find(tab => tab.selected && tab.source.closest('[data-dockkit-pane-active]')) ?? this.tabs.find(tab => tab.selected) ?? this.tabs[0]
-    if (current && this.heading) {
-      const signature = current.source.querySelector('[data-dockkit-tab-title]')?.innerHTML ?? current.record.title
-      if (this.heading.dataset.title !== signature) {
-        this.heading.replaceChildren(cloneTitle(current.source))
-        this.heading.dataset.title = signature
+    if (this.heading && this.toggle) {
+      if (current) {
+        const signature = current.source.querySelector('[data-dockkit-tab-title]')?.innerHTML ?? current.record.title
+        if (this.heading.dataset.title !== signature) {
+          this.heading.replaceChildren(cloneTitle(current.source))
+          this.heading.dataset.title = signature
+        }
+        this.heading.title = current.record.title
+        this.toggle.title = current.record.title
+      } else {
+        this.heading.replaceChildren()
+        delete this.heading.dataset.title
+        this.heading.removeAttribute('title')
+        this.toggle.removeAttribute('title')
       }
-      this.heading.title = current.record.title
+    }
+    const activeKey = current ? current.record.id + '\0' + current.record.contentId : ''
+    if (activeKey !== this.lastActiveKey || this.trailing !== this.lastTrailing) {
+      this.lastActiveKey = activeKey
+      this.lastTrailing = this.trailing
+      this.options.onActiveTabChange?.(current?.record, this.trailing)
     }
     this.syncControls(current)
     this.measure()
+  }
+
+  /** Programmatically collapse the tab bubble popover (used when opening the [↗] menu). */
+  closePopover(): void {
+    if (this.open) this.setOpen(false)
   }
 
   private mount(panel: HTMLElement, owner: SessionId): void {
@@ -282,14 +308,18 @@ export class SidebarBubbles {
     }
     const header = this.header = element('div', 'dsh-bubble-header')
     header.setAttribute('data-dsh-bubble-nav', '')
-    this.heading = element('div', 'dsh-bubble-heading')
-    this.toggle = button('dsh-bubble-control')
+    this.toggle = button('dsh-bubble-trigger')
     this.toggle.setAttribute('data-dsh-sidebar-bubbles-toggle', '')
     this.toggle.setAttribute('aria-label', this.options.t('toggle'))
     this.toggle.setAttribute('aria-expanded', 'false')
-    this.toggle.append(glyph('dots'))
+    this.heading = element('span', 'dsh-bubble-heading')
+    const chevron = glyph('chevron')
+    chevron.classList.add('dsh-bubble-chevron')
+    this.toggle.append(this.heading, chevron)
     this.toggle.addEventListener('click', () => { this.setOpen(!this.open, this.open) })
-    header.append(this.heading, this.toggle)
+    this.trailing = element('div', 'dsh-bubble-trailing')
+    this.trailing.setAttribute('data-dsh-bubble-trailing', '')
+    header.append(this.toggle, this.trailing)
     const popover = this.popover = element('nav', 'dsh-bubble-popover')
     popover.setAttribute('data-dsh-bubble-nav', '')
     popover.setAttribute('data-state', 'closed')
@@ -329,8 +359,12 @@ export class SidebarBubbles {
     this.native.clear()
     this.panel?.removeAttribute('data-dsh-bubble-panel')
     this.header?.remove(); this.popover?.remove(); this.mask?.remove()
+    const hadActive = this.lastActiveKey !== '' || this.lastTrailing !== null
+    this.lastActiveKey = ''; this.lastTrailing = null
+    if (hadActive) this.options.onActiveTabChange?.(undefined, null)
+    this.options.onOpenChange?.(false)
     this.panel = null; this.owner = undefined; this.header = null; this.heading = null
-    this.toggle = null; this.popover = null; this.list = null; this.mask = null; this.actions = null; this.status = null
+    this.toggle = null; this.trailing = null; this.popover = null; this.list = null; this.mask = null; this.actions = null; this.status = null
     document.documentElement.removeAttribute('data-dsh-popover-open')
     this.rows.clear(); this.tabs = []; this.controls = ''; this.controlSources = []; this.suppressClick = false
   }
@@ -416,7 +450,8 @@ export class SidebarBubbles {
         if (chrome && original.matches('[data-sidebar-right-mode]') && this.options.toggleFullscreen) this.options.toggleFullscreen()
         else forwardControlClick(original)
       })
-      if (chrome) this.header.insertBefore(proxy, this.toggle)
+      if (original.matches('[data-sidebar-right-toggle]')) this.header.insertBefore(proxy, this.toggle)
+      else if (chrome) this.header.append(proxy)
       else this.actions.append(proxy)
     }
     if (this.options.workspaces) {
@@ -460,7 +495,9 @@ export class SidebarBubbles {
     if (!this.popover || !this.toggle) return
     this.cancelPress()
     this.open = open
+    this.header?.toggleAttribute('data-expanded', open)
     this.popover.setAttribute('data-state', open ? 'open' : 'closed')
+    this.options.onOpenChange?.(open)
     if (this.collapseTimer !== null) clearTimeout(this.collapseTimer)
     this.collapseTimer = null
     // Native BrowserHost stays hidden until the exit animation finishes.
