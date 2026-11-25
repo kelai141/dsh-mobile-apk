@@ -67,6 +67,10 @@ internal object SnapshotTransaction {
   )
   const val MARKER_NAME = ".snapshot-transaction"
   private const val TMP_MARKER_NAME = ".snapshot-transaction.tmp"
+  private const val NARROWED_PROFILES_MARKER = ".profiles-narrowed"
+  private val ORPHAN_UPDATE_ARCHIVE_REGEX = Regex(
+    "^update-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\.tar\\.xz$",
+  )
 
   /**
    * 回滚收尾期链接重建的日志 tag。单独立 tag 是为了让「回滚不完整」这条在 logcat 里
@@ -354,7 +358,57 @@ internal object SnapshotTransaction {
       SnapshotFs.deletePath(dir)
       if (!SnapshotFs.exists(dir)) reclaimed += dir.name
     }
+    reclaimed += pruneOrphanUpdateArchives(filesDir)
     return reclaimed
+  }
+
+  /**
+   * Sweep orphaned `files/update-<uuid>.tar.xz` archives left behind by killed/failed online updates.
+   * Never touches symlinks or an explicitly active download file.
+   */
+  fun pruneOrphanUpdateArchives(filesDir: File, activeFile: File? = null): List<String> {
+    val activeCanon = try {
+      activeFile?.canonicalPath
+    } catch (_: Throwable) {
+      activeFile?.absolutePath
+    }
+    val removed = mutableListOf<String>()
+    for (child in filesDir.listFiles() ?: emptyArray()) {
+      if (!ORPHAN_UPDATE_ARCHIVE_REGEX.matches(child.name)) continue
+      if (SnapshotFs.isSymbolicLink(child) || !child.isFile) continue
+      val childCanon = try {
+        child.canonicalPath
+      } catch (_: Throwable) {
+        child.absolutePath
+      }
+      if (activeCanon != null && childCanon == activeCanon) continue
+      SnapshotFs.deletePath(child)
+      if (!SnapshotFs.exists(child)) removed += child.name
+    }
+    return removed
+  }
+
+  /**
+   * Pre-extraction space budget combining staged extraction output, narrowed profiles backup,
+   * and metadata slack so ENOSPC aborts before writing any stage files.
+   */
+  fun preExtractionRequiredBytes(
+    stageUncompressedBytes: Long,
+    liveHomeDir: File,
+    stagedProfilesDir: File? = null,
+  ): Long {
+    val liveProfiles = File(File(liveHomeDir, ".dsh"), "profiles")
+    val backupBytes = if (stagedProfilesDir != null && SnapshotFs.exists(stagedProfilesDir)) {
+      narrowedProfilesBackupStats(
+        stagedProfiles = stagedProfilesDir,
+        liveProfiles = liveProfiles,
+        userFacingFiles = profileUserFacingFiles(stagedProfilesDir),
+      ).bytes
+    } else {
+      estimateFactoryProfilesBytes(liveProfiles)
+    }
+    val stageNeed = stageUncompressedBytes.coerceAtLeast(0L)
+    return stageNeed + backupBytes + backupBytes / 4 + 64L * 1024L * 1024L
   }
 
   /** 回收年龄门槛：只动「明显不再属于进行中事务」的残渣（见 [reclaimResidue]）。 */
@@ -593,9 +647,10 @@ internal object SnapshotTransaction {
     // 余量取 25% + 64MB：覆盖补入文件与文件系统元数据（小文件多时块开销可观）。
     if (spaceCheck != null && purpose == Purpose.FACTORY) {
       val liveProfiles = File(File(homeDir, ".dsh"), "profiles")
-      val backupBytes = SnapshotFs.sizeOf(liveProfiles)
       val stagedProfiles = File(File(stagedRoot, "home/.dsh"), "profiles")
-      val preserved = preservedBytes(stagedProfiles, liveProfiles, profileUserFacingFiles(stagedProfiles))
+      val userFacingFiles = profileUserFacingFiles(stagedProfiles)
+      val backupBytes = narrowedProfilesBackupStats(stagedProfiles, liveProfiles, userFacingFiles).bytes
+      val preserved = preservedBytes(stagedProfiles, liveProfiles, userFacingFiles)
       val required = backupBytes + preserved + backupBytes / 4 + 64L * 1024L * 1024L
       val refusal = spaceCheck(required)
       if (refusal != null) throw InsufficientSpaceException(required, refusal)
@@ -945,17 +1000,18 @@ internal object SnapshotTransaction {
     links: LinkPrimitives = PRODUCTION_LINKS,
     preserveCopy: (File, File) -> Unit = { from, to -> Files.copy(from.toPath(), to.toPath(), REPLACE_EXISTING) },
   ) {
-    // 工厂拥有的 profile 判定见 [isFactoryOwnedProfile]（迁移清退前逐个 profile 用）。
+    val userFacingFiles = profileUserFacingFiles(stagedProfiles)
     // ① 备份先写临时名（拷贝失败/被杀 = live 与 journal 都不受影响）
     val copying = File(previousProfiles.parentFile, previousProfiles.name + ".copying")
     SnapshotFs.deletePath(copying)
     SnapshotFs.deletePath(previousProfiles)
     SnapshotFs.createDirectories(previousProfiles.parentFile ?: filesDir)
-    copyRecursivelyStrict(liveProfiles, copying, links)
-    // ①b 备份对账（issue #273 ①）：残缺就**响亮失败**，绝不让它走到 ② 被当成可信备份。
-    // 判据是条目数 + **符号链接数** + 字节数三项同时齐平——上一行现在会复制链接本体，
-    // 因此链接数不再天然相等；对账正是把「复制链接这一步被改坏/被跳过」变成构建期可见的关键。
-    verifyBackupComplete(liveProfiles, copying)
+    val backupPlan = copyNarrowedProfilesBackup(stagedProfiles, liveProfiles, copying, links, userFacingFiles)
+    // ①b 备份对账（issue #273 ①）：按实际收窄规划的 TreeStats 逐项齐平，残缺就响亮失败。
+    verifyBackupStatsComplete(liveProfiles, copying, backupPlan.expectedStats)
+    if (backupPlan.narrowed) {
+      writeNarrowedMarker(copying, backupPlan.addedRelPaths)
+    }
     // ② 备份完整落位（同目录原子 rename）后才记账——此后 rollbackEntry 信任 previous。
     // issue #271：rename 的目标必须**已清空**，用严格版（删不净即抛，绝不带着非空目标去 move）。
     SnapshotFs.deletePathStrict(previousProfiles)
@@ -968,68 +1024,42 @@ internal object SnapshotTransaction {
       // 旧实现把「并集」规则递归套到嵌套清单，只合并 dependencies/bundles 而丢掉工厂新增的
       // exports 等字段，live 树因此变成「旧清单 + 新文件」的混合体，插件跨包 import
       // "./route-auth" 直接 ERR_PACKAGE_PATH_NOT_EXPORTED（引擎 exit=1）。
-      val userFacingFiles = profileUserFacingFiles(stagedProfiles)
       mergeTree(stagedProfiles, liveProfiles, notes, userFacingFiles, preserveCopy, links)
       reconcileRemovedProfilePlugins(liveProfiles, stagedProfiles, notes)
       val suffix = if (notes.isEmpty()) "" else "；工厂语义纠正 " + notes.size + " 处"
       onEntry("home/.dsh/profiles (merged" + suffix + ")")
     } catch (t: Throwable) {
-      // 合并失败：整目录回滚到 live 原状，再把异常抛给调用方（中止启动，正常 recover）。
-      //
-      // 【0.14.1 升级路径 P0 修复】旧实现是裸的三行：
-      //     SnapshotFs.deletePath(liveProfiles)
-      //     SnapshotFs.move(previousProfiles, liveProfiles)
-      //     throw t
-      // 设备实测（16384 覆盖安装 0.14.0 → 0.14.1）暴露两个缺陷，二者叠加使升级**永久卡死**：
-      //   ① `deletePath` 会**逐项容错**（删不掉的子项记 onFailure 后继续），因此它可能返回而
-      //      liveProfiles **仍非空**；紧接着把目录 move 到非空目标 → `FileSystemException:
-      //      ... Directory not empty`。
-      //   ② 由于 ① 抛出的新异常取代了 `throw t`，**原始异常（真因）被完全掩盖**：日志里只剩
-      //      「Directory not empty」，排障者拿不到真正的失败原因（与用户反馈一「日志与事实不符」
-      //      同一病根）。连带 `EngineManager` 的 rollback 走同一路径，同样撞此错误 →
-      //      「rollback failed; recovery marker retained」→ marker 永久留存、每次启动重试、
-      //      每次同样失败（实测重启 3 次仍 SWAPPING），live 插件树半合并（1/10）。
-      //
-      // 修法：补偿动作**一律不得掩盖真因**，且删除失败必须有兜底。抽成
-      // [compensateFailedProfilesMerge] 以便**行为级**单测（文本断言锁不住这类缺陷，
-      // 本轮实测过：把 addSuppressed 删掉，纯文本判据照样绿）。
-      throw compensateFailedProfilesMerge(filesDir, liveProfiles, previousProfiles, t)
+      throw compensateFailedProfilesMerge(filesDir, liveProfiles, previousProfiles, t, links)
     }
   }
 
-  /**
-   * 合并失败后的补偿：把 live profiles 恢复成 [previousProfiles]（整个函数**总是**抛
-   * [original]，绝不把补偿自身的失败抛出去）。
-   *
-   * **为什么要单独抽出来**（0.14.1 升级路径 P0）：旧实现是内联三行
-   * `deletePath(live); move(previous, live); throw original`，两个缺陷叠加使升级永久卡死：
-   *  1. `SnapshotFs.deletePath` 是**逐项容错**的（删不掉的子项记 onFailure 后继续），所以它
-   *     可能正常返回而目录**仍非空**；紧接着 `move` 到非空目标 → `FileSystemException:
-   *     … Directory not empty`。
-   *  2. 该次生异常**取代了** `throw original` → 真因（原始异常 + 栈）被彻底掩盖。
-   *
-   * 设备实证（16384，覆盖安装 0.14.0 → 0.14.1）：真因被掩盖成
-   * `Directory not empty`，`EngineManager` 的 rollback 走同一路径也失败 →
-   * `rollback failed; recovery marker retained` → marker 永久留在 SWAPPING、每次启动重试、
-   * 每次同样失败（重启 3 次仍 SWAPPING），live 插件树半合并 1/10 → 页面 `Iterator is not defined`。
-   *
-   * @return 本函数**始终抛出** [original]；返回值只为满足 Kotlin 的类型推断（`throw` 表达式），
-   *   调用方写 `throw compensate(...)`，语义上等价于 `throw original`。
-   */
   private fun compensateFailedProfilesMerge(
     filesDir: File,
     liveProfiles: File,
     previousProfiles: File,
     original: Throwable,
+  ): Throwable = compensateFailedProfilesMerge(filesDir, liveProfiles, previousProfiles, original, PRODUCTION_LINKS)
+
+  private fun compensateFailedProfilesMerge(
+    filesDir: File,
+    liveProfiles: File,
+    previousProfiles: File,
+    original: Throwable,
+    links: LinkPrimitives,
   ): Throwable {
     try {
-      SnapshotFs.deletePath(liveProfiles)
-      if (SnapshotFs.exists(liveProfiles)) {
-        // 删不净（deletePath 逐项容错）→ 不能 move 到非空目标。
-        // 改名只动父目录项、不递归子项，是此处最后可用的手段。
-        SnapshotFs.move(liveProfiles, File(filesDir, liveProfiles.name + ".failed-" + System.currentTimeMillis()))
+      val narrowedMarker = File(previousProfiles, NARROWED_PROFILES_MARKER)
+      if (narrowedMarker.isFile) {
+        restoreNarrowedProfiles(previousProfiles, liveProfiles, links)
+      } else {
+        SnapshotFs.deletePath(liveProfiles)
+        if (SnapshotFs.exists(liveProfiles)) {
+          // 删不净（deletePath 逐项容错）→ 不能 move 到非空目标。
+          // 改名只动父目录项、不递归子项，是此处最后可用的手段。
+          SnapshotFs.move(liveProfiles, File(filesDir, liveProfiles.name + ".failed-" + System.currentTimeMillis()))
+        }
+        SnapshotFs.move(previousProfiles, liveProfiles)
       }
-      SnapshotFs.move(previousProfiles, liveProfiles)
     } catch (compensation: Throwable) {
       // 原始异常优先：补偿失败仅作 suppressed 附注，绝不取代真因。
       original.addSuppressed(compensation)
@@ -1166,8 +1196,311 @@ internal object SnapshotTransaction {
    *
    * @throws SnapshotFsException code=`snapshot-backup-incomplete` —— 明确报错，**绝不**把半份备份当 live 搬回。
    */
-  private fun verifyBackupComplete(source: File, copied: File) {
-    val want = SnapshotFs.treeStats(source)
+  private data class ProfilesBackupPlan(
+    val narrowed: Boolean,
+    val expectedStats: SnapshotFs.TreeStats,
+    val addedRelPaths: List<String>,
+  )
+
+  private fun allProfilesRemovedPackageNames(): Set<String> =
+    REMOVED_PROFILE_PLUGINS.filter { it.allProfiles }.mapTo(HashSet()) { it.packageName }
+
+  private fun estimateFactoryProfilesBytes(liveProfiles: File): Long {
+    if (!SnapshotFs.exists(liveProfiles)) return 0L
+    val retiredPackages = allProfilesRemovedPackageNames()
+    var total = 0L
+    for (profile in liveProfiles.listFiles() ?: emptyArray()) {
+      if (SnapshotFs.isSymbolicLink(profile)) continue
+      if (isFactoryOwnedProfile(profile)) {
+        total += SnapshotFs.sizeOf(profile)
+      } else if (profile.isDirectory) {
+        for (manifestName in listOf("package.json", "cordis.patch.yml")) {
+          val manifest = File(profile, manifestName)
+          if (manifest.isFile && !SnapshotFs.isSymbolicLink(manifest)) total += manifest.length()
+        }
+        val nm = File(profile, "node_modules")
+        if (nm.isDirectory && !SnapshotFs.isSymbolicLink(nm)) {
+          for (pkgName in retiredPackages) {
+            val pkgDir = File(nm, pkgName)
+            if (SnapshotFs.exists(pkgDir)) total += SnapshotFs.sizeOf(pkgDir)
+          }
+        }
+      }
+    }
+    return total
+  }
+
+  private fun visitNarrowedProfileBackup(
+    stagedProfiles: File,
+    liveProfiles: File,
+    userFacingFiles: Set<String>,
+    links: LinkPrimitives,
+    copyInto: File? = null,
+  ): ProfilesBackupPlan {
+    if (!SnapshotFs.exists(liveProfiles)) {
+      return ProfilesBackupPlan(false, SnapshotFs.TreeStats(0L, 0L, 0L), emptyList())
+    }
+    if (!SnapshotFs.exists(stagedProfiles)) {
+      if (copyInto != null) copyRecursivelyStrict(liveProfiles, copyInto, links)
+      return ProfilesBackupPlan(false, SnapshotFs.treeStats(liveProfiles), emptyList())
+    }
+    val stagedNames = (stagedProfiles.listFiles() ?: emptyArray())
+      .filter { it.isDirectory && !SnapshotFs.isSymbolicLink(it) }
+      .mapTo(HashSet()) { it.name }
+    val retiredPackages = allProfilesRemovedPackageNames()
+    var entries = 0L
+    var linkCount = 0L
+    var bytes = 0L
+    val added = mutableListOf<String>()
+
+    fun recordAndCopyLeaf(liveItem: File, destItem: File?) {
+      entries += 1
+      if (links.isLink(liveItem)) {
+        // Match SnapshotFs.treeStats(copied) which inspects OS symbolic links rather than test doubles.
+        if (SnapshotFs.isSymbolicLink(liveItem)) linkCount += 1
+        if (destItem != null) {
+          val target = links.linkTargetOf(liveItem)
+          destItem.parentFile?.let { SnapshotFs.createDirectories(it) }
+          if (SnapshotFs.exists(destItem)) SnapshotFs.deletePath(destItem)
+          links.createLink(destItem, target)
+        }
+        return
+      }
+      val attrs = Files.readAttributes(liveItem.toPath(), BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+      if (attrs.isRegularFile) {
+        bytes += attrs.size()
+        if (destItem != null) {
+          destItem.parentFile?.let { SnapshotFs.createDirectories(it) }
+          Files.copy(liveItem.toPath(), destItem.toPath(), REPLACE_EXISTING, COPY_ATTRIBUTES)
+        }
+      }
+    }
+
+    fun copyWholeForStats(src: File, dst: File?) {
+      if (links.isLink(src)) {
+        recordAndCopyLeaf(src, dst)
+        return
+      }
+      val attrs = Files.readAttributes(src.toPath(), BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+      if (attrs.isDirectory) {
+        entries += 1
+        if (dst != null) SnapshotFs.createDirectories(dst)
+        for (child in src.listFiles() ?: emptyArray()) {
+          copyWholeForStats(child, dst?.let { File(it, child.name) })
+        }
+      } else if (attrs.isRegularFile) {
+        recordAndCopyLeaf(src, dst)
+      }
+    }
+
+    fun copyNarrowedFactoryDir(stagedDir: File?, liveDir: File, dstDir: File?, mustInclude: Boolean) {
+      if (links.isLink(liveDir)) {
+        recordAndCopyLeaf(liveDir, dstDir)
+        return
+      }
+      val attrs = Files.readAttributes(liveDir.toPath(), BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+      if (attrs.isDirectory) {
+        val children = liveDir.listFiles() ?: emptyArray()
+        val childDsts = mutableListOf<() -> Unit>()
+        var hasContent = false
+        for (child in children) {
+          val stagedChild = stagedDir?.takeIf { it.isDirectory && !SnapshotFs.isSymbolicLink(it) }?.let { File(it, child.name) }
+          val childDst = dstDir?.let { File(it, child.name) }
+          if (links.isLink(child)) {
+            hasContent = true
+            childDsts += { recordAndCopyLeaf(child, childDst) }
+            continue
+          }
+          val childAttrs = Files.readAttributes(child.toPath(), BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+          if (childAttrs.isDirectory) {
+            val beforeEntries = entries
+            val stagedSubDir = if (stagedChild != null && stagedChild.isDirectory && !SnapshotFs.isSymbolicLink(stagedChild)) stagedChild else null
+            copyNarrowedFactoryDir(stagedSubDir, child, childDst, mustInclude = false)
+            if (entries > beforeEntries) hasContent = true
+          } else if (childAttrs.isRegularFile) {
+            val userFacing = stagedChild != null && stagedChild.absolutePath in userFacingFiles
+            val identicalFactory = !userFacing &&
+              stagedChild != null &&
+              stagedChild.isFile &&
+              !SnapshotFs.isSymbolicLink(stagedChild) &&
+              sameContent(stagedChild, child)
+            if (!identicalFactory) {
+              hasContent = true
+              childDsts += { recordAndCopyLeaf(child, childDst) }
+            }
+          }
+        }
+        if (mustInclude || hasContent) {
+          entries += 1
+          if (dstDir != null) SnapshotFs.createDirectories(dstDir)
+        }
+        for (run in childDsts) run()
+      } else if (attrs.isRegularFile) {
+        val userFacing = stagedDir != null && stagedDir.absolutePath in userFacingFiles
+        val identicalFactory = !userFacing &&
+          stagedDir != null &&
+          stagedDir.isFile &&
+          !SnapshotFs.isSymbolicLink(stagedDir) &&
+          sameContent(stagedDir, liveDir)
+        if (mustInclude || !identicalFactory) {
+          recordAndCopyLeaf(liveDir, dstDir)
+        }
+      }
+    }
+
+    fun collectAddedPaths(stagedDir: File, liveDir: File, relPrefix: String) {
+      if (!SnapshotFs.exists(liveDir)) {
+        if (relPrefix.isNotEmpty()) added += relPrefix
+        return
+      }
+      if (!stagedDir.isDirectory || SnapshotFs.isSymbolicLink(stagedDir) || !liveDir.isDirectory || SnapshotFs.isSymbolicLink(liveDir)) {
+        return
+      }
+      for (child in stagedDir.listFiles() ?: emptyArray()) {
+        val rel = if (relPrefix.isEmpty()) child.name else relPrefix + "/" + child.name
+        val liveChild = File(liveDir, child.name)
+        if (!isEntryPresentNoFollow(liveChild, links)) {
+          added += rel
+        } else if (child.isDirectory && !SnapshotFs.isSymbolicLink(child)) {
+          collectAddedPaths(child, liveChild, rel)
+        }
+      }
+    }
+
+    if (copyInto != null) SnapshotFs.createDirectories(copyInto)
+    for (profile in liveProfiles.listFiles() ?: emptyArray()) {
+      val dstProfile = copyInto?.let { File(it, profile.name) }
+      if (links.isLink(profile) || profile.isFile) {
+        recordAndCopyLeaf(profile, dstProfile)
+        continue
+      }
+      if (!profile.isDirectory) continue
+      val isFactory = profile.name in stagedNames || isFactoryOwnedProfile(profile)
+      if (isFactory) {
+        val stagedProfile = File(stagedProfiles, profile.name).takeIf { SnapshotFs.exists(it) }
+        copyNarrowedFactoryDir(stagedProfile, profile, dstProfile, mustInclude = true)
+      } else {
+        entries += 1
+        if (dstProfile != null) SnapshotFs.createDirectories(dstProfile)
+        for (manifestName in listOf("package.json", "cordis.patch.yml")) {
+          val liveFile = File(profile, manifestName)
+          if (liveFile.isFile && !SnapshotFs.isSymbolicLink(liveFile)) {
+            recordAndCopyLeaf(liveFile, dstProfile?.let { File(it, manifestName) })
+          }
+        }
+        val liveNm = File(profile, "node_modules")
+        if (liveNm.isDirectory && !SnapshotFs.isSymbolicLink(liveNm)) {
+          var createdNmDir = false
+          val createdScopes = HashSet<String>()
+          for (pkgName in retiredPackages) {
+            val livePkg = File(liveNm, pkgName)
+            if (SnapshotFs.exists(livePkg)) {
+              if (!createdNmDir) {
+                entries += 1
+                if (dstProfile != null) SnapshotFs.createDirectories(File(dstProfile, "node_modules"))
+                createdNmDir = true
+              }
+              val slash = pkgName.indexOf('/')
+              if (slash > 0) {
+                val scopeName = pkgName.substring(0, slash)
+                if (createdScopes.add(scopeName)) {
+                  entries += 1
+                  if (dstProfile != null) SnapshotFs.createDirectories(File(File(dstProfile, "node_modules"), scopeName))
+                }
+              }
+              copyWholeForStats(livePkg, dstProfile?.let { File(File(it, "node_modules"), pkgName) })
+            }
+          }
+        }
+      }
+    }
+    collectAddedPaths(stagedProfiles, liveProfiles, "")
+    return ProfilesBackupPlan(true, SnapshotFs.TreeStats(entries, linkCount, bytes), added)
+  }
+
+  private fun narrowedProfilesBackupStats(
+    stagedProfiles: File,
+    liveProfiles: File,
+    userFacingFiles: Set<String>,
+    links: LinkPrimitives = PRODUCTION_LINKS,
+  ): SnapshotFs.TreeStats =
+    visitNarrowedProfileBackup(stagedProfiles, liveProfiles, userFacingFiles, links, copyInto = null).expectedStats
+
+  private fun copyNarrowedProfilesBackup(
+    stagedProfiles: File,
+    liveProfiles: File,
+    copying: File,
+    links: LinkPrimitives,
+    userFacingFiles: Set<String>,
+  ): ProfilesBackupPlan =
+    visitNarrowedProfileBackup(stagedProfiles, liveProfiles, userFacingFiles, links, copyInto = copying)
+
+  private fun writeNarrowedMarker(copying: File, addedRelPaths: List<String>) {
+    val lines = buildString {
+      append("v1\n")
+      for (rel in addedRelPaths) {
+        append("added=").append(rel).append('\n')
+      }
+    }
+    File(copying, NARROWED_PROFILES_MARKER).writeText(lines)
+  }
+
+  private fun restoreNarrowedProfiles(
+    displacedProfiles: File,
+    liveProfiles: File,
+    links: LinkPrimitives = PRODUCTION_LINKS,
+  ) {
+    SnapshotFs.createDirectories(liveProfiles)
+    val markerFile = File(displacedProfiles, NARROWED_PROFILES_MARKER)
+    if (markerFile.isFile) {
+      for (line in markerFile.readLines()) {
+        if (!line.startsWith("added=")) continue
+        val rel = line.substringAfter("added=")
+        if (rel.isEmpty() || rel.startsWith("/") || rel.split('/').any { it == ".." || it.isEmpty() }) continue
+        SnapshotFs.deletePath(File(liveProfiles, rel))
+      }
+    }
+    // Remove .pre-<name>-* artifacts generated by failed merge before restoring original files.
+    fun cleanPreBackups(dir: File) {
+      if (!dir.isDirectory || SnapshotFs.isSymbolicLink(dir)) return
+      for (child in dir.listFiles() ?: emptyArray()) {
+        if (child.name.startsWith(".pre-") && !SnapshotFs.isSymbolicLink(child)) {
+          SnapshotFs.deletePath(child)
+        } else if (child.isDirectory && !SnapshotFs.isSymbolicLink(child)) {
+          cleanPreBackups(child)
+        }
+      }
+    }
+    cleanPreBackups(liveProfiles)
+    fun overlayRestore(srcDir: File, dstDir: File) {
+      SnapshotFs.createDirectories(dstDir)
+      for (child in srcDir.listFiles() ?: emptyArray()) {
+        if (srcDir == displacedProfiles && child.name == NARROWED_PROFILES_MARKER) continue
+        val dstChild = File(dstDir, child.name)
+        when {
+          links.isLink(child) -> {
+            val target = links.linkTargetOf(child)
+            if (isEntryPresentNoFollow(dstChild, links)) SnapshotFs.deletePathStrict(dstChild)
+            links.createLink(dstChild, target)
+          }
+          child.isDirectory && !SnapshotFs.isSymbolicLink(child) -> {
+            if (isEntryPresentNoFollow(dstChild, links) && (!dstChild.isDirectory || links.isLink(dstChild))) {
+              SnapshotFs.deletePathStrict(dstChild)
+            }
+            overlayRestore(child, dstChild)
+          }
+          else -> {
+            if (isEntryPresentNoFollow(dstChild, links)) SnapshotFs.deletePathStrict(dstChild)
+            SnapshotFs.move(child, dstChild)
+          }
+        }
+      }
+    }
+    overlayRestore(displacedProfiles, liveProfiles)
+    SnapshotFs.deletePath(displacedProfiles)
+  }
+
+  private fun verifyBackupStatsComplete(source: File, copied: File, want: SnapshotFs.TreeStats) {
     val got = SnapshotFs.treeStats(copied)
     val problems = mutableListOf<String>()
     if (got.entries != want.entries) problems += "条目数 " + got.entries + " != " + want.entries
@@ -1182,6 +1515,10 @@ internal object SnapshotTransaction {
         + "。残缺的备份绝不能当 live 搬回（会丢符号链接与文件，pnpm 结构崩掉、模块解析失败）。"
         + "已中止本次事务，live 未动、可重试。",
     )
+  }
+
+  private fun verifyBackupComplete(source: File, copied: File) {
+    verifyBackupStatsComplete(source, copied, SnapshotFs.treeStats(source))
   }
 
   /**
@@ -1766,8 +2103,12 @@ internal object SnapshotTransaction {
   ) {
     val staged = File(stagedRoot, name)
     val live = livePath(name, usrDir, homeDir)
-    val displaced = File(previous, name)
+      val displaced = File(previous, name)
     if (SnapshotFs.exists(displaced)) {
+      if (name.endsWith("profiles") && File(displaced, NARROWED_PROFILES_MARKER).isFile) {
+        restoreNarrowedProfiles(displaced, live, links)
+        return
+      }
       // 【0.14.1 升级路径 P0，与 mergeProfiles 补偿同源】容错版 `SnapshotFs.deletePath` 是**逐项容错**的：
       // 它可能正常返回而 `live` **仍非空**（删不掉的子项只记 onFailure 后继续）。随后
       // `move(displaced, live)` 就会抛 `FileSystemException: … Directory not empty`。

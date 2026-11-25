@@ -331,6 +331,8 @@ object FileIncoming {
   ): List<String> = cleanupDeletions(entries, pendingPaths, queuedPaths)
 
   /** Apply the TTL policy to a real directory. Null references mean unreadable: skip deletion. */
+  private const val META_MAX_ENTRIES = 256
+
   internal fun sweepWorkspace(
     dir: File,
     pendingPaths: List<String>?,
@@ -347,7 +349,62 @@ object FileIncoming {
       val last = file.lastModified()
       if (last > 0 && now - last > ttlMs && file.delete()) removed++
     }
+    compactMeta(dir, pendingPaths, queuedPaths, now, ttlMs)
     return removed
+  }
+
+  /**
+   * Compact `.meta.ndjson`: deduplicate by path (keeping latest timestamp), drop entries
+   * older than [ttlMs] unless referenced by [pendingPaths]/[queuedPaths] or still on disk,
+   * and bound retained history to [META_MAX_ENTRIES].
+   */
+  internal fun compactMeta(
+    dir: File,
+    pendingPaths: List<String>,
+    queuedPaths: List<String>,
+    now: Long,
+    ttlMs: Long,
+    maxEntries: Int = META_MAX_ENTRIES,
+  ): Boolean {
+    val meta = File(dir, META_ENTRY)
+    if (!meta.isFile) return false
+    val rawLines = try {
+      meta.readLines()
+    } catch (_: Exception) {
+      return false
+    }
+    val protectedPaths = HashSet<String>().apply {
+      addAll(pendingPaths)
+      addAll(queuedPaths)
+    }
+    val latestByPath = LinkedHashMap<String, Pair<Long, String>>()
+    for (line in rawLines) {
+      if (line.isBlank()) continue
+      val tab = line.indexOf('\t')
+      if (tab <= 0) continue
+      val ts = line.substring(0, tab).toLongOrNull() ?: continue
+      val path = line.substring(tab + 1).trim()
+      if (path.isEmpty()) continue
+      val file = File(path)
+      val alive = file.isFile || path in protectedPaths || (now - ts <= ttlMs)
+      if (!alive) continue
+      val prev = latestByPath[path]
+      if (prev == null || ts >= prev.first) {
+        latestByPath.remove(path)
+        latestByPath[path] = ts to path
+      }
+    }
+    val ordered = latestByPath.values.toList()
+    val kept = if (ordered.size > maxEntries) ordered.subList(ordered.size - maxEntries, ordered.size) else ordered
+    val rewritten = kept.joinToString("") { (ts, path) -> "$ts\t$path\n" }
+    val original = rawLines.joinToString("\n") + if (rawLines.isNotEmpty()) "\n" else ""
+    if (rewritten == original) return false
+    return try {
+      AtomicFileReplace.writeText(meta, rewritten)
+      true
+    } catch (_: Exception) {
+      false
+    }
   }
 
   /** null = read failure. Callers that delete files must skip the pass rather than assume empty. */

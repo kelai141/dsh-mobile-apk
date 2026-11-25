@@ -380,6 +380,20 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
           return installEnvironment(runtime.id, candidate)
         })
       } else {
+        if (window.androidBridge?.linuxAssetPrepare) {
+          const manifest = await fetchManifest({ pinned: true })
+          const { runtime, specs } = assetsFor(manifest, {
+            runtimeId: selectedRuntime !== '' ? selectedRuntime : undefined,
+            architecture: status?.architecture,
+          })
+          if (runtime !== null && specs.length > 0) {
+            setPhase('assets')
+            setProgress({ stage: 'assets', index: 0, total: specs.length, bytes: totalBytes(specs) })
+            await prepareAssets(window.androidBridge, specs, (item: AssetProgress) => {
+              setProgress({ stage: 'assets', ...item })
+            }, undefined, undefined, source)
+          }
+        }
         installing()
         next = await reinstallEnvironment()
       }

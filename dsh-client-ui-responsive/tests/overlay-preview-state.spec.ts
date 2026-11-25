@@ -30,12 +30,16 @@ describe('native composer event invalidation and image projection', () => {
   })
   it('uses only owned blob URLs, preserves aspect ratio, bounds JPEG payload and caches decoding', async () => {
     const f = fixture(), close = vi.fn()
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, blob: async () => new Blob(['image']) })))
+    const fetch = vi.fn(async () => ({ ok: true, blob: async () => new Blob(['image']) }))
+    vi.stubGlobal('fetch', fetch)
     const decode = vi.fn(async () => ({ width: 256, height: 128, close }))
     vi.stubGlobal('createImageBitmap', decode)
     const drawImage = vi.fn()
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as never)
     vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/jpeg;base64,AAAA')
+    expect(JSON.parse(f.host.state()).attachments[0].thumbnail).toBeUndefined()
+    expect(fetch).not.toHaveBeenCalled()
+    expect(JSON.parse(String(f.host.api().previewAttachment('image1', 's1'))).ok).toBe(true)
     expect(JSON.parse(f.host.state()).attachments[0].thumbnail).toBe('')
     await vi.waitFor(() => expect(close).toHaveBeenCalledOnce())
     expect(decode.mock.calls[0]?.[1]).toMatchObject({ resizeWidth: 256, resizeHeight: 128 })
@@ -45,6 +49,7 @@ describe('native composer event invalidation and image projection', () => {
   it('does not fetch arbitrary remote URLs or return oversized image data', async () => {
     const f = fixture(), fetch = vi.fn(async () => ({ ok: true, blob: async () => new Blob() }))
     vi.stubGlobal('fetch', fetch); vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 256, height: 128, close() {} })))
+    expect(JSON.parse(String(f.host.api().previewAttachment('image1', 's1'))).ok).toBe(true)
     f.draft.previewUrl = 'https://untrusted.invalid/image'
     expect(JSON.parse(f.host.state()).attachments[0].thumbnail).toBe(''); expect(fetch).not.toHaveBeenCalled()
     f.draft.previewUrl = 'blob:owned'

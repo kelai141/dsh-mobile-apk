@@ -1134,6 +1134,44 @@ object LogCollector {
     val file = File(dir, "dsh-$day.log")
     if (shouldRotate(file)) rotate(file)
     file.appendText(text)
+    pruneDayLogs(dir, activeDay = day)
+  }
+
+  private const val DAY_LOG_MAX_FILES = 21
+  private const val DAY_LOG_MAX_TOTAL_BYTES = 32L * 1024 * 1024
+  private val DAY_LOG_PATTERN = Regex("^dsh-(\\d{4}-\\d{2}-\\d{2})(?:\\.(\\d+))?\\.log$")
+
+  /** Retain newest daily log files within count and total byte budgets, never deleting [activeDay]. */
+  internal fun pruneDayLogs(
+    dir: File,
+    activeDay: String,
+    maxKeepFiles: Int = DAY_LOG_MAX_FILES,
+    maxTotalBytes: Long = DAY_LOG_MAX_TOTAL_BYTES,
+  ): Int {
+    if (!dir.isDirectory) return 0
+    val candidates = (dir.listFiles() ?: return 0)
+      .filter { f ->
+        if (!f.isFile || SnapshotFs.isSymbolicLink(f)) return@filter false
+        val m = DAY_LOG_PATTERN.matchEntire(f.name) ?: return@filter false
+        m.groupValues[1] != activeDay
+      }
+      .sortedWith(compareBy<File> { it.lastModified() }.thenBy { it.name })
+    var totalBytes = (dir.listFiles() ?: emptyArray())
+      .filter { it.isFile && !SnapshotFs.isSymbolicLink(it) && DAY_LOG_PATTERN.matches(it.name) }
+      .sumOf { it.length() }
+    var totalCount = (dir.listFiles() ?: emptyArray())
+      .count { it.isFile && !SnapshotFs.isSymbolicLink(it) && DAY_LOG_PATTERN.matches(it.name) }
+    var removed = 0
+    for (old in candidates) {
+      if (totalCount <= maxKeepFiles && totalBytes <= maxTotalBytes) break
+      val len = old.length()
+      if (old.delete()) {
+        totalCount -= 1
+        totalBytes -= len
+        removed += 1
+      }
+    }
+    return removed
   }
 
   /**

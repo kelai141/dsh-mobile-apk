@@ -2856,4 +2856,106 @@ class SnapshotTransactionTest {
       SnapshotFs.deletePath(filesDir)
     }
   }
+
+  @Test
+  fun pruneOrphanUpdateArchivesDeletesOnlyUnreferencedUpdateTarballs() {
+    val filesDir = tempDir()
+    try {
+      val orphan1 = File(filesDir, "update-11111111-1111-1111-1111-111111111111.tar.xz").apply { writeText("stale") }
+      val active = File(filesDir, "update-22222222-2222-2222-2222-222222222222.tar.xz").apply { writeText("active") }
+      val unrelated = File(filesDir, "user-backup.tar.xz").apply { writeText("keep") }
+
+      val removed = SnapshotTransaction.pruneOrphanUpdateArchives(filesDir, activeFile = active)
+      assertEquals(listOf(orphan1.name), removed)
+      assertFalse(orphan1.exists())
+      assertTrue(active.exists())
+      assertTrue(unrelated.exists())
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  @Test
+  fun narrowedProfilesBackupSkipsUnchangedAndUserCustomTreesWhileRestoringBothOnRollback() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(live, "old-node", "old-profile")
+      writeRuntime(stage, "new-node", "new-profile")
+
+      val identicalBytes = ByteArray(256 * 1024) { (it % 127).toByte() }
+      File(live, "home/.dsh/profiles/web/node_modules/pkg/same.bin").apply {
+        parentFile.mkdirs()
+        writeBytes(identicalBytes)
+      }
+      File(stage, "home/.dsh/profiles/web/node_modules/pkg/same.bin").apply {
+        parentFile.mkdirs()
+        writeBytes(identicalBytes)
+      }
+      val userProfileAsset = File(live, "home/.dsh/profiles/custom-user/assets/big.bin").apply {
+        parentFile.mkdirs()
+        writeBytes(ByteArray(384 * 1024) { 9 })
+      }
+      File(live, "home/.dsh/profiles/custom-user/cordis.patch.yml").writeText("- id: custom-keep\n")
+      File(stage, "home/.dsh/profiles/web/node_modules/new-only/index.js").apply {
+        parentFile.mkdirs()
+        writeText("added\n")
+      }
+
+      var requiredSwapBytes = 0L
+      SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp-narrow",
+        startedAt = 1L,
+        spaceCheck = { required -> requiredSwapBytes = required; null },
+      )
+
+      val prevProfiles = File(filesDir, ".snapshot-previous/home/.dsh/profiles")
+      assertFalse(
+        "user custom profile large payload must not be duplicated into .snapshot-previous",
+        File(prevProfiles, "custom-user/assets/big.bin").exists(),
+      )
+      assertFalse(
+        "byte-identical factory file must not be duplicated into .snapshot-previous",
+        File(prevProfiles, "web/node_modules/pkg/same.bin").exists(),
+      )
+      assertTrue(
+        "modified factory manifest must still be backed up",
+        File(prevProfiles, "web/cordis.yml").isFile,
+      )
+      assertTrue(
+        "user custom profile cordis.patch.yml remains covered in narrowed backup",
+        File(prevProfiles, "custom-user/cordis.patch.yml").isFile,
+      )
+      assertTrue(
+        "precheck swap reservation excludes skipped identical & user custom trees",
+        requiredSwapBytes < 256L * 1024L + 128L * 1024L * 1024L &&
+          requiredSwapBytes < 64L * 1024L * 1024L + 200_000L,
+      )
+      assertTrue(File(live, "home/.dsh/profiles/web/node_modules/new-only/index.js").isFile)
+
+      val rb = SnapshotTransaction.rollback(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        marker = SnapshotTransaction.readMarker(filesDir)!!,
+      )
+      assertTrue("narrowed rollback must succeed: " + rb.failures, rb.ok)
+      assertEquals("old-profile", File(live, "home/.dsh/profiles/web/cordis.yml").readText())
+      assertTrue(userProfileAsset.isFile)
+      assertTrue(File(live, "home/.dsh/profiles/web/node_modules/pkg/same.bin").isFile)
+      assertFalse(
+        "entries newly added during failed merge must be removed on narrowed rollback",
+        File(live, "home/.dsh/profiles/web/node_modules/new-only/index.js").exists(),
+      )
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
 }

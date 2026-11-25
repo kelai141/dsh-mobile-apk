@@ -61,4 +61,27 @@ class DiagnosticsMirrorTest {
     assertFalse(mirrorLogBounded(File(tmp.root, "absent.log"), dst, 1024))
     assertFalse(dst.exists())
   }
+
+  @Test
+  fun pruneDiagnosticsDirsAndCompileCacheEnforceBudgetsWithoutTouchSymlinks() {
+    val diagRoot = File(tmp.root, "diagnostics").apply { mkdirs() }
+    for (i in 1..5) {
+      val d = File(diagRoot, "2026112$i-000000-crash").apply { mkdirs() }
+      File(d, "engine.log").writeText("x".repeat(40))
+      d.setLastModified(i * 1000L)
+    }
+    val removedDirs = pruneDiagnosticsDirs(diagRoot, maxDirs = 2, maxBytes = 1000L)
+    assertEquals(3, removedDirs)
+    assertEquals(listOf("20261124-000000-crash", "20261125-000000-crash"), diagRoot.list()!!.sorted())
+
+    val cacheRoot = File(tmp.root, ".node-compile-cache").apply { mkdirs() }
+    val c1 = File(cacheRoot, "a.blob").apply { writeText("1".repeat(50)); setLastModified(1000L) }
+    val c2 = File(cacheRoot, "b.blob").apply { writeText("2".repeat(50)); setLastModified(2000L) }
+    val c3 = File(cacheRoot, "c.blob").apply { writeText("3".repeat(50)); setLastModified(3000L) }
+    val removedCache = pruneCompileCacheDir(cacheRoot, maxBytes = 100L)
+    assertEquals(1, removedCache)
+    assertFalse(c1.exists())
+    assertTrue(c2.exists())
+    assertTrue(c3.exists())
+  }
 }

@@ -116,6 +116,39 @@ test('manifest route returns only the persisted manifest and never triggers a ch
   assert.deepEqual(empty.payload, { manifest: null })
 })
 
+test('manifest route forwards pinnedOnly when x-dsh-manifest-scope is pinned', async () => {
+  const seen = []
+  const routes = {}
+  registerLinuxEnvironmentRoutes({
+    webServer: { register: r => { routes[r.path] = r.handler; return () => {} } },
+    effect: fn => fn(),
+    auth: () => ({ token: () => TOKEN }),
+    bootstrap: () => makeBootstrap(),
+    manifest: (opts) => {
+      seen.push(opts)
+      return opts?.pinnedOnly ? { version: '1.2.0' } : { version: '1.3.0' }
+    },
+  })
+  const handler = routes['/api/android/linux-environment/manifest']
+  const callWithHeaders = async (headers) => {
+    let statusCode = 0
+    let body = ''
+    await handler({
+      method: 'GET',
+      headers: { host: '127.0.0.1:4145', 'x-dsh-control-token': TOKEN, ...headers },
+      async *[Symbol.asyncIterator]() {},
+    }, { writeHead: (c) => { statusCode = c }, end: (d) => { body = String(d ?? '') } })
+    return { statusCode, payload: JSON.parse(body) }
+  }
+  const latest = await callWithHeaders({})
+  assert.equal(latest.statusCode, 200)
+  assert.deepEqual(latest.payload, { manifest: { version: '1.3.0' } })
+  const pinned = await callWithHeaders({ 'x-dsh-manifest-scope': 'pinned' })
+  assert.equal(pinned.statusCode, 200)
+  assert.deepEqual(pinned.payload, { manifest: { version: '1.2.0' } })
+  assert.deepEqual(seen, [undefined, { pinnedOnly: true }])
+})
+
 test('missing bootstrap is explicit 503, blocked downgrade is visible, status is read-only', async () => {
   assert.equal((await harness(undefined).call('status')).code, 200)
   const absent = harness(null)

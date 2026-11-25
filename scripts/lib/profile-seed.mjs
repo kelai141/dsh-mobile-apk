@@ -36,6 +36,43 @@ export function pruneRetiredAttachmentSeed(stageRoot, baseArchive, seed) {
 }
 
 /**
+ * Deduplicate hoisted third-party packages from base-dsh host node_modules subdirectories
+ * when the hoisted copy at `<engine>/node_modules/<pkg>` matches `expectedVersion`.
+ */
+export function pruneHoistedDuplicates(stageRoot, rules = []) {
+  const engineNm = join(stageRoot, 'usr', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules')
+  let removed = 0
+  for (const rule of rules ?? []) {
+    const pkg = rule?.package
+    const expectedVersion = rule?.expectedVersion
+    const hosts = rule?.hosts ?? []
+    if (!pkg || !expectedVersion) continue
+    const hoistedPkgJson = join(engineNm, ...pkg.split('/'), 'package.json')
+    if (!existsSync(hoistedPkgJson)) continue
+    let hoistedVersion
+    try { hoistedVersion = JSON.parse(readFileSync(hoistedPkgJson, 'utf8')).version } catch { continue }
+    if (hoistedVersion !== expectedVersion) continue
+    for (const host of hosts) {
+      if (!/^(?:@[a-z0-9_-]+\/)?[A-Za-z0-9_.-]+$/.test(host)) {
+        throw new Error(`Invalid hoistedDedup host entry: ${host}`)
+      }
+      const nestedDir = join(engineNm, ...host.split('/'), 'node_modules', ...pkg.split('/'))
+      const nestedPkgJson = join(nestedDir, 'package.json')
+      if (!existsSync(nestedPkgJson)) continue
+      try {
+        const nestedVersion = JSON.parse(readFileSync(nestedPkgJson, 'utf8')).version
+        if (nestedVersion !== expectedVersion) continue
+      } catch {
+        continue
+      }
+      rmSync(nestedDir, { recursive: true, force: true })
+      removed += 1
+    }
+  }
+  return removed
+}
+
+/**
  * Strip dead keys from the staged profile manifests and assert the shipped shape.
  * @param stageRoot - snapshot stage root, holding home/.dsh/profiles/<name>/package.json.
  * @param options - profiles (default SHIPPED_PROFILES) and dead keys (default DEAD_PROFILE_KEYS).

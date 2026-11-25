@@ -491,7 +491,7 @@ export function registerLinuxEnvironmentRoutes(options: {
   terminal?: ReturnType<typeof createLinuxTerminal>
   runtime?(): RuntimeManager | undefined
   /** 已 check/pinned 的 manifest 只读读取（不触网）；缺省时该路由返回 null。 */
-  manifest?(): Record<string, unknown> | null
+  manifest?(options?: { pinnedOnly?: boolean }): Record<string, unknown> | null
 }) {
   let busy = false
   const send = (res: MobileRouteResponse, code: number, body: unknown) => {
@@ -552,8 +552,10 @@ export function registerLinuxEnvironmentRoutes(options: {
           return
         }
         if (action === 'manifest') {
-          // UI 先用 manifest 的摘要/体积让壳侧准备资产，再调 install。只读持久状态，不触网。
-          send(res, 200, { manifest: options.manifest?.() ?? null })
+          // UI 先用 manifest 的摘要/体积让壳侧准备资产，再调 install/reinstall。只读持久状态，不触网。
+          const scopeHeader = req.headers?.['x-dsh-manifest-scope']
+          const pinnedOnly = (Array.isArray(scopeHeader) ? scopeHeader[0] : scopeHeader)?.toLowerCase() === 'pinned'
+          send(res, 200, { manifest: (pinnedOnly ? options.manifest?.({ pinnedOnly: true }) : options.manifest?.()) ?? null })
           return
         }
         if (busy) { send(res, 409, { error: '另一项 Linux 环境操作正在进行，请稍后重试。' }); return }

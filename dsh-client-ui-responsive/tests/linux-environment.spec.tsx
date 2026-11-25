@@ -635,6 +635,48 @@ describe('LinuxEnvironmentSection', () => {
     expect(primary.getAttribute('data-linux-primary')).toBe('install')
     expect(primary.textContent).toContain('一键下载并安装')
   })
+
+  it('re-prepares pinnedManifest assets via the Android bridge before offline reinstall', async () => {
+    const newerManifest = {
+      ...MANIFEST,
+      version: '1.3.0',
+      plugins: {
+        runtime: {
+          ...MANIFEST.plugins.runtime,
+          sha256: '9'.repeat(64),
+        },
+      },
+    }
+    const calls: string[] = []
+    const preparedSpecs: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: { headers?: Record<string, string> }) => {
+      calls.push(url)
+      if (url.endsWith('/status')) return { ok: true, status: 200, json: async () => STATUS_INSTALLED }
+      if (url.endsWith('/check')) return { ok: false, status: 500, json: async () => ({ error: 'offline' }) }
+      if (url.endsWith('/manifest')) {
+        const pinned = init?.headers?.['x-dsh-manifest-scope'] === 'pinned'
+        return { ok: true, status: 200, json: async () => ({ manifest: pinned ? MANIFEST : newerManifest }) }
+      }
+      if (url.endsWith('/reinstall')) return { ok: true, status: 200, json: async () => STATUS_INSTALLED }
+      throw new Error('unexpected fetch: ' + url)
+    }))
+    const { prepared, bridge } = makeBridge()
+    Object.defineProperty(window, 'androidBridge', { value: bridge, configurable: true, writable: true })
+    try {
+      const element = await render()
+      await act(async () => { (element.querySelector('[data-linux-action="settings"]') as HTMLButtonElement).click() })
+      await act(async () => {
+        (element.querySelector('[data-linux-action="reinstall"]') as HTMLButtonElement).click()
+        await new Promise((resolve) => { setTimeout(resolve, 100) })
+      })
+      expect(calls.some((u) => u.endsWith('/manifest'))).toBe(true)
+      expect(calls.some((u) => u.endsWith('/reinstall'))).toBe(true)
+      expect(prepared.map(spec => spec.sha256)).toContain(SHA)
+      expect(prepared.map(spec => spec.sha256)).not.toContain('9'.repeat(64))
+    } finally {
+      delete (window as unknown as { androidBridge?: unknown }).androidBridge
+    }
+  }, 20000)
 })
 
 

@@ -18,8 +18,9 @@
  *   half-deleted session, then removed recursively.
  */
 import { lstatSync } from 'node:fs'
-import { lstat, mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
+import { lstat, mkdir, open, readdir, readFile, rename, rm, stat, unlink } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { zstdDecompressSync } from 'node:zlib'
 
 /** Session ids are the storage unit name; anything else is a path-injection attempt. */
 export const SESSION_ID_PATTERN = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -148,6 +149,7 @@ export async function deleteStoredSession({ home, sessionId, isActive, beforeRem
       afterResolve: index === 0 ? afterResolve : undefined,
       beforeRemove: index === 0 ? beforeRemove : undefined })
   }
+  await removeSessionProjectionCacheFile(home, sessionId, log)
   return { ok: true, sessionId, dir: dirs[0] }
 }
 
@@ -584,4 +586,239 @@ export async function quarantineStoredSession({ home, sessionId, isActive, befor
   }
   log('info', 'session quarantined', { sessionId, path: target })
   return { ok: true, sessionId, dir, quarantinedTo: target, restorable: true }
+}
+
+function projectionCacheSessionsDir(home) {
+  return join(home, 'storages', 'session_projcache', 'sessions')
+}
+
+/** Remove the per-session projection cache file (and stale .bak.* siblings) after permanent session delete. */
+export async function removeSessionProjectionCacheFile(home, sessionId, logger) {
+  const log = typeof logger === 'function' ? logger : () => {}
+  if (typeof home !== 'string' || home === '' || !SESSION_ID_PATTERN.test(sessionId)) return { removed: [] }
+  const cacheDir = projectionCacheSessionsDir(home)
+  const removed = []
+  let entries
+  try {
+    entries = await readdir(cacheDir, { withFileTypes: true })
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { removed }
+    log('warn', 'session projection cache directory unreadable during delete cleanup (ignored)', {
+      sessionId, cacheDir, error: String(error?.message ?? error),
+    })
+    return { removed }
+  }
+  const exact = `${sessionId}.json`
+  const bakPrefix = `${exact}.bak.`
+  for (const entry of entries) {
+    if (entry.name !== exact && !entry.name.startsWith(bakPrefix)) continue
+    if (!entry.isFile() || entry.isSymbolicLink()) continue
+    const target = join(cacheDir, entry.name)
+    try {
+      await unlink(target)
+      removed.push(target)
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        log('warn', 'failed to remove session projection cache file (ignored)', {
+          sessionId, target, error: String(error?.message ?? error),
+        })
+      }
+    }
+  }
+  if (removed.length > 0) log('info', 'removed session projection cache entries', { sessionId, count: removed.length })
+  return { removed }
+}
+
+const LOG_NAME_RE = /^session(?:\.v([1-9][0-9]*))?\.jsonl(\.zstd)?$/
+
+/** Read the header line identity `{ createdAt, formatVersion }` from a session's active log file. */
+async function readSessionLogIdentity(sessionDir) {
+  let entries
+  try {
+    entries = await readdir(sessionDir, { withFileTypes: true })
+  } catch {
+    return null
+  }
+  const candidates = []
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.isSymbolicLink()) continue
+    const match = LOG_NAME_RE.exec(entry.name)
+    if (!match) continue
+    const version = match[1] ? Number.parseInt(match[1], 10) : 0
+    const zstd = match[2] === '.zstd'
+    candidates.push({ name: entry.name, version, zstd })
+  }
+  candidates.sort((a, b) => (b.version - a.version) || (Number(b.zstd) - Number(a.zstd)))
+  for (const candidate of candidates) {
+    const filePath = join(sessionDir, candidate.name)
+    try {
+      let headerText
+      if (!candidate.zstd) {
+        const handle = await open(filePath, 'r')
+        try {
+          const buf = Buffer.allocUnsafe(8192)
+          const { bytesRead } = await handle.read(buf, 0, buf.length, 0)
+          if (bytesRead <= 0) continue
+          const slice = buf.subarray(0, bytesRead)
+          const nl = slice.indexOf(10)
+          headerText = (nl >= 0 ? slice.subarray(0, nl) : slice).toString('utf8')
+        } finally {
+          await handle.close()
+        }
+      } else {
+        const raw = await readFile(filePath)
+        const plain = zstdDecompressSync(raw)
+        const nl = plain.indexOf(10)
+        headerText = (nl >= 0 ? plain.subarray(0, nl) : plain).toString('utf8')
+      }
+      const header = JSON.parse(headerText)
+      if (header && typeof header === 'object' && !Array.isArray(header)) {
+        return {
+          createdAt: typeof header.createdAt === 'number' && Number.isSafeInteger(header.createdAt) ? header.createdAt : undefined,
+          formatVersion: typeof header.version === 'number' && Number.isSafeInteger(header.version) ? header.version : undefined,
+        }
+      }
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
+/**
+ * Reconcile `<home>/storages/session_projcache/sessions/*.json` against stored sessions.
+ * Preserves all live sessions with matching/unproven identity and all quarantined/graveyard sessions.
+ * Fail-closed if the sessions tree cannot be scanned completely.
+ */
+export async function sweepOrphanProjectionCaches(home, logger) {
+  const log = typeof logger === 'function' ? logger : () => {}
+  if (typeof home !== 'string' || home === '') return { scanned: 0, removed: [], kept: 0, aborted: false }
+  const cacheDir = projectionCacheSessionsDir(home)
+  let cacheEntries
+  try {
+    cacheEntries = await readdir(cacheDir, { withFileTypes: true })
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { scanned: 0, removed: [], kept: 0, aborted: false }
+    return { scanned: 0, removed: [], kept: 0, aborted: true }
+  }
+  const jsonEntries = cacheEntries.filter((e) => e.isFile() && !e.isSymbolicLink() && e.name.endsWith('.json'))
+  if (jsonEntries.length === 0) return { scanned: 0, removed: [], kept: 0, aborted: false }
+
+  const root = sessionsRoot(home)
+  const liveDirsById = new Map()
+  const protectedIds = new Set()
+  let workspaces
+  try {
+    workspaces = await readdir(root, { withFileTypes: true })
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      log('warn', 'projection cache sweep aborted: sessions root unreadable', { root, error: String(error?.message ?? error) })
+      return { scanned: jsonEntries.length, removed: [], kept: jsonEntries.length, aborted: true }
+    }
+    workspaces = []
+  }
+
+  for (const workspace of workspaces) {
+    if (!workspace.isDirectory() || workspace.isSymbolicLink()) continue
+    const wsDir = join(root, workspace.name)
+    let wsEntries
+    try {
+      wsEntries = await readdir(wsDir, { withFileTypes: true })
+    } catch (error) {
+      log('warn', 'projection cache sweep aborted: workspace unreadable', { wsDir, error: String(error?.message ?? error) })
+      return { scanned: jsonEntries.length, removed: [], kept: jsonEntries.length, aborted: true }
+    }
+    for (const entry of wsEntries) {
+      if (!entry.isDirectory()) continue
+      if (entry.name === QUARANTINE_DIR) {
+        let qEntries
+        try {
+          qEntries = await readdir(join(wsDir, QUARANTINE_DIR), { withFileTypes: true })
+        } catch (error) {
+          log('warn', 'projection cache sweep aborted: quarantine dir unreadable', { wsDir, error: String(error?.message ?? error) })
+          return { scanned: jsonEntries.length, removed: [], kept: jsonEntries.length, aborted: true }
+        }
+        for (const q of qEntries) {
+          const dot = q.name.indexOf('.')
+          const id = dot > 0 ? q.name.slice(0, dot) : q.name
+          if (SESSION_ID_PATTERN.test(id)) protectedIds.add(id)
+        }
+        continue
+      }
+      if (GRAVEYARD_PATTERN.test(entry.name)) {
+        const dot = entry.name.indexOf('.deleting-')
+        const id = dot > 0 ? entry.name.slice(0, dot) : ''
+        if (SESSION_ID_PATTERN.test(id)) protectedIds.add(id)
+        continue
+      }
+      if (SESSION_ID_PATTERN.test(entry.name)) {
+        liveDirsById.set(entry.name, join(wsDir, entry.name))
+      }
+    }
+  }
+
+  const removed = []
+  let kept = 0
+  for (const entry of jsonEntries) {
+    const id = entry.name.slice(0, -5)
+    if (!SESSION_ID_PATTERN.test(id)) {
+      kept += 1
+      continue
+    }
+    if (protectedIds.has(id)) {
+      kept += 1
+      continue
+    }
+    const liveDir = liveDirsById.get(id)
+    let shouldRemove = false
+    if (liveDir === undefined) {
+      shouldRemove = true
+    } else {
+      try {
+        const parsed = JSON.parse(await readFile(join(cacheDir, entry.name), 'utf8'))
+        const cachedIdentity = parsed?.record?.identity
+        if (cachedIdentity && typeof cachedIdentity.createdAt === 'number') {
+          const liveIdentity = await readSessionLogIdentity(liveDir)
+          if (liveIdentity !== null) {
+            if (liveIdentity.createdAt !== undefined && liveIdentity.createdAt !== cachedIdentity.createdAt) {
+              shouldRemove = true
+            } else if (
+              typeof cachedIdentity.formatVersion === 'number'
+              && liveIdentity.formatVersion !== undefined
+              && cachedIdentity.formatVersion > liveIdentity.formatVersion
+            ) {
+              shouldRemove = true
+            }
+          }
+        }
+      } catch {
+        // Malformed or unreadable: leave alone for dsh-session-projection-cache backup-and-skip.
+      }
+    }
+    if (!shouldRemove) {
+      kept += 1
+      continue
+    }
+    const target = join(cacheDir, entry.name)
+    try {
+      await unlink(target)
+      removed.push(target)
+    } catch {
+      kept += 1
+      continue
+    }
+    const bakPrefix = `${entry.name}.bak.`
+    for (const sibling of cacheEntries) {
+      if (!sibling.isFile() || sibling.isSymbolicLink() || !sibling.name.startsWith(bakPrefix)) continue
+      try {
+        const bakPath = join(cacheDir, sibling.name)
+        await unlink(bakPath)
+        removed.push(bakPath)
+      } catch { /* ignore sibling cleanup errors */ }
+    }
+  }
+  if (removed.length > 0) {
+    log('info', 'swept orphan session projection cache entries', { count: removed.length, kept })
+  }
+  return { scanned: jsonEntries.length, removed, kept, aborted: false }
 }

@@ -326,9 +326,13 @@ test('re-verifies on reuse: a tampered published slot is rebuilt, not trusted', 
     const slotEntry = join(slotRoot, asset.sha256, 'lib', 'index.js')
     assert.equal(await readFile(slotEntry, 'utf8'), GENUINE_ENTRY, '前提：首装后槽位是真品')
 
-    // 只篡改**已发布槽位**；宿主暂存的归档与树保持真品（即"重建源"仍在且已复验）。
+    // commit 后派生 unpacked 已回收、归档 asset.tar.xz 仍保留。
+    // 篡改已发布槽位后，模拟离线重装前宿主从保留归档复解 unpacked（不触网），再由 bootstrap 复验重建。
+    assert.equal(existsSync(join(stagedDirectoryFor(filesDir, asset.sha256), RETAINED_ARCHIVE)), true)
+    assert.equal(existsSync(unpackedTreeFor(filesDir, asset.sha256)), false)
     const tampered = 'export const apply = () => { /* TAMPERED */ }\n'
     await writeFile(slotEntry, tampered)
+    await stageBundle(filesDir, { archiveBytes: Buffer.from('host staged runtime archive bytes') })
     await service.reinstall({ confirmed: true, activate: true })
 
     assert.notEqual(await readFile(slotEntry, 'utf8'), tampered, '篡改内容不得存活（必须被重建覆盖）')

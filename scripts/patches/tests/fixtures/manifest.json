@@ -3844,6 +3844,66 @@
       "patchIds": [
         "image-history-batch-offload-I1"
       ]
+    },
+    "dsh-storage-sqlite-0.2.2-rc.3": {
+      "source": "runtime-capture",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-storage-sqlite@0.2.2-rc.3",
+      "provenance": {
+        "captureRecord": "capture.json",
+        "captureRecordSha256": "97cd165434594b65dcb3d61a325aa478dbb145fb025247c76b2fd1c88887ae46",
+        "evidence": "evidence/note.txt",
+        "evidenceSha256": "4b903b4d99900040d120a52fae41937643ee5156dc78a2ecc02a6a3ca23e55e1"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json",
+        "capture.json",
+        "evidence/note.txt"
+      ],
+      "fileSha256": {
+        "lib/index.js": "10bba6eb6c7e421757f170c9b19449707eb498b717cb16d3acf7e4f98c20b52c",
+        "package.json": "aebb5778868c9293d38c70f38487440cb761051f8ac60447d0b9c3dca0dd5769",
+        "capture.json": "97cd165434594b65dcb3d61a325aa478dbb145fb025247c76b2fd1c88887ae46",
+        "evidence/note.txt": "4b903b4d99900040d120a52fae41937643ee5156dc78a2ecc02a6a3ca23e55e1"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-storage-sqlite/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-storage-sqlite/package.json"
+      },
+      "patchIds": [
+        "sqlite-storage-wal-vacuum-S1"
+      ]
+    },
+    "dsh-session-query-sqlite-0.2.2-rc.3": {
+      "source": "runtime-capture",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-session-query-sqlite@0.2.2-rc.3",
+      "provenance": {
+        "captureRecord": "capture.json",
+        "captureRecordSha256": "ff2286ed8d09da7dba522dbdb9b01a809226e1cb98c6dd7b6d8a504d85714557",
+        "evidence": "evidence/note.txt",
+        "evidenceSha256": "6da079e355bd276b871e8374e3327fcf22ebd103abd78bde64ab3d9311092a7d"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json",
+        "capture.json",
+        "evidence/note.txt"
+      ],
+      "fileSha256": {
+        "lib/index.js": "dbecf83320e10d93d735b3d01384ab817a0b90102ccecb0a22c013c71dfe70a0",
+        "package.json": "e19acdd6c66e7f504e0e4c953938162c1285f57d2b374c8daa0ea28d1493a302",
+        "capture.json": "ff2286ed8d09da7dba522dbdb9b01a809226e1cb98c6dd7b6d8a504d85714557",
+        "evidence/note.txt": "6da079e355bd276b871e8374e3327fcf22ebd103abd78bde64ab3d9311092a7d"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-query-sqlite/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-query-sqlite/package.json"
+      },
+      "patchIds": [
+        "session-query-wal-vacuum-S2"
+      ]
     }
   },
   "capture": {
@@ -3854,8 +3914,8 @@
         "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-CKTiL8M8.js"
       ]
     },
-    "overlaySha256": "4443131b548e45ff7d1b42ca1d650c4287f5ec8cc3bfa63a6b9504569cb2a6de",
-    "registrySha256": "b300d7407c9232e359f1bbf646a0bb6113a0240e57075ae2deb28e80ba9b9b8e",
+    "overlaySha256": "4f0630defdce959d348ebd099ab66ee8ac92361ba421320470158a371eb398ca",
+    "registrySha256": "f8e9935de1b1041a742ddfeb10f3a8754c60c6da714c0d6e3c003964f5b44b57",
     "previousEngine": "0.2.2-rc.1"
   }
 }

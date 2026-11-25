@@ -475,10 +475,10 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         },
       }),
       // 只读持久 state 里的 availableManifest/pinnedManifest：给 UI 先准备资产，不触网、不安装。
-      manifest: () => {
+      manifest: (options?: { pinnedOnly?: boolean }) => {
         const files = process.env.DSH_FILES_DIR
         if (files === undefined || files.trim() === '') return null
-        return readLinuxManifest(join(files, 'linux-environment'))
+        return readLinuxManifest(join(files, 'linux-environment'), options)
       },
     })
     const builders = [

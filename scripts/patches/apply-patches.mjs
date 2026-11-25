@@ -1515,7 +1515,9 @@ const IMPLS = {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js',
     scope: 'engine',
     check: (s) => s.includes('dsh-mobile durable-walk guard')
-      && (s.match(/dsh-mobile link->rename fallback/g) || []).length === 2
+      && s.includes('dsh-mobile cas-alias-metadata fallback')
+      && s.includes('dshMobileResolveReadableFilePath')
+      && (s.match(/dsh-mobile link->rename fallback/g) || []).length === 1
       && s.includes('dsh-mobile: a link->rename fallback already consumed the staged file.'),
     apply: (s) => {
       // ① durable-walk guard
@@ -1534,7 +1536,68 @@ const IMPLS = {
         }
         s = replaceOnce(s, OLD, NEW)
       }
-      // ② link(2) 回退两站（缩进随站点；与 asset 逐字节同源由 check-runtime-assets 守）
+      // ①b 导入 existsSync/readFileSync（独立一行，不与 image-expiry-E1 的 node:fs 改写碰撞）
+      if (!s.includes('dshMobileExistsSync')) {
+        const IMPORT_ANCHOR = 'import { createLazyRequire } from "@deepseek-ai/dsh-lazy-require";'
+        if (!s.includes(IMPORT_ANCHOR)) {
+          throw new Error('attach-durable 锚点未命中：createLazyRequire import')
+        }
+        s = replaceOnce(
+          s,
+          IMPORT_ANCHOR,
+          IMPORT_ANCHOR + '\nimport { existsSync as dshMobileExistsSync, readFileSync as dshMobileReadFileSync } from "node:fs";',
+        )
+      }
+      // ②a publishImmutableAlias：Android EACCES/EPERM/ENOTSUP/ENOSYS 时保留 canonical file-objects/ 并写 .dsh-alias.json 元数据
+      if (!s.includes('dsh-mobile cas-alias-metadata fallback')) {
+        const SITE_A_OLD = [
+          '\t\ttry {',
+          '\t\t\tawait link(source, target);',
+          '\t\t} catch (error) {',
+          '\t\t\t/* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race. */',
+          '\t\t\tif (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;',
+          '\t\t\tif (await digestFile(target) !== sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");',
+          '\t\t}',
+          '\t\tawait chmod(target, 256);',
+        ].join('\n')
+        const SITE_A_LEGACY_V1 = [
+          '\t\ttry {',
+          '\t\t\tawait link(source, target).catch(async (error) => {',
+          '\t\t\t\t/* dsh-mobile link->rename fallback: Android app-private dirs reject link(2) (EACCES). */',
+          '\t\t\t\tif (!(error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOTSUP"))) throw error;',
+          '\t\t\t\tawait rename(source, target);',
+          '\t\t\t});',
+          '\t\t} catch (error) {',
+          '\t\t\t/* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race. */',
+          '\t\t\tif (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;',
+          '\t\t\tif (await digestFile(target) !== sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");',
+          '\t\t}',
+          '\t\tawait chmod(target, 256);',
+        ].join('\n')
+        const SITE_A_NEW = [
+          '\t\tlet dshMobileWroteAliasMeta = false;',
+          '\t\ttry {',
+          '\t\t\tawait link(source, target).catch(async (error) => {',
+          '\t\t\t\t/* dsh-mobile cas-alias-metadata fallback: Android app-private dirs reject link(2) (EACCES). */',
+          '\t\t\t\tif (!(error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOTSUP" || error.code === "ENOSYS"))) throw error;',
+          '\t\t\t\tconst aliasPath = `${target}.dsh-alias.json`;',
+          '\t\t\t\tconst tmpAlias = `${aliasPath}.${randomUUID()}.tmp`;',
+          '\t\t\t\tawait writeFile(tmpAlias, `${JSON.stringify({ sha256 })}\\n`, { mode: 256 });',
+          '\t\t\t\tawait rename(tmpAlias, aliasPath);',
+          '\t\t\t\tdshMobileWroteAliasMeta = true;',
+          '\t\t\t});',
+          '\t\t} catch (error) {',
+          '\t\t\t/* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race. */',
+          '\t\t\tif (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;',
+          '\t\t\tif (await digestFile(target) !== sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");',
+          '\t\t}',
+          '\t\tif (!dshMobileWroteAliasMeta) await chmod(target, 256);',
+        ].join('\n')
+        if (s.includes(SITE_A_OLD)) s = replaceOnce(s, SITE_A_OLD, SITE_A_NEW)
+        else if (s.includes(SITE_A_LEGACY_V1)) s = replaceOnce(s, SITE_A_LEGACY_V1, SITE_A_NEW)
+        else throw new Error('attach-durable 锚点未命中：publishImmutableAlias 的 link(source, target)')
+      }
+      // ②b publishStagedObject：link(staged.path, target) → rename
       const linkFallback = (from, to, indent) => [
         indent + `await link(${from}, ${to}).catch(async (error) => {`,
         indent + '\t/* dsh-mobile link->rename fallback: Android app-private dirs reject link(2) (EACCES). */',
@@ -1542,15 +1605,49 @@ const IMPLS = {
         indent + `\tawait rename(${from}, ${to});`,
         indent + '});',
       ].join('\n')
-      const SITE_A = '\t\t\tawait link(source, target);'
       const SITE_B = '\t\t\tawait link(staged.path, target);'
-      if (s.includes(SITE_A)) s = replaceOnce(s, SITE_A, linkFallback('source', 'target', '\t\t\t'))
-      else if (!s.includes('dsh-mobile link->rename fallback')) {
-        throw new Error('attach-durable 锚点未命中：publishImmutableAlias 的 link(source, target)')
-      }
       if (s.includes(SITE_B)) s = replaceOnce(s, SITE_B, linkFallback('staged.path', 'target', '\t\t\t'))
-      else if (!s.includes('dsh-mobile link->rename fallback')) {
+      else if ((s.match(/dsh-mobile link->rename fallback/g) || []).length !== 1) {
         throw new Error('attach-durable 锚点未命中：publishStagedObject 的 link(staged.path, target)')
+      }
+      // ②c 读取侧双读：legacy storedFilePath → .dsh-alias.json / file-objects/<prefix>/<sha256>
+      if (!s.includes('dshMobileResolveReadableFilePath(')) {
+        const OBJ_PATH_FN = [
+          'function storedFileObjectPath(root, sha256) {',
+          '\treturn join(root, "file-objects", sha256.slice(0, 2), sha256);',
+          '}',
+        ].join('\n')
+        const RESOLVE_FN = OBJ_PATH_FN + '\n' + [
+          'function dshMobileResolveReadableFilePath(root, ref) {',
+          '\t/* dsh-mobile cas-alias-dual-read */',
+          '\tconst legacyPath = storedFilePath(root, ref);',
+          '\tif (dshMobileExistsSync(legacyPath)) return legacyPath;',
+          '\tconst sha256 = ensureFileReference(ref);',
+          '\tconst aliasPath = `${legacyPath}.dsh-alias.json`;',
+          '\tif (dshMobileExistsSync(aliasPath)) {',
+          '\t\ttry {',
+          '\t\t\tconst meta = JSON.parse(dshMobileReadFileSync(aliasPath, "utf8"));',
+          '\t\t\tif (meta && meta.sha256 === sha256) return storedFileObjectPath(root, sha256);',
+          '\t\t} catch {}',
+          '\t}',
+          '\tconst objectPath = storedFileObjectPath(root, sha256);',
+          '\treturn dshMobileExistsSync(objectPath) ? objectPath : legacyPath;',
+          '}',
+        ].join('\n')
+        if (!s.includes(OBJ_PATH_FN)) throw new Error('attach-durable 锚点未命中：storedFileObjectPath')
+        s = replaceOnce(s, OBJ_PATH_FN, RESOLVE_FN)
+      }
+      const READ_OLD = '\tconst stream = createReadStream(storedFilePath(root, ref), {'
+      if (s.includes(READ_OLD)) {
+        s = replaceOnce(s, READ_OLD, '\tconst stream = createReadStream(dshMobileResolveReadableFilePath(root, ref), {')
+      } else if (!s.includes('createReadStream(dshMobileResolveReadableFilePath(root, ref)')) {
+        throw new Error('attach-durable 锚点未命中：readFileStreamVerbatim createReadStream')
+      }
+      const HOST_OLD = '\tfileHostPath(ref) {\n\t\treturn storedFilePath(this.root, ref);\n\t}'
+      if (s.includes(HOST_OLD)) {
+        s = replaceOnce(s, HOST_OLD, '\tfileHostPath(ref) {\n\t\treturn dshMobileResolveReadableFilePath(this.root, ref);\n\t}')
+      } else if (!s.includes('return dshMobileResolveReadableFilePath(this.root, ref);')) {
+        throw new Error('attach-durable 锚点未命中：fileHostPath')
       }
       // ③ unlink ENOENT 容忍
       const SITE_C = '\t\tawait unlink(staged.path);'
@@ -1565,7 +1662,9 @@ const IMPLS = {
         throw new Error('attach-durable 锚点未命中：publishStagedObject 的 unlink(staged.path)')
       }
       if (!s.includes('dsh-mobile durable-walk guard')
-        || (s.match(/dsh-mobile link->rename fallback/g) || []).length !== 2
+        || !s.includes('dsh-mobile cas-alias-metadata fallback')
+        || !s.includes('dshMobileResolveReadableFilePath')
+        || (s.match(/dsh-mobile link->rename fallback/g) || []).length !== 1
         || !s.includes('dsh-mobile: a link->rename fallback already consumed the staged file.')) {
         throw new Error('attach-durable 复核失败——不写回')
       }
@@ -1890,6 +1989,516 @@ const IMPLS = {
         || (s.match(/dshMobileClaimExclusive\(/g) || []).length < 3 || s.includes(F7_LEGACY_INLINE)) {
         throw new Error('publish-exclusive 复核失败——不写回')
       }
+      return s
+    },
+  },
+
+  // ── spj-compaction-dedup-C5：compaction 双写/三写物理去重（2026-11-25 存储审计 #5，scope=engine）──
+  // 根因：compaction 先写 compaction/summary（内含 summary 且常带完整相同的 rawOutput），紧接着写
+  // source.kind === "compact-checkpoint" 的 user/message（content = [preamble, ...summary, closeTag]），
+  // 同一摘要文本在磁盘上物理落盘 2x-3x。
+  // 修法：在 session-persistence-jsonl 物理编码/解码边界做无损引用的双向转换：
+  //   ① compaction/summary 若 rawOutput 与 summary deepStrictEqual，物理行省略 rawOutput 并标记
+  //      dshCompactDedup: { rawOutputSameAsSummary: true }；
+  //   ② user/message 若 source.kind === "compact-checkpoint" 且同一日志/已提交批次内已确认同
+  //      compactionId 的 summary、且 content 恰好为 [head, ...summary, tail]，物理行仅保留
+  //      [head, tail] + dshCompactCheckpointRef: compactionId；
+  //   ③ SessionLogScanner / MigratingJsonlRows 在 JSON.parse 之后、assertV4RowAdmission / decodeRow
+  //      之前按 compactionId 透明重建 rawOutput 与 checkpoint content，历史未去重事件原样兼容。
+  'spj-compaction-dedup-C5': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js',
+    scope: 'engine',
+    check: (s) => s.includes('dsh-mobile compaction dedup (C5)')
+      && s.includes('function dshMobileDeduplicateCompactionEncoded(')
+      && s.includes('function dshMobileHydrateCompactionRow(')
+      && s.includes('dshMobileHydrateCompactionRow(decoded, this.dshCompactionSummaries)')
+      && s.includes('dshMobileHydrateCompactionRow(row, this.dshCompactionSummaries)'),
+    apply: (s) => {
+      if (s.includes('dsh-mobile compaction dedup (C5)')
+        && s.includes('function dshMobileDeduplicateCompactionEncoded(')
+        && s.includes('function dshMobileHydrateCompactionRow(')) return s
+
+      // 1. Handle state: store committed compaction summaries on JsonlSessionHandle
+      const HANDLE_CTOR_OLD = [
+        '\tconstructor(storage, id, header, access, state, lease) {',
+        '\t\tthis.storage = storage;',
+      ].join('\n')
+      const HANDLE_CTOR_NEW = [
+        '\tcompactionSummaries = /* @__PURE__ */ new Map();',
+        '\tconstructor(storage, id, header, access, state, lease) {',
+        '\t\tthis.storage = storage;',
+        '\t\tif (Array.isArray(state?.primed?.events)) dshMobileCollectCompactionSummaries(state.primed.events, this.compactionSummaries);',
+      ].join('\n')
+      if (!s.includes(HANDLE_CTOR_OLD)) throw new Error('spj-compaction-dedup anchor missing: handle ctor')
+      s = replaceOnce(s, HANDLE_CTOR_OLD, HANDLE_CTOR_NEW)
+
+      // 2. Wire committed summaries through persistContiguous -> persistBatch -> encodeEventBatch
+      const PERSIST_CONTIGUOUS_OLD = [
+        '\t\tawait this.storage.persistBatch(this.header, batch, this.state.materialized, this.state.inheritedEventCount);',
+        '\t\tthis.state.materialized = true;',
+      ].join('\n')
+      const PERSIST_CONTIGUOUS_NEW = [
+        '\t\tawait this.storage.persistBatch(this.header, batch, this.state.materialized, this.state.inheritedEventCount, this.compactionSummaries);',
+        '\t\tdshMobileCollectCompactionSummaries(batch, this.compactionSummaries);',
+        '\t\tthis.state.materialized = true;',
+      ].join('\n')
+      if (!s.includes(PERSIST_CONTIGUOUS_OLD)) throw new Error('spj-compaction-dedup anchor missing: persistContiguous')
+      s = replaceOnce(s, PERSIST_CONTIGUOUS_OLD, PERSIST_CONTIGUOUS_NEW)
+
+      // 3. Dedup helpers + eventLines/eventLine
+      const EVENT_LINES_OLD = [
+        'function eventLines(events) {',
+        '\treturn events.map(eventLine).join("\\n");',
+        '}',
+        '/**',
+        '* Serialize one current event as one JSONL record without its trailing newline.',
+        '* @param event - current event to encode.',
+        '* @returns one physical JSON record.',
+        '*/',
+        'function eventLine(event) {',
+        '\treturn JSON.stringify(sessionFormatCatalog.encodeCurrentEvent(event));',
+        '}',
+      ].join('\n')
+      const EVENT_LINES_NEW = [
+        '/* dsh-mobile compaction dedup (C5): avoid writing duplicate summary copies across compaction/summary.rawOutput and checkpoint user/message. */',
+        'function dshMobileCollectCompactionSummaries(events, targetMap) {',
+        '\tif (!Array.isArray(events)) return targetMap;',
+        '\tfor (const event of events) {',
+        '\t\tif (!event || event.type !== "compaction/summary") continue;',
+        '\t\tconst data = event.data;',
+        '\t\tif (data && typeof data === "object" && !Array.isArray(data) && typeof data.compactionId === "string" && Array.isArray(data.summary)) {',
+        '\t\t\ttargetMap.set(data.compactionId, data.summary);',
+        '\t\t}',
+        '\t}',
+        '\treturn targetMap;',
+        '}',
+        'function dshMobileDeduplicateCompactionEncoded(encoded, compactionSummaries) {',
+        '\tif (!encoded || typeof encoded !== "object" || Array.isArray(encoded)) return encoded;',
+        '\tconst data = encoded.data;',
+        '\tif (!data || typeof data !== "object" || Array.isArray(data)) return encoded;',
+        '\tif (encoded.type === "compaction/summary") {',
+        '\t\tconst cid = data.compactionId;',
+        '\t\tconst summary = data.summary;',
+        '\t\tif (typeof cid === "string" && Array.isArray(summary)) {',
+        '\t\t\tif (compactionSummaries) compactionSummaries.set(cid, summary);',
+        '\t\t\tif (data.rawOutput !== void 0 && isDeepStrictEqual(data.rawOutput, summary)) {',
+        '\t\t\t\tconst nextData = { ...data };',
+        '\t\t\t\tdelete nextData.rawOutput;',
+        '\t\t\t\tnextData.dshCompactDedup = { rawOutputSameAsSummary: true };',
+        '\t\t\t\treturn { ...encoded, data: nextData };',
+        '\t\t\t}',
+        '\t\t}',
+        '\t\treturn encoded;',
+        '\t}',
+        '\tif (encoded.type === "user/message" && compactionSummaries) {',
+        '\t\tconst source = data.source;',
+        '\t\tif (source && typeof source === "object" && source.kind === "compact-checkpoint" && typeof source.compactionId === "string") {',
+        '\t\t\tconst knownSummary = compactionSummaries.get(source.compactionId);',
+        '\t\t\tconst content = data.content;',
+        '\t\t\tif (knownSummary !== void 0 && Array.isArray(content) && content.length === knownSummary.length + 2',
+        '\t\t\t\t&& content[0] && typeof content[0] === "object" && content[0].type === "text"',
+        '\t\t\t\t&& content[content.length - 1] && typeof content[content.length - 1] === "object" && content[content.length - 1].type === "text"',
+        '\t\t\t\t&& isDeepStrictEqual(content.slice(1, -1), knownSummary)) {',
+        '\t\t\t\treturn {',
+        '\t\t\t\t\t...encoded,',
+        '\t\t\t\t\tdata: {',
+        '\t\t\t\t\t\t...data,',
+        '\t\t\t\t\t\tcontent: [content[0], content[content.length - 1]],',
+        '\t\t\t\t\t\tdshCompactCheckpointRef: source.compactionId',
+        '\t\t\t\t\t}',
+        '\t\t\t\t};',
+        '\t\t\t}',
+        '\t\t}',
+        '\t}',
+        '\treturn encoded;',
+        '}',
+        'function dshMobileHydrateCompactionRow(row, compactionSummaries) {',
+        '\tif (!row || typeof row !== "object" || Array.isArray(row)) return row;',
+        '\tconst data = row.data;',
+        '\tif (!data || typeof data !== "object" || Array.isArray(data)) return row;',
+        '\tif (row.type === "compaction/summary") {',
+        '\t\tif (data.dshCompactDedup !== void 0) {',
+        '\t\t\tif (!Array.isArray(data.summary)) throw new Error("corrupt compact-dedup compaction/summary record");',
+        '\t\t\tconst nextData = { ...data };',
+        '\t\t\tif (data.dshCompactDedup && data.dshCompactDedup.rawOutputSameAsSummary === true && nextData.rawOutput === void 0) {',
+        '\t\t\t\tnextData.rawOutput = structuredClone(data.summary);',
+        '\t\t\t}',
+        '\t\t\tdelete nextData.dshCompactDedup;',
+        '\t\t\trow.data = nextData;',
+        '\t\t}',
+        '\t\tif (typeof row.data.compactionId === "string" && Array.isArray(row.data.summary)) {',
+        '\t\t\tcompactionSummaries.set(row.data.compactionId, row.data.summary);',
+        '\t\t}',
+        '\t\treturn row;',
+        '\t}',
+        '\tif (row.type === "user/message" && data.dshCompactCheckpointRef !== void 0) {',
+        '\t\tconst cid = data.dshCompactCheckpointRef;',
+        '\t\tconst knownSummary = typeof cid === "string" ? compactionSummaries.get(cid) : void 0;',
+        '\t\tif (knownSummary === void 0 || !Array.isArray(data.content) || data.content.length !== 2) {',
+        '\t\t\tthrow new Error(`corrupt compaction checkpoint reference "${String(cid)}"`);',
+        '\t\t}',
+        '\t\tconst nextData = {',
+        '\t\t\t...data,',
+        '\t\t\tcontent: [data.content[0], ...structuredClone(knownSummary), data.content[1]]',
+        '\t\t};',
+        '\t\tdelete nextData.dshCompactCheckpointRef;',
+        '\t\trow.data = nextData;',
+        '\t}',
+        '\treturn row;',
+        '}',
+        'function eventLines(events, committedSummaries) {',
+        '\tconst workingSummaries = new Map(committedSummaries);',
+        '\treturn events.map((event) => eventLine(event, workingSummaries)).join("\\n");',
+        '}',
+        '/**',
+        '* Serialize one current event as one JSONL record without its trailing newline.',
+        '* @param event - current event to encode.',
+        '* @param compactionSummaries - optional per-log compaction summary table.',
+        '* @returns one physical JSON record.',
+        '*/',
+        'function eventLine(event, compactionSummaries) {',
+        '\treturn JSON.stringify(dshMobileDeduplicateCompactionEncoded(sessionFormatCatalog.encodeCurrentEvent(event), compactionSummaries));',
+        '}',
+      ].join('\n')
+      if (!s.includes(EVENT_LINES_OLD)) throw new Error('spj-compaction-dedup anchor missing: eventLines')
+      s = replaceOnce(s, EVENT_LINES_OLD, EVENT_LINES_NEW)
+
+      // 4. SessionLogScanner hydration before assertV4RowAdmission / decodeRow
+      const SCANNER_FIELDS_OLD = [
+        '\tinputBytes;',
+        '\tcommittedBytes;',
+      ].join('\n')
+      const SCANNER_FIELDS_NEW = [
+        '\tinputBytes;',
+        '\tcommittedBytes;',
+        '\tdshCompactionSummaries = /* @__PURE__ */ new Map();',
+      ].join('\n')
+      if (!s.includes(SCANNER_FIELDS_OLD)) throw new Error('spj-compaction-dedup anchor missing: SessionLogScanner fields')
+      s = replaceOnce(s, SCANNER_FIELDS_OLD, SCANNER_FIELDS_NEW)
+
+      const SCANNER_DECODE_OLD = [
+        '\t\ttry {',
+        '\t\t\tassertV4RowAdmission(decoded, KNOWN_SESSION_EVENT_TYPES);',
+        '\t\t} catch (error) {',
+        '\t\t\tif (error instanceof SessionFormatUnsupportedMigrationError$1) throw new SessionFormatUnsupportedError(error.message);',
+        '\t\t\tthrow error;',
+        '\t\t}',
+        '\t\tif (this.issue !== void 0) {',
+        '\t\t\tif (typeof decoded === "object" && decoded !== null && decoded.type === "turn/end") throw this.issue;',
+        '\t\t\treturn;',
+        '\t\t}',
+        '\t\ttry {',
+        '\t\t\tthis.restore.decodeRow(decoded);',
+      ].join('\n')
+      const SCANNER_DECODE_NEW = [
+        '\t\tlet hydrationError;',
+        '\t\ttry {',
+        '\t\t\tdshMobileHydrateCompactionRow(decoded, this.dshCompactionSummaries);',
+        '\t\t} catch (error) {',
+        '\t\t\thydrationError = error instanceof Error ? error : new Error(String(error));',
+        '\t\t}',
+        '\t\ttry {',
+        '\t\t\tassertV4RowAdmission(decoded, KNOWN_SESSION_EVENT_TYPES);',
+        '\t\t} catch (error) {',
+        '\t\t\tif (error instanceof SessionFormatUnsupportedMigrationError$1) throw new SessionFormatUnsupportedError(error.message);',
+        '\t\t\tthrow error;',
+        '\t\t}',
+        '\t\tif (this.issue !== void 0) {',
+        '\t\t\tif (typeof decoded === "object" && decoded !== null && decoded.type === "turn/end") throw this.issue;',
+        '\t\t\treturn;',
+        '\t\t}',
+        '\t\ttry {',
+        '\t\t\tif (hydrationError !== void 0) throw hydrationError;',
+        '\t\t\tthis.restore.decodeRow(decoded);',
+      ].join('\n')
+      if (!s.includes(SCANNER_DECODE_OLD)) throw new Error('spj-compaction-dedup anchor missing: SessionLogScanner decodeRow')
+      s = replaceOnce(s, SCANNER_DECODE_OLD, SCANNER_DECODE_NEW)
+
+      // 5. MigratingJsonlRows hydration
+      const MIG_ROWS_OLD = [
+        '\trowIndex = 0;',
+        '\tissue;',
+        '\tconstructor(restore) {',
+      ].join('\n')
+      const MIG_ROWS_NEW = [
+        '\trowIndex = 0;',
+        '\tissue;',
+        '\tdshCompactionSummaries = /* @__PURE__ */ new Map();',
+        '\tconstructor(restore) {',
+      ].join('\n')
+      if (!s.includes(MIG_ROWS_OLD)) throw new Error('spj-compaction-dedup anchor missing: MigratingJsonlRows fields')
+      s = replaceOnce(s, MIG_ROWS_OLD, MIG_ROWS_NEW)
+
+      const MIG_CONSUME_OLD = [
+        '\t\tif (this.issue !== void 0) {',
+        '\t\t\tif (typeof row === "object" && row !== null && row.type === "turn/end") throw this.issue;',
+        '\t\t\treturn;',
+        '\t\t}',
+        '\t\tthis.restore.decodeRow(row);',
+      ].join('\n')
+      const MIG_CONSUME_NEW = [
+        '\t\tif (this.issue !== void 0) {',
+        '\t\t\tif (typeof row === "object" && row !== null && row.type === "turn/end") throw this.issue;',
+        '\t\t\treturn;',
+        '\t\t}',
+        '\t\tdshMobileHydrateCompactionRow(row, this.dshCompactionSummaries);',
+        '\t\tthis.restore.decodeRow(row);',
+      ].join('\n')
+      if (!s.includes(MIG_CONSUME_OLD)) throw new Error('spj-compaction-dedup anchor missing: MigratingJsonlRows consume')
+      s = replaceOnce(s, MIG_CONSUME_OLD, MIG_CONSUME_NEW)
+
+      // 6. encodeMigrationRows dedup
+      const ENCODE_MIG_OLD = [
+        'async function* encodeMigrationRows(artifact, format, signal) {',
+        '\tsignal?.throwIfAborted();',
+        '\tlet lines = [];',
+        '\tlet bytes = 0;',
+        '\tfor (const value of artifact.events) {',
+        '\t\tconst line = `${stringifyJson(format.encodeEvent(value), `migrated Session event ${value.seq}`)}`;',
+      ].join('\n')
+      // Wait: line 1924 has trailing \n in template literal: `\n`}` - let's match exact line 1924!
+      const ENCODE_MIG_EXACT_OLD = [
+        'async function* encodeMigrationRows(artifact, format, signal) {',
+        '\tsignal?.throwIfAborted();',
+        '\tlet lines = [];',
+        '\tlet bytes = 0;',
+        '\tfor (const value of artifact.events) {',
+        '\t\tconst line = `${stringifyJson(format.encodeEvent(value), `migrated Session event ${value.seq}`)}\\n`;',
+      ].join('\n')
+      const ENCODE_MIG_EXACT_NEW = [
+        'async function* encodeMigrationRows(artifact, format, signal) {',
+        '\tsignal?.throwIfAborted();',
+        '\tconst compactionSummaries = /* @__PURE__ */ new Map();',
+        '\tlet lines = [];',
+        '\tlet bytes = 0;',
+        '\tfor (const value of artifact.events) {',
+        '\t\tconst encoded = dshMobileDeduplicateCompactionEncoded(format.encodeEvent(value), compactionSummaries);',
+        '\t\tconst line = `${stringifyJson(encoded, `migrated Session event ${value.seq}`)}\\n`;',
+      ].join('\n')
+      if (!s.includes(ENCODE_MIG_EXACT_OLD)) throw new Error('spj-compaction-dedup anchor missing: encodeMigrationRows')
+      s = replaceOnce(s, ENCODE_MIG_EXACT_OLD, ENCODE_MIG_EXACT_NEW)
+
+      // 7. Pass compactionSummaries from persistBatch -> appendLines -> encodeEventBatch
+      const PERSIST_BATCH_OLD = [
+        '\tasync persistBatch(header, events, isMaterialized, inheritedEventCount) {',
+        '\t\tthis.coldLogMemo.delete(header.id);',
+        '\t\tawait this.ensureRootEncoding();',
+        '\t\tif (isMaterialized) await this.appendLines(header, events);',
+      ].join('\n')
+      const PERSIST_BATCH_NEW = [
+        '\tasync persistBatch(header, events, isMaterialized, inheritedEventCount, compactionSummaries) {',
+        '\t\tthis.coldLogMemo.delete(header.id);',
+        '\t\tawait this.ensureRootEncoding();',
+        '\t\tif (isMaterialized) await this.appendLines(header, events, compactionSummaries);',
+      ].join('\n')
+      if (!s.includes(PERSIST_BATCH_OLD)) throw new Error('spj-compaction-dedup anchor missing: persistBatch')
+      s = replaceOnce(s, PERSIST_BATCH_OLD, PERSIST_BATCH_NEW)
+
+      const ENCODE_BATCH_OLD = [
+        '\tasync encodeEventBatch(events) {',
+        '\t\tconst body = eventLines(events) + "\\n";',
+        '\t\treturn this.compression === "zstd" ? compressZstdFrame(body) : body;',
+        '\t}',
+      ].join('\n')
+      const ENCODE_BATCH_NEW = [
+        '\tasync encodeEventBatch(events, compactionSummaries) {',
+        '\t\tconst body = eventLines(events, compactionSummaries) + "\\n";',
+        '\t\treturn this.compression === "zstd" ? compressZstdFrame(body) : body;',
+        '\t}',
+      ].join('\n')
+      if (!s.includes(ENCODE_BATCH_OLD)) throw new Error('spj-compaction-dedup anchor missing: encodeEventBatch')
+      s = replaceOnce(s, ENCODE_BATCH_OLD, ENCODE_BATCH_NEW)
+
+      const APPEND_LINES_OLD = [
+        '\tasync appendLines(meta, events) {',
+        '\t\tconst content = await this.encodeEventBatch(events);',
+      ].join('\n')
+      const APPEND_LINES_NEW = [
+        '\tasync appendLines(meta, events, compactionSummaries) {',
+        '\t\tconst content = await this.encodeEventBatch(events, compactionSummaries);',
+      ].join('\n')
+      if (!s.includes(APPEND_LINES_OLD)) throw new Error('spj-compaction-dedup anchor missing: appendLines')
+      s = replaceOnce(s, APPEND_LINES_OLD, APPEND_LINES_NEW)
+
+      if (!s.includes('dsh-mobile compaction dedup (C5)')
+        || !s.includes('function dshMobileDeduplicateCompactionEncoded(')
+        || !s.includes('function dshMobileHydrateCompactionRow(')) {
+        throw new Error('spj-compaction-dedup-C5 verification failed')
+      }
+      return s
+    },
+  },
+
+  // ── sqlite-storage-wal-vacuum-S1：storage-sqlite WAL/freelist 有界回收（2026-11-25 存储审计 #6，scope=engine）──
+  'sqlite-storage-wal-vacuum-S1': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-storage-sqlite/lib/index.js',
+    scope: 'engine',
+    check: (s) => s.includes('dsh-mobile sqlite storage maintenance (S1)')
+      && s.includes('function dshMobileMaintainStorageSqlite(')
+      && s.includes('PRAGMA auto_vacuum = INCREMENTAL')
+      && s.includes('PRAGMA wal_checkpoint(TRUNCATE)'),
+    apply: (s) => {
+      if (s.includes('dsh-mobile sqlite storage maintenance (S1)')
+        && s.includes('function dshMobileMaintainStorageSqlite(')) return s
+
+      const CFG_OLD = [
+        'function configureDatabase(db, path, journalMode) {',
+        '\tdb.exec("PRAGMA foreign_keys = ON");',
+        '\tdb.exec(`PRAGMA journal_mode = ${journalMode.toUpperCase()}`);',
+        '\tconst { user_version: onDisk } = db.prepare("PRAGMA user_version").get();',
+        '\tif (onDisk !== 0 && onDisk !== 1) throw new StorageError("version-mismatch", `storage database at "${path}" has schema version ${onDisk}, incompatible with this build (1)`);',
+      ].join('\n')
+      const CFG_NEW = [
+        '/* dsh-mobile sqlite storage maintenance (S1): bounded incremental_vacuum and WAL checkpoint on disk DBs. */',
+        'function dshMobileIsDiskSqlite(db) {',
+        '\ttry {',
+        '\t\tconst mainDb = db.prepare("PRAGMA database_list").all().find((row) => row.name === "main");',
+        '\t\treturn typeof mainDb?.file === "string" && mainDb.file.length > 0;',
+        '\t} catch {',
+        '\t\treturn false;',
+        '\t}',
+        '}',
+        'function dshMobileMaintainStorageSqlite(db, journalMode, forceTruncate = false) {',
+        '\tif (!db || !dshMobileIsDiskSqlite(db)) return;',
+        '\ttry {',
+        '\t\tconst freelist = Number(db.prepare("PRAGMA freelist_count").get()?.freelist_count ?? 0);',
+        '\t\tif (forceTruncate && freelist > 0) db.exec("PRAGMA incremental_vacuum");',
+        '\t\telse if (freelist >= 64) db.exec("PRAGMA incremental_vacuum(64)");',
+        '\t\tif (journalMode === "wal") {',
+        '\t\t\tdb.exec(forceTruncate ? "PRAGMA wal_checkpoint(TRUNCATE)" : "PRAGMA wal_checkpoint(PASSIVE)");',
+        '\t\t}',
+        '\t} catch {}',
+        '}',
+        'function configureDatabase(db, path, journalMode) {',
+        '\tdb.exec("PRAGMA foreign_keys = ON");',
+        '\tif (path !== ":memory:") {',
+        '\t\tconst { user_version: preVersion } = db.prepare("PRAGMA user_version").get();',
+        '\t\tif (preVersion === 0) try { db.exec("PRAGMA auto_vacuum = INCREMENTAL"); } catch {}',
+        '\t}',
+        '\tdb.exec(`PRAGMA journal_mode = ${journalMode.toUpperCase()}`);',
+        '\tconst { user_version: onDisk } = db.prepare("PRAGMA user_version").get();',
+        '\tif (onDisk !== 0 && onDisk !== 1) throw new StorageError("version-mismatch", `storage database at "${path}" has schema version ${onDisk}, incompatible with this build (1)`);',
+        '\tif (path !== ":memory:" && journalMode === "wal") db.exec("PRAGMA wal_autocheckpoint = 256");',
+      ].join('\n')
+      if (!s.includes(CFG_OLD)) throw new Error('sqlite-storage-wal-vacuum-S1 anchor missing: configureDatabase')
+      s = replaceOnce(s, CFG_OLD, CFG_NEW)
+
+      const DEL_OLD = [
+        '\tdeleteRecords(table, keys) {',
+        '\t\treturn this.settle(() => {',
+        '\t\t\tconst remove = this.statementsFor(table).remove;',
+        '\t\t\tif (keys.length === 0) return;',
+        '\t\t\tthis.write(() => {',
+        '\t\t\t\tlet changes = 0;',
+        '\t\t\t\tfor (const key of new Set(keys)) changes += Number(remove.run(key).changes);',
+        '\t\t\t\treturn changes;',
+        '\t\t\t}, true);',
+        '\t\t});',
+        '\t}',
+      ].join('\n')
+      const DEL_NEW = [
+        '\tdeleteRecords(table, keys) {',
+        '\t\treturn this.settle(() => {',
+        '\t\t\tconst remove = this.statementsFor(table).remove;',
+        '\t\t\tif (keys.length === 0) return;',
+        '\t\t\tthis.write(() => {',
+        '\t\t\t\tlet changes = 0;',
+        '\t\t\t\tfor (const key of new Set(keys)) changes += Number(remove.run(key).changes);',
+        '\t\t\t\treturn changes;',
+        '\t\t\t}, true);',
+        '\t\t\tconst jm = String(this.db.prepare("PRAGMA journal_mode").get()?.journal_mode ?? "").toLowerCase();',
+        '\t\t\tdshMobileMaintainStorageSqlite(this.db, jm, false);',
+        '\t\t});',
+        '\t}',
+      ].join('\n')
+      if (!s.includes(DEL_OLD)) throw new Error('sqlite-storage-wal-vacuum-S1 anchor missing: deleteRecords')
+      s = replaceOnce(s, DEL_OLD, DEL_NEW)
+
+      const CTOR_OLD = '\tconstructor(config) {\n\t\tthis.ready = openDatabase(config.path, config.journalMode);'
+      const CTOR_NEW = '\tjournalMode;\n\tconstructor(config) {\n\t\tthis.journalMode = config.journalMode;\n\t\tthis.ready = openDatabase(config.path, config.journalMode);'
+      if (!s.includes(CTOR_OLD)) throw new Error('sqlite-storage-wal-vacuum-S1 anchor missing: ctor')
+      s = replaceOnce(s, CTOR_OLD, CTOR_NEW)
+
+      const CLOSE_OLD = '\t\tfor (const pending of [...this.units.values()]) await (await pending.catch(() => void 0))?.close();\n\t\tdb.close();'
+      const CLOSE_NEW = '\t\tfor (const pending of [...this.units.values()]) await (await pending.catch(() => void 0))?.close();\n\t\tdshMobileMaintainStorageSqlite(db, this.journalMode, true);\n\t\tdb.close();'
+      if (!s.includes(CLOSE_OLD)) throw new Error('sqlite-storage-wal-vacuum-S1 anchor missing: doClose')
+      s = replaceOnce(s, CLOSE_OLD, CLOSE_NEW)
+
+      return s
+    },
+  },
+
+  // ── session-query-wal-vacuum-S2：session-query-sqlite WAL/freelist 有界回收（2026-11-25 存储审计 #6，scope=engine）──
+  'session-query-wal-vacuum-S2': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-query-sqlite/lib/index.js',
+    scope: 'engine',
+    check: (s) => s.includes('dsh-mobile session-query sqlite maintenance (S2)')
+      && s.includes('function dshMobileMaintainQuerySqlite(')
+      && s.includes('PRAGMA auto_vacuum = INCREMENTAL')
+      && s.includes('PRAGMA wal_checkpoint(TRUNCATE)'),
+    apply: (s) => {
+      if (s.includes('dsh-mobile session-query sqlite maintenance (S2)')
+        && s.includes('function dshMobileMaintainQuerySqlite(')) return s
+
+      const OPEN_OLD = [
+        '\t\tif (applicationId === 1146308689) {',
+        '\t\t\tassertDerivedUserTables(actual, userTables);',
+        '\t\t\tif (version !== 8) resetDerivedSchema(db, userTables);',
+        '\t\t}',
+        '\t\tdb.exec(`PRAGMA journal_mode = ${journalMode.toUpperCase()}`);',
+      ].join('\n')
+      const OPEN_NEW = [
+        '\t\tif (actual !== ":memory:" && applicationId === 0 && userTables.length === 0) {',
+        '\t\t\ttry { db.exec("PRAGMA auto_vacuum = INCREMENTAL"); } catch {}',
+        '\t\t}',
+        '\t\tif (applicationId === 1146308689) {',
+        '\t\t\tassertDerivedUserTables(actual, userTables);',
+        '\t\t\tif (version !== 8) resetDerivedSchema(db, userTables);',
+        '\t\t}',
+        '\t\tdb.exec(`PRAGMA journal_mode = ${journalMode.toUpperCase()}`);',
+        '\t\tif (actual !== ":memory:" && journalMode === "wal") db.exec("PRAGMA wal_autocheckpoint = 256");',
+      ].join('\n')
+      if (!s.includes(OPEN_OLD)) throw new Error('session-query-wal-vacuum-S2 anchor missing: openSearchDatabase')
+      s = replaceOnce(s, OPEN_OLD, OPEN_NEW)
+
+      const RESET_OLD = [
+        'function resetDerivedSchema(db, userTables) {',
+        '\tfor (const name of userTables) db.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(name)}`);',
+        '\tdb.exec("PRAGMA user_version = 0");',
+        '}',
+      ].join('\n')
+      const RESET_NEW = [
+        '/* dsh-mobile session-query sqlite maintenance (S2): incremental auto_vacuum and bounded WAL checkpoint. */',
+        'function dshMobileMaintainQuerySqlite(db, path, journalMode, forceTruncate = false) {',
+        '\tif (!db || path === ":memory:") return;',
+        '\ttry {',
+        '\t\tconst freelist = Number(db.prepare("PRAGMA freelist_count").get()?.freelist_count ?? 0);',
+        '\t\tif (forceTruncate && freelist > 0) db.exec("PRAGMA incremental_vacuum");',
+        '\t\telse if (freelist >= 64) db.exec("PRAGMA incremental_vacuum(64)");',
+        '\t\tif (journalMode === "wal") {',
+        '\t\t\tdb.exec(forceTruncate ? "PRAGMA wal_checkpoint(TRUNCATE)" : "PRAGMA wal_checkpoint(PASSIVE)");',
+        '\t\t}',
+        '\t} catch {}',
+        '}',
+        'function resetDerivedSchema(db, userTables) {',
+        '\tfor (const name of userTables) db.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(name)}`);',
+        '\ttry { db.exec("PRAGMA auto_vacuum = INCREMENTAL"); } catch {}',
+        '\tdb.exec("PRAGMA user_version = 0");',
+        '}',
+      ].join('\n')
+      if (!s.includes(RESET_OLD)) throw new Error('session-query-wal-vacuum-S2 anchor missing: resetDerivedSchema')
+      s = replaceOnce(s, RESET_OLD, RESET_NEW)
+
+      const CLOSE_OLD = '\t\tthis._db?.close();\n\t\tthis._db = void 0;'
+      const CLOSE_NEW = '\t\tdshMobileMaintainQuerySqlite(this._db, this.config.path, this.config.journalMode ?? "wal", true);\n\t\tthis._db?.close();\n\t\tthis._db = void 0;'
+      if (!s.includes(CLOSE_OLD)) throw new Error('session-query-wal-vacuum-S2 anchor missing: _close')
+      s = replaceOnce(s, CLOSE_OLD, CLOSE_NEW)
+
+      const COMMIT_OLD = '\t\t\t\tfor (const { entry, generation, persisted } of liveReplacements) this._replaceLiveSession(entry, generation, persisted);\n\t\t\t\tdb.exec("COMMIT");'
+      const COMMIT_NEW = '\t\t\t\tfor (const { entry, generation, persisted } of liveReplacements) this._replaceLiveSession(entry, generation, persisted);\n\t\t\t\tdb.exec("COMMIT");\n\t\t\t\tif (persistentDeletes.length > 0 || liveDeletes.length > 0) dshMobileMaintainQuerySqlite(db, this.config.path, this.config.journalMode ?? "wal", false);'
+      if (!s.includes(COMMIT_OLD)) throw new Error('session-query-wal-vacuum-S2 anchor missing: commit')
+      s = replaceOnce(s, COMMIT_OLD, COMMIT_NEW)
+
       return s
     },
   },
