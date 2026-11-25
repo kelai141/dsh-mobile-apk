@@ -789,14 +789,21 @@ if (existsSync(cordisTpl)) {
   console.error('[cordis 模板缺失] scripts/profile-web.cordis.patch.yml 不存在——装配清单不完整，快照不可发布')
   process.exit(1)
 }
-// 7c. ripgrep 平台包：Termux 动态 rg 复制进 @vscode/ripgrep-android-<abi>/bin/rg + 最小包清单（require.resolve 路径机制）
+// 7c. ripgrep 平台包：保留 require.resolve 的入口，复用 Termux 的动态 rg。
 const rgBin = join(U, 'bin', 'rg')
 const platformDir = join(STAGE, 'root', npmDshRoot, RGPKG)
 if (existsSync(rgBin)) {
   mkdirSync(join(platformDir, 'bin'), { recursive: true })
-  copyFileSync(rgBin, join(platformDir, 'bin', 'rg'))
+  const platformBin = join(platformDir, 'bin', 'rg')
+  rmSync(platformBin, { force: true })
+  const rgTarget = relative(dirname(platformBin), rgBin).replaceAll('\\', '/')
+  if (process.platform === 'win32') {
+    wsl(`ln -s -- "${rgTarget}" "${wslPath(platformBin)}"`)
+  } else {
+    symlinkSync(rgTarget, platformBin)
+  }
   writeFileSync(join(platformDir, 'package.json'), JSON.stringify({ name: RGPKG, version: '1.18.0', bin: { rg: 'bin/rg' } }, null, 2))
-  wsl(`chmod +x "${wslPath(join(platformDir, 'bin', 'rg'))}"`)
+  wsl(`chmod +x "${wslPath(rgBin)}"`)
   log(`ripgrep 平台包就位: node_modules/${RGPKG}/bin/rg`)
 } else {
   console.warn('警告: 预装 rg 缺失（ripgrep 平台包未补齐）')
