@@ -1841,18 +1841,25 @@ internal object SnapshotTransaction {
   }
 
   /**
-   * 退役清理后的**结构校验**：把拟写入的文本解析成条目，确认除了退役 id 之外一条不少。
+   * 退役清理后的**结构校验**：把拟写入的文本解析成条目，确认除了计划内移除的 id 之外一条不少。
    *
    * 为什么要在写盘前判：`repairRetiredEntries` 是按 id/name 的文本级摘除，一旦解析口径退化
    * 就可能连带删掉同组条目。删除是破坏性的，判不准就不写——保留旧文件、下一次启动重试。
-   * 用户自装同 id 但不同包名的条目不在 [FactoryProfilePatch.RETIRED_FACTORY_ENTRIES] 的值里，
-   * 因此不会被算进「允许消失」的集合。
+   * 允许消失集合取自本次实际产出的计划内移除 id（`merged.removedIds + retired.removedIds`）与
+   * [FactoryProfilePatch.ALLOWED_REMOVED_IDS] 的交集：其中 [FactoryProfilePatch.LEGACY_MOBILE_ID]
+   * 仅在旧单点归一实际触发时才进入放行集合，因此用户自装同 id 但不同包名的条目、或带用户配置的
+   * 退役条目仍受完整保护。
    *
    * @throws SnapshotFsException code=`snapshot-atomic-write` —— 结构不满足，拒绝落盘。
    */
-  private fun validateRetirementKeepsOtherEntries(beforeText: String, candidate: String, label: String) {
-    val retired = FactoryProfilePatch.RETIRED_FACTORY_ENTRIES.keys + FactoryProfilePatch.RETIRED_DISABLED_ROW_IDS
-    val required = FactoryProfilePatch.blockIds(beforeText).toSet() - retired
+  private fun validateRetirementKeepsOtherEntries(
+    beforeText: String,
+    candidate: String,
+    label: String,
+    allowedRemovedIds: Set<String> = FactoryProfilePatch.ALLOWED_REMOVED_IDS,
+  ) {
+    val allowed = allowedRemovedIds intersect FactoryProfilePatch.ALLOWED_REMOVED_IDS
+    val required = FactoryProfilePatch.blockIds(beforeText).toSet() - allowed
     val kept = FactoryProfilePatch.blockIds(candidate).toSet()
     val missing = required - kept
     if (missing.isEmpty()) return
@@ -1900,13 +1907,15 @@ internal object SnapshotTransaction {
       merged.text,
       retiredFactories = FactoryProfilePatch.RETIRED_FACTORY_ENTRIES,
     )
-    val result = FactoryProfilePatch.Result(retired.text, merged.changes + retired.changes)
+    val plannedRemoved = merged.removedIds + retired.removedIds
+    val result = FactoryProfilePatch.Result(retired.text, merged.changes + retired.changes, plannedRemoved)
     if (result.text == liveText) return
     // issue #274 ②：原子写 + 非空校验（旧实现直写，半份 patch 会让引擎读不到装配条目）。
     writeTextAtomic(live, result.text, "cordis.patch.yml") {
       validatePatchYaml(it, "cordis.patch.yml")
-      // 只允许搬走退役条目：其余条目 id 集合必须原样保留，否则拒绝落盘、保留旧文件。
-      validateRetirementKeepsOtherEntries(liveText, it, "cordis.patch.yml")
+      // 只允许搬走计划内移除的条目（退役条目与本次实际触发归一迁走的 LEGACY_MOBILE_ID）：
+      // 其余条目 id 集合必须原样保留，否则拒绝落盘、保留旧文件。
+      validateRetirementKeepsOtherEntries(liveText, it, "cordis.patch.yml", result.removedIds)
     }
     for (change in result.changes) notes += live.parentFile?.name + "/" + live.name + ": " + change
   }
