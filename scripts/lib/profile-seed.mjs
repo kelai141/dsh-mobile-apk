@@ -8,7 +8,8 @@
 //
 // 保留一条真实不变量：出厂清单只带上游真会读的东西（dsh.profile.bundles 非空、无死键）。
 // 死键来源不是假设——0.14.1 及更早的构建把 patchReload 写进了快照，基座 home 会被后续快照继承。
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
@@ -16,6 +17,23 @@ import { join } from 'node:path'
 export const SHIPPED_PROFILES = ['web', 'headless']
 /** 上游不再读取、留在清单里只会造成误读的键。 */
 export const DEAD_PROFILE_KEYS = ['patchReload']
+
+/**
+ * Drop audited package trees inherited from the immutable base-dsh archive.
+ * Run only in the build stage, before any factory packages are injected.
+ */
+export function pruneRetiredAttachmentSeed(stageRoot, baseArchive, seed) {
+  if (createHash('sha256').update(readFileSync(baseArchive)).digest('hex') !== seed.sha256) return null
+
+  const modules = join(stageRoot, 'home', '.dsh', 'profiles', 'web', 'node_modules')
+  for (const name of seed.packages) {
+    if (!/^(?:@[a-z0-9_-]+\/)?[a-z0-9_-][a-z0-9_.-]*$/.test(name)) {
+      throw new Error(`Invalid retired attachment seed package: ${name}`)
+    }
+    rmSync(join(modules, name), { recursive: true, force: true })
+  }
+  return seed.packages.length
+}
 
 /**
  * Strip dead keys from the staged profile manifests and assert the shipped shape.

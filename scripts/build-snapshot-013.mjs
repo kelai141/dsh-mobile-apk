@@ -50,7 +50,7 @@ const PYTHON = process.platform === 'win32' ? 'python' : 'python3'
 // 清单/模板与编排逻辑分离：预装包、镜像链、剥离清单、瘦身清单、seed 模板、apt.conf、
 // install-clang.sh 均在本目录维护；编排器只读数据 + 走流程。@@PREFIX@@ 为模板占位
 // （构建期替换为设备端前缀，本地 stage 路径不可烧入）。
-import { checkShippedProfileManifests } from './lib/profile-seed.mjs'
+import { checkShippedProfileManifests, pruneRetiredAttachmentSeed } from './lib/profile-seed.mjs'
 const CFG_DIR = join(ROOT, 'scripts', 'snapshot-config')
 const readCfg = (f) => readFileSync(join(CFG_DIR, f), 'utf8')
 const PREINSTALL = JSON.parse(readCfg('preinstall.json'))
@@ -121,6 +121,12 @@ const baseDsh = join(BASE_DIR, 'base-dsh.tar.xz')
 if (existsSync(baseDsh)) {
   wsl(`xz -dT${XZ_THREADS} -c "${wslPath(baseDsh)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}"`)
   log('合并 base-dsh（home/.dsh 配置层）')
+}
+// 仅对已审计的出厂基座移除退役附件包及其独占依赖。新基座需重新核对闭包。
+if (existsSync(baseDsh)) {
+  const pruned = pruneRetiredAttachmentSeed(join(STAGE, 'root'), baseDsh, SLIM.retiredAttachmentSeed)
+  if (pruned === null) log('跳过退役附件依赖裁剪：base-dsh 摘要与审计输入不同')
+  else log(`退役附件依赖裁剪：${pruned} 个包路径`)
 }
 // 🔒 机密剥离（安全审计 C1，2026-08-23）：base-dsh 是从运行中设备提取的配置层，
 // 可能携带运行期真实凭据/会话/用户数据。分发快照只应含配置与依赖（等价 make-snapshot.sh 67-73 的剥离面）：
