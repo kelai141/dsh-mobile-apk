@@ -138,11 +138,34 @@
   "sourcemapDelete": true,
   "treeDelete": [
     {
+      "path": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@mixmark-io/domino/test",
+      "reason": "Domino 开发文件，保留运行时实现和许可"
+    },
+    {
+      "path": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@mixmark-io/domino/.yarn",
+      "reason": "Domino 开发文件，保留运行时实现和许可"
+    },
+    {
       "path": "usr/share/man",
       "reason": "man 手册页：设备上无任何消费者（无 man 浏览路径），整树删除同时降字节/条目/符号链接三个维度"
     }
   ],
   "extensionDelete": [
+    {
+      "root": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/node-pty/third_party/conpty",
+      "ext": ".dll",
+      "reason": "Windows ConPTY 二进制或调试符号，保留许可与 Android PTY"
+    },
+    {
+      "root": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/node-pty/third_party/conpty",
+      "ext": ".exe",
+      "reason": "Windows ConPTY 二进制或调试符号，保留许可与 Android PTY"
+    },
+    {
+      "root": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/node-pty/third_party/conpty",
+      "ext": ".pdb",
+      "reason": "Windows ConPTY 二进制或调试符号，保留许可与 Android PTY"
+    },
     {
       "root": "usr/lib/node_modules/@deepseek-ai/dsh",
       "ext": ".d.ts",

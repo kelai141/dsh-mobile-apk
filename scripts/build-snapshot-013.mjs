@@ -1429,6 +1429,15 @@ log('清单驱动裁剪：treeDelete + extensionDelete…')
     log(`  extensionDelete 已删 ${entry.root} 下的 *${entry.ext}：${n} 个`)
   }
 }
+// 只匹配两种 macOS helper 的已知载荷文件，保留同目录中的许可。
+for (const platform of ['darwin-arm64', 'darwin-x64']) {
+  const dir = join(STAGE, 'root', npmDshRoot, '@deepseek-ai/dsh-experimental-cua-macos', 'native', 'bin', platform)
+  if (existsSync(dir)) {
+    const payloadNames = ['current.json', 'Info.plist', 'DSHComputerUse.icns', 'dsh-cua-native', 'CodeResources']
+    const match = payloadNames.map((name) => `-name '${name}'`).join(' -o ')
+    wsl(`find "${wslPath(dir)}" -type f \\( ${match} \\) -delete`)
+  }
+}
 log('清单驱动裁剪完成（treeDelete + extensionDelete）')
 
 // 归档前刷新脚本清单：第 6 步之后还会往 usr/bin 写 shim（pnpm/npm/dsh-node 等），
