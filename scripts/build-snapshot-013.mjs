@@ -126,7 +126,7 @@ if (existsSync(baseDsh)) {
 if (existsSync(baseDsh)) {
   const pruned = pruneRetiredAttachmentSeed(join(STAGE, 'root'), baseDsh, SLIM.retiredAttachmentSeed)
   if (pruned === null) log('跳过退役附件依赖裁剪：base-dsh 摘要与审计输入不同')
-  else log(`退役附件依赖裁剪：${pruned} 个包路径`)
+  else log(`退役附件依赖裁剪：${pruned} 个路径`)
 }
 // 🔒 机密剥离（安全审计 C1，2026-08-23）：base-dsh 是从运行中设备提取的配置层，
 // 可能携带运行期真实凭据/会话/用户数据。分发快照只应含配置与依赖（等价 make-snapshot.sh 67-73 的剥离面）：

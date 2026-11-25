@@ -26,13 +26,13 @@ export function pruneRetiredAttachmentSeed(stageRoot, baseArchive, seed) {
   if (createHash('sha256').update(readFileSync(baseArchive)).digest('hex') !== seed.sha256) return null
 
   const modules = join(stageRoot, 'home', '.dsh', 'profiles', 'web', 'node_modules')
-  for (const name of seed.packages) {
-    if (!/^(?:@[a-z0-9_-]+\/)?[a-z0-9_-][a-z0-9_.-]*$/.test(name)) {
-      throw new Error(`Invalid retired attachment seed package: ${name}`)
+  for (const name of seed.entries) {
+    if (!/^(?:@[a-z0-9_-]+\/)?[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(name)) {
+      throw new Error(`Invalid retired attachment seed entry: ${name}`)
     }
     rmSync(join(modules, name), { recursive: true, force: true })
   }
-  return seed.packages.length
+  return seed.entries.length
 }
 
 /**
