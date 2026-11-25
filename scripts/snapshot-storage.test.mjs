@@ -35,4 +35,3 @@ test('退役附件裁剪仅操作摘要匹配的出厂 Web profile 路径', (t) 
   for (const file of keep) assert.equal(readFileSync(file, 'utf8'), 'fixture', file)
   for (const file of remove) assert.ok(!existsSync(file), file)
 })
-
