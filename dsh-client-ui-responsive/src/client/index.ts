@@ -75,7 +75,7 @@ import { observeDocumentLanguage, tr } from './i18n.ts'
 import { ThemeBridge } from './theme-bridge.ts'
 import { EnterGuard } from './enter-guard.ts'
 import { ExportResultChannel, reportUserFacingResult, type ExportResultPayload } from './export-result.ts'
-import { MobileFormMarker } from './mobile/form-marker.ts'
+import { MobileFormMarker, currentDeviceForm, rightbarOverlaysConversation } from './mobile/form-marker.ts'
 import { MOBILE_FORM_CSS } from './mobile/mobile-form.css.ts'
 import { MOBILE_TABLE_CSS } from './mobile/mobile-table.css.ts'
 import { MobileChrome, type MobileChromeInjected } from './mobile/MobileChrome.tsx'
@@ -634,7 +634,10 @@ export function apply(ctx: ClientContext): void {
     scope.effect(() => injectStyle('sidebar-bubbles', SIDEBAR_BUBBLES_CSS), 'ui-responsive: bubble navigation styles')
     scope.effect(() => {
       const sidebar = scope.sidebarRight as typeof scope.sidebarRight & BubbleReorderFace
-      const workspaces = new MobileWorkspaces(sidebar, fullscreen => { scope.layout.openRightbar(false, fullscreen) })
+      const workspaces = new MobileWorkspaces(sidebar, fullscreen => {
+        const track = !rightbarOverlaysConversation(currentDeviceForm(), fullscreen)
+        scope.layout.openRightbar(track, fullscreen)
+      })
       mobileWorkspaces = workspaces
       workspaces.attach()
       const bubbles = new SidebarBubbles({

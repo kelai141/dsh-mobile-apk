@@ -204,4 +204,26 @@ html[data-dsh-mobile-form] button[aria-haspopup='menu'][aria-label='更多工具
 html[data-dsh-mobile-form] button[aria-haspopup='menu'][aria-label='More tools'] {
   display: none;
 }
+
+/* 横屏紧凑缩放（phone-landscape 与 16:9/桌面形态 desktop-landscape）：
+   适度收敛顶栏、标签条与侧栏密度，让对话正文与右侧文档有更多可视面积，
+   同时保留按钮可读性与触控命中区。 */
+html[data-dsh-device-form='desktop-landscape'] [data-dsh-frame] [data-conversation-header],
+html[data-dsh-device-form='phone-landscape'] [data-dsh-frame] [data-conversation-header] {
+  min-height: 40px;
+}
+html[data-dsh-device-form='desktop-landscape'] [data-sidebar-right-panel] [data-dockkit-strip] {
+  min-height: 36px;
+}
+html[data-dsh-device-form='desktop-landscape'] [data-sidebar-right-panel] [data-dockkit-tab] {
+  font-size: 13px;
+  padding-block: 4px;
+}
+html[data-dsh-device-form='desktop-landscape'] [data-dsh-frame] > [class*='sidebarCol'] {
+  font-size: 13px;
+}
+html[data-dsh-device-form='phone-landscape'] [data-dsh-frame] > [class*='centerCol'],
+html[data-dsh-device-form='phone-landscape'] [data-dsh-frame] > [class*='rightbarCol'] {
+  font-size: 13px;
+}
 `
