@@ -82,7 +82,7 @@ class FileExternalBridgeTest {
 
   @Test
   fun `打开主意图是 VIEW 且对外 Uri 已授权`() {
-    val plan = FileExternalBridge.openPlan(file, "image/jpeg", null)
+    val plan = FileExternalBridge.openPlan(file, "image/jpeg", "photo.jpg")
     assertEquals("open 主意图必须是 ACTION_VIEW", "android.intent.action.VIEW", plan.primary.action)
     assertEquals("主意图 data 必须是文件 Uri", file, plan.primary.dataUri)
     assertEquals("主意图 type 必须是该文件类型", "image/jpeg", plan.primary.type)
@@ -91,53 +91,44 @@ class FileExternalBridgeTest {
     assertEquals("主意图只该授权一个 Uri", 1, plan.primary.grants.size)
     assertEquals("授权对象必须是文件 Uri", file, plan.primary.grants[0].uri)
     assertEquals("授权的 MIME 必须是该文件类型", "image/jpeg", plan.primary.grants[0].mime)
+    assertEquals("授权标签应保留可读文件名", "photo.jpg", plan.primary.grants[0].label)
   }
 
   @Test
-  fun `打开不得把 SEND 混进候选`() {
-    // open 与 share 的分工：open 不该把「只发不收」的应用列进「打开方式」，
-    // 否则用户点进去看到的是转发界面，不是打开。
-    val plan = FileExternalBridge.openPlan(file, "text/plain", null)
-    assertEquals("没有父目录时不该有并列候选", 0, plan.initial.size)
+  fun `打开是纯净单意图不得混入 SEND 或目录`() {
+    val plan = FileExternalBridge.openPlan(file, "text/plain", "a.txt")
+    assertEquals("open 不应包含额外的 INITIAL_INTENTS", 0, plan.initial.size)
     val code = codeOnly(source("FileExternalBridge.kt"))
     val openBody = code.substringAfter("internal fun openPlan(").substringBefore("internal fun sharePlan(")
     assertFalse("openPlan 里不得出现 ACTION_SEND", openBody.contains("ACTION_SEND"))
+    assertFalse("openPlan 里不得混入 resource/folder", openBody.contains("folderSpec"))
   }
 
   @Test
-  fun `分享主意图是 SEND 且 Uri 走 EXTRA_STREAM`() {
-    // ACTION_SEND 的接收方读 EXTRA_STREAM，不是 data。两者都要对。
-    val plan = FileExternalBridge.sharePlan(file, "application/pdf", null)
+  fun `分享主意图是纯净 SEND 且 Uri 走 EXTRA_STREAM`() {
+    val plan = FileExternalBridge.sharePlan(file, "application/pdf", "report.pdf")
     assertEquals("share 主意图必须是 ACTION_SEND", "android.intent.action.SEND", plan.primary.action)
     assertEquals("EXTRA_STREAM 必须是文件 Uri", file, plan.primary.streamUri)
     assertNull("share 主意图不该再设 data（SEND 用 EXTRA_STREAM）", plan.primary.dataUri)
     assertEquals("type 必须是该文件类型", "application/pdf", plan.primary.type)
+    assertEquals("授权标签应保留可读文件名", "report.pdf", plan.primary.grants[0].label)
     assertTrue("EXTRA_STREAM 里的 Uri 必须已授权",
       FileExternalBridge.fullyGranted(plan.primary))
+    assertTrue("share 不得混入异构 VIEW/folder INITIAL_INTENTS（防 Sharesheet 降级）", plan.initial.isEmpty())
   }
 
   @Test
-  fun `分享的并列候选是 VIEW 且也各自授权`() {
-    // EXTRA_INITIAL_INTENTS 不继承 chooser 的授权，必须各个自带。
-    val plan = FileExternalBridge.sharePlan(file, "image/png", null)
-    assertEquals("share 应有一个 VIEW 并列候选", 1, plan.initial.size)
-    val view = plan.initial[0]
-    assertEquals("并列候选必须是 ACTION_VIEW", "android.intent.action.VIEW", view.action)
-    assertEquals("并列候选 data 必须是文件 Uri", file, view.dataUri)
-    assertTrue("并列候选对外暴露的 Uri 必须逐个有授权",
-      FileExternalBridge.fullyGranted(view))
+  fun `分享计划不混入异构并列候选`() {
+    val plan = FileExternalBridge.sharePlan(file, "image/png", "img.png")
+    assertEquals("share 保持纯净单意图 ACTION_SEND", 0, plan.initial.size)
   }
 
   @Test
   fun `凡是拿不到授权的 Uri 都不得出现在意图里`() {
-    // 用户硬要求「必须授权，否则目标应用常报无法打开/空白」。这条是全局不变量：
-    // 遍历两种模式的所有意图（含父目录项），逐个断言「对外给的 Uri ⊆ 已授权 Uri」。
     val specs = ArrayList<FileExternalBridge.IntentSpec>()
     for (plan in listOf(
-      FileExternalBridge.openPlan(file, "image/jpeg", parent),
-      FileExternalBridge.sharePlan(file, "image/jpeg", parent),
-      FileExternalBridge.openPlan(file, "image/jpeg", null),
-      FileExternalBridge.sharePlan(file, "image/jpeg", null),
+      FileExternalBridge.openPlan(file, "image/jpeg", "photo.jpg"),
+      FileExternalBridge.sharePlan(file, "image/jpeg", "photo.jpg"),
     )) {
       specs.add(plan.primary)
       specs.addAll(plan.initial)
@@ -153,26 +144,29 @@ class FileExternalBridgeTest {
   }
 
   @Test
-  fun `适配层必须同时设 flag 与 ClipData`() {
-    // 用户硬要求「FLAG_GRANT_READ_URI_PERMISSION + setClipData」。只加 flag 是最常见的
-    // 「目标应用报无法打开」原因：flag 只授权 data，EXTRA_STREAM 与并列候选里的 Uri 拿不到。
+  fun `适配层必须同时设 flag 与真实 MIME ClipData，禁用 newRawUri`() {
     val code = codeOnly(source("FileExternalBridge.kt"))
-    val body = code.substringAfter("internal fun toIntent(")
+    val helperBody = code.substringAfter("internal fun buildGrantClipData(").substringBefore("internal fun toIntent(")
+    assertTrue("buildGrantClipData 必须把真实 mime 写入 ClipDescription",
+      helperBody.contains("ClipData(label, arrayOf(mime)"))
+    assertFalse("全文件不得再调用会强制写入 text/uri-list 的 ClipData.newRawUri",
+      code.contains("newRawUri"))
+
+    val body = code.substringAfter("internal fun toIntent(").substringBefore("internal fun chooser(")
     assertTrue("必须设读授权 flag",
       body.contains("addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)"))
     assertTrue("必须设 ClipData",
-      body.contains("clipData = ClipData.newRawUri("))
-    // 二者必须在同一段里成对出现（只做一半就判红）。
+      body.contains("clipData = buildGrantClipData("))
     val flagAt = body.indexOf("FLAG_GRANT_READ_URI_PERMISSION")
-    val clipAt = body.indexOf("ClipData.newRawUri")
+    val clipAt = body.indexOf("buildGrantClipData(")
     assertTrue("flag 与 ClipData 必须在同一循环里成对设置",
       flagAt >= 0 && clipAt > flagAt && clipAt - flagAt < 400)
-    // chooser 自身也要有（系统把授权转给选中目标时读 chooser 这层）。
-    val chooserBody = code.substringAfter("internal fun chooser(")
+
+    val chooserBody = code.substringAfter("internal fun chooser(").substringBefore("private val NARROW_TEXT_MIMES")
     assertTrue("chooser 也必须带读授权",
       chooserBody.contains("chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)"))
-    assertTrue("chooser 也必须带 ClipData",
-      chooserBody.contains("chooser.clipData = ClipData.newRawUri("))
+    assertTrue("chooser 也必须带真实 MIME ClipData",
+      chooserBody.contains("chooser.clipData = buildGrantClipData("))
   }
 
   @Test
@@ -183,26 +177,20 @@ class FileExternalBridgeTest {
       code.contains("if (aliveInitial.isNotEmpty()) {"))
   }
 
-  // ── 3. 目录项：不要硬塞打不开的 URI ───────────────────────────────────────
+  // ── 3. 目录项辅助：不给空父目录 Uri ──────────────────────────────────────────
 
   @Test
   fun `父目录不可授权时干脆不提供目录项`() {
-    // 用户硬要求：resource/folder 只对目录型 URI 有意义；拿不到可授权的父目录时
-    // 宁可不给这一项，也不要硬塞一个打不开的 URI。
-    assertNull("父目录 Uri 为 null 时不得提供目录项",
-      FileExternalBridge.folderSpec(null))
+    assertNull("父目录 Uri 为 null 时不提供目录项", FileExternalBridge.folderSpec(null))
     assertNull("空白父目录 Uri 同样不提供", FileExternalBridge.folderSpec("  "))
-    assertTrue("没有父目录时 open 的候选列表必须为空",
-      FileExternalBridge.openPlan(file, "image/jpeg", null).initial.isEmpty())
-    assertTrue("没有父目录时 share 只剩 VIEW 一条候选",
-      FileExternalBridge.sharePlan(file, "image/jpeg", null).initial.size == 1)
+    assertTrue("open 主计划保持纯净单意图", FileExternalBridge.openPlan(file, "image/jpeg", "photo.jpg").initial.isEmpty())
+    assertTrue("share 主计划保持纯净单意图", FileExternalBridge.sharePlan(file, "image/jpeg", "photo.jpg").initial.isEmpty())
   }
 
   @Test
   fun `目录项传的是父目录且 type 是 resource folder`() {
-    // 给文件管理器传文件 Uri（type=resource/folder）它打不开。传的必须是**所在目录**。
     val folder = FileExternalBridge.folderSpec(parent)
-    assertNotNull("父目录可授权时应提供目录项", folder)
+    assertNotNull("父目录有效时可构造目录项", folder)
     assertEquals("目录项 data 必须是父目录而不是文件", parent, folder!!.dataUri)
     assertNotEquals("目录项不得指向文件本身", file, folder.dataUri)
     assertEquals("目录项的 type 必须是 resource/folder",
@@ -210,24 +198,15 @@ class FileExternalBridgeTest {
     assertEquals("目录项也必须已授权",
       listOf(parent), FileExternalBridge.exposedUris(folder))
     assertTrue("目录项的 Uri 必须已授权", FileExternalBridge.fullyGranted(folder))
-    // 有父目录时两种模式都该多出这一项。
-    assertEquals("open 有父目录时应有 1 条候选", 1,
-      FileExternalBridge.openPlan(file, "image/jpeg", parent).initial.size)
-    assertEquals("share 有父目录时应有 2 条候选（VIEW + 目录）", 2,
-      FileExternalBridge.sharePlan(file, "image/jpeg", parent).initial.size)
   }
 
   @Test
-  fun `执行面取 parentFile 作目录项来源`() {
+  fun `exec layer uses unified PathOpen chooserUri`() {
     val code = codeOnly(source("FileExternalBridge.kt"))
-    assertTrue("必须取 parentFile 作为目录项来源", code.contains("file.parentFile"))
-    // 父目录的允许面判据在**行为面**由 PathOpenAllowlistTest 驱动真实实现（issue #1571 后
-    // 允许面本身已换成 ChooserAllowlist）。这里只保留「调用点在场」这一条形态断言，
-    // 不重复扮演判据。
-    assertTrue("父目录必须经受限 URI 解析器授权",
-      code.contains("file.parentFile?.let { PathOpen.chooserUri(activity, it) }"))
-    assertFalse("不得把文件 Uri 直接当目录项传出去",
-      code.contains("folderSpec(fileUri"))
+    assertTrue("must resolve via PathOpen.chooserUri",
+      code.contains("PathOpen.chooserUri(activity, file)"))
+    assertFalse("must not invent a separate FileProvider call",
+      code.contains("FileProvider"))
   }
 
   // ── 4. 错误码映射与返回形状 ─────────────────────────────────────────────
@@ -304,19 +283,34 @@ class FileExternalBridgeTest {
   // ── 5. MIME 兜底 ────────────────────────────────────────────────────────
 
   @Test
-  fun `页面没给 mime 时按扩展名推断`() {
-    // type 为空或 */* 时多数应用不注册，选择器会空掉——比猜错类型更糟。
+  fun `页面没给 mime 时按扩展名推断，文本归一、未知兜底星号`() {
     assertEquals("jpg", "image/jpeg", FileExternalBridge.effectiveMime("", "a.jpg"))
     assertEquals("大写扩展名同样识别", "application/pdf",
       FileExternalBridge.effectiveMime(null, "a.PDF"))
     assertEquals("星号类型按未给处理", "application/zip",
       FileExternalBridge.effectiveMime("*/*", "a.zip"))
-    assertEquals("未知扩展名兜底为 octet-stream", "application/octet-stream",
+    assertEquals("octet-stream 按未给处理（如 bundle 应回退 */*）", "*/*",
+      FileExternalBridge.effectiveMime("application/octet-stream", "pr1832.bundle"))
+    assertEquals("未知扩展名兜底为 */*", "*/*",
       FileExternalBridge.effectiveMime("", "a.weird"))
-    assertEquals("没有扩展名也兜底", "application/octet-stream",
+    assertEquals("没有扩展名也兜底 */*", "*/*",
       FileExternalBridge.effectiveMime(null, "noext"))
-    assertEquals("页面给了就用页面的", "image/heic",
+    assertEquals("页面给的窄文本 MIME 统一归一为 text/plain", "text/plain",
+      FileExternalBridge.effectiveMime("text/markdown", "a.md"))
+    assertEquals("json 统一归一为 text/plain", "text/plain",
+      FileExternalBridge.effectiveMime("application/json", "a.json"))
+    assertEquals("页面给了专属类型就用页面的", "image/heic",
       FileExternalBridge.effectiveMime("image/heic", "a.weird"))
+  }
+
+  @Test
+  fun `MIME 降级链按文本与二进制逐级回退至星号`() {
+    assertEquals("文本降级链先试原类型再 text/plain 再 */*",
+      listOf("text/csv", "text/plain", "*/*"),
+      FileExternalBridge.mimeFallbackChain("text/csv"))
+    assertEquals("二进制降级链回退 */*",
+      listOf("application/pdf", "*/*"),
+      FileExternalBridge.mimeFallbackChain("application/pdf"))
   }
 
 

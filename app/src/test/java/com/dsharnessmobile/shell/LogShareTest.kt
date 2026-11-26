@@ -577,4 +577,16 @@ class LogShareTest {
     assertTrue(mixed.contains("2 项超上限"))
   }
 
+  @Test
+  fun `分享诊断包 Intent 必须携带真实 MIME ClipData`() {
+    val src = File("src/main/java/com/dsharnessmobile/shell/LogShare.kt")
+      .takeIf { it.isFile }
+      ?: File("app/src/main/java/com/dsharnessmobile/shell/LogShare.kt")
+    val body = src.readText().substringAfter("fun shareFromGuide(").substringBefore("internal fun sweepOldPacks(")
+    assertTrue("send Intent 必须设真实 MIME ClipData",
+      body.contains("clipData = FileExternalBridge.buildGrantClipData(result.zipFile.name, MIME_ZIP, uri)"))
+    assertTrue("chooser 必须同时设双语标题与真实 MIME ClipData",
+      body.contains("Share diagnostic bundle") && body.contains("分享诊断包"))
+  }
+
 }

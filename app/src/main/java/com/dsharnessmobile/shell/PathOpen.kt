@@ -47,25 +47,40 @@ object PathOpen {
     if (!isChooserAllowed(activity, file)) return answer(false, "not-allowed")
     val folder = file.isDirectory || mode == "folder"
     val uri = chooserUri(activity, file) ?: return answer(false, "uri-failed")
-    val primary = if (folder) folderIntent() else viewIntent(uri, null)
+    val resolvedMime = if (folder) MIME_FOLDER else FileExternalBridge.effectiveMime(null, file.name)
+    var activeMime = resolvedMime
+    var primary = if (folder) folderIntent() else viewIntent(uri, activeMime, file.name)
+    if (!folder && primary.resolveActivity(activity.packageManager) == null) {
+      for (fallbackMime in FileExternalBridge.mimeFallbackChain(resolvedMime)) {
+        if (fallbackMime == activeMime) continue
+        val candidate = viewIntent(uri, fallbackMime, file.name)
+        if (candidate.resolveActivity(activity.packageManager) != null) {
+          activeMime = fallbackMime
+          primary = candidate
+          break
+        }
+      }
+    }
     if (primary.resolveActivity(activity.packageManager) == null) return answer(false, "no-handler")
 
     val extras = ArrayList<Intent>()
     if (folder) {
       // 「用其它应用打开这个目录」：能处理 resource/folder 的应用（MT 等）。
-      viewIntent(uri, MIME_FOLDER)
+      viewIntent(uri, MIME_FOLDER, file.name)
         .takeIf { it.resolveActivity(activity.packageManager) != null }
         ?.let { extras.add(it) }
       for (pkg in FILE_MANAGER_PACKAGES) {
-        viewIntent(uri, MIME_FOLDER).setPackage(pkg)
+        viewIntent(uri, MIME_FOLDER, file.name).setPackage(pkg)
           .takeIf { it.resolveActivity(activity.packageManager) != null }
           ?.let { extras.add(it) }
       }
     }
 
+    val title = if (UiText.isEnglish(activity)) "Open with" else "打开方式"
     return try {
-      val chooser = Intent.createChooser(primary, "打开方式").apply {
+      val chooser = Intent.createChooser(primary, title).apply {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        if (!folder) clipData = FileExternalBridge.buildGrantClipData(file.name, activeMime, uri)
         if (extras.isNotEmpty()) putExtra(Intent.EXTRA_INITIAL_INTENTS, extras.toTypedArray())
       }
       activity.startActivity(chooser)
@@ -106,23 +121,26 @@ object PathOpen {
    * 允许面 = 严格白名单，**不**并外部存储根（issue #1571，理由见 [isChooserAllowed] 的 KDoc）。
    */
   internal fun isChooserAllowedFor(activity: MainActivity, file: File): Boolean {
-    if (FileIncoming.isReaderAllowed(activity, file)) return true
     return try {
-      // issue #1571：外部存储**不再是**无条件的允许面；只有用户经系统目录选择器亲手授予过的
-      // 目录（persistedUriPermissions，外部工作区走的就是这条）才继续放行。
-      ChooserAllowlist.permitted(file.canonicalPath, grantedRoots(activity))
+      val canonical = file.canonicalPath
+      if (ChooserAllowlist.isHardDenied(canonical, activity.filesDir?.canonicalPath, FileIncoming.externalStorageRoots())) {
+        return false
+      }
+      if (FileIncoming.isReaderAllowed(activity, file)) return true
+      ChooserAllowlist.permitted(canonical, grantedRoots(activity))
     } catch (_: Exception) {
       false
     }
   }
 
-  /** Keep the fixed FileProvider roots. SAF grants supply an exact document URI for selected workspaces. */
+  /** Keep the fixed FileProvider roots first; fall back to persisted SAF document grants when needed. */
   internal fun chooserUri(activity: MainActivity, file: File): Uri? {
+    if (!isChooserAllowedFor(activity, file)) return null
     if (FileIncoming.isReaderAllowed(activity, file)) {
-      return try {
-        FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", file)
+      try {
+        return FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", file)
       } catch (_: Exception) {
-        null
+        // Secondary volumes or paths outside FileProvider XML fall through to SAF grants.
       }
     }
     return try {
@@ -160,11 +178,14 @@ object PathOpen {
     emptyList()
   }
 
-  /** 文件/目录通吃：ACTION_VIEW + 读授权；`type` 为空时由系统按 Uri 推断。 */
-  private fun viewIntent(uri: Uri, type: String?): Intent =
+  /** 文件/目录通吃：ACTION_VIEW + 读授权 + 真实 MIME ClipData。 */
+  private fun viewIntent(uri: Uri, type: String?, label: String? = null): Intent =
     Intent(Intent.ACTION_VIEW).apply {
       setDataAndType(uri, type)
       addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      if (!type.isNullOrBlank()) {
+        clipData = FileExternalBridge.buildGrantClipData(label ?: type, type, uri)
+      }
     }
 
   /** 系统文件管理：打开系统文件浏览界面（目录打开的可达路径）。 */

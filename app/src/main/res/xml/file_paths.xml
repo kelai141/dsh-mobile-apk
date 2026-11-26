@@ -1,28 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- FileProvider 路径映射（issue #52 + 2026-08-23 安全审计 CRITICAL 修复）：
-     外部阅读器打开文件需要 content://。安全边界（与 MainActivity.OPEN_READER_ROOTS 同步）：
-     - 外部存储仅 Documents/dshdata（用户导出仓库）；不授外部存储根（防任意 sdcard 文件外泄）。
-       issue #1571：0.13.7 加过的 external_shared（<external-path path="." />，整个外部存储根）
-       已删除——运行时允许面同时收窄，见 PathOpen.isChooserAllowedFor 与 ChooserAllowlist。
-     - 私有目录仅 filesDir/home/.dsh/workspaces 与 filesDir/home/tmp（引擎工作区/导出暂存）与
-       filesDir/usr/bin；绝不映射 filesDir/home/.dsh 其余部分（含 .credentials.yaml /
-       deepseek-key.txt 等机密）——引擎返回的路径若在私密区内，运行时白名单将拒绝，
-       前端回退引擎 RPC（桌面宿主行为）。
-     映射文件不存在时 FileProvider 抛 IllegalArgumentException，调用方已兜底。 -->
+<!-- FileProvider 路径映射（issue #52 + 2026-08-23 安全审计 + 双层护栏扩展）：
+     外部打开/分享需要 content://。运行时由 ChooserAllowlist + FileIncoming/PathOpen
+     先执行硬黑名单（Android/data|obb|sandbox|obj、裸外部根、home/.dsh 除 workspaces 外全部、
+     .ssh/.gnupg/.aws/.netrc 等凭据），再做允许根校验，并由 check-manifest-hardening.mjs
+     审计全部 FileProvider URI 调用点：
+     - 外部共享存储用户目录经 external_shared 与已有 dshdata_exports 映射（黑名单目录运行时硬拒绝）
+     - 应用内用户目录映射 filesDir/home/、filesDir/home/.dsh/workspaces/、filesDir/home/tmp/、
+       filesDir/usr/bin/、filesDir/usr/tmp/（.dsh 私密子区与 .ssh 等由运行时硬黑名单阻断）
+     - cacheDir 仅窄映射 log-share/、attachments/、legacy-uploads/。 -->
 <paths>
   <external-path name="dshdata_exports" path="Documents/dshdata/" />
+  <external-path name="external_shared" path="." />
   <files-path name="internal_workspaces" path="home/.dsh/workspaces/" />
   <files-path name="internal_tmp" path="home/tmp/" />
+  <files-path name="internal_home" path="home/" />
   <files-path name="internal_usr_bin" path="usr/bin/" />
-  <!-- 0.14.6 功能 B：启动页「分享诊断包」的 ZIP 只落在 cacheDir/log-share/，
-       因此这里只加**最窄**的一条映射（单目录、不休 ≤ 既有任何一条的宽度）。
-       不映射 cacheDir 整体——那是给下载/图片缓存等无关内容开口子。
-       ZIP 内容本身由 LogShare 白名单 + LogSanitizer 单出口脱敏把关。 -->
+  <files-path name="internal_usr_tmp" path="usr/tmp/" />
+  <!-- 0.14.6 功能 B：启动页「分享诊断包」的 ZIP 只落在 cacheDir/log-share/。 -->
   <cache-path name="log_share" path="log-share/" />
-  <!-- 原生拍照的成品（cacheDir/attachments/）：相机应用要按我们给的 content Uri **写入**，
-        所以这条映射不能省。范围只到 attachments/ 这一层，原图在它的 raw/ 子目录里——
-        cache-path 的子目录一并被覆盖，而压缩成功后原图立刻删除，正常状态下包里只剩成品。
-        同样不映射 cacheDir 整体。 -->
+  <!-- 原生拍照成品与原图（cacheDir/attachments/）。 -->
   <cache-path name="photo_attachments" path="attachments/" />
   <!-- 旧系统附件选择器只映射用户明确选中的附件暂存副本。 -->
   <cache-path name="legacy_uploads" path="legacy-uploads/" />

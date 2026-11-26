@@ -782,39 +782,17 @@ object FileIncoming {
         android.util.Log.w("dsh-image", "openNativePath: not exists: $path")
         return false
       }
-      if (!isReaderAllowed(activity, file)) {
-        android.util.Log.w("dsh-image", "openNativePath rejected (outside reader whitelist): $path")
-        return false
-      }
-      val uri = androidx.core.content.FileProvider.getUriForFile(
-        activity, activity.packageName + ".fileprovider", file,
-      )
-      val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-      }
-      activity.startActivity(intent)
-      android.util.Log.i("dsh-image", "openNativePath ok: $path")
-      true
+      openReaderViaChooser(activity, file, path)
     } catch (e: Exception) {
       android.util.Log.w("dsh-image", "openNativePath failed: $path -> ${e.message}")
       false
     }
   }
 
-  /** 外部阅读器白名单（与 res/xml/file_paths.xml 映射面一致；canonical 比较防 symlink/.. 逃逸）。
-   *  0.13.7：PathOpen（系统选择器）复用同一道门——两处出口同一份允许面。 */
+  /** 外部阅读器白名单（先黑名单再白名单；canonical 比较防 symlink/.. 逃逸）。
+   *  0.13.7：PathOpen 与 FileExternalBridge 共用同一份允许面。 */
   internal fun isReaderAllowed(activity: MainActivity, file: java.io.File): Boolean {
-    return try {
-      readerAllowedBy(
-        readerRoots(
-          activity.filesDir,
-          android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOCUMENTS),
-        ),
-        file.canonicalPath,
-      )
-    } catch (_: Exception) {
-      false
-    }
+    return isExpandedReaderAllowed(activity, file)
   }
 
   /**
@@ -962,6 +940,99 @@ object FileIncoming {
     val origin = normalizeOrigin(text.substring(0, cut).trim())
     val path = text.substring(cut + PENDING_SEPARATOR.length).trim()
     return if (path.isEmpty()) null else origin to path
+  }
+
+  /** 当前设备外部共享存储根列表（canonical 化去重）。 */
+  internal fun externalStorageRoots(): List<String> = try {
+    val raw = ArrayList<String>()
+    try {
+      android.os.Environment.getExternalStorageDirectory()?.canonicalPath?.let { raw.add(it) }
+    } catch (_: Throwable) {}
+    for (fixed in listOf("/storage/emulated/0", "/sdcard")) {
+      try {
+        raw.add(java.io.File(fixed).canonicalPath)
+      } catch (_: Throwable) {}
+    }
+    raw.filter { it.startsWith("/") }.distinct()
+  } catch (_: Exception) {
+    emptyList()
+  }
+
+  /** 扩展允许面：应用内用户区（home / tmp / usr/bin / usr/tmp / attachments / log-share）+ 外部共享存储。 */
+  internal fun allowedRoots(
+    filesDir: java.io.File?,
+    cacheDir: java.io.File?,
+    externalDocuments: java.io.File?,
+    externalRoots: List<String> = emptyList(),
+  ): List<String> = try {
+    val roots = ArrayList<String>()
+    val dirs = listOfNotNull(
+      filesDir?.let { java.io.File(it, "home/.dsh/workspaces") },
+      filesDir?.let { java.io.File(it, "home/tmp") },
+      filesDir?.let { java.io.File(it, "home") },
+      filesDir?.let { java.io.File(it, "usr/bin") },
+      filesDir?.let { java.io.File(it, "usr/tmp") },
+      cacheDir?.let { java.io.File(it, "attachments") },
+      cacheDir?.let { java.io.File(it, "log-share") },
+      externalDocuments?.let { java.io.File(it, "dshdata") },
+    )
+    for (dir in dirs) roots.add(dir.canonicalPath)
+    for (ext in externalRoots) {
+      val trimmed = ext.trim()
+      if (trimmed.isNotEmpty()) roots.add(java.io.File(trimmed).canonicalPath)
+    }
+    roots.distinct()
+  } catch (_: Exception) {
+    emptyList()
+  }
+
+  /** 扩展后的阅读器/分享策略判定：硬黑名单永优先于允许根。 */
+  internal fun isAllowedByExpandedPolicy(
+    canonicalPath: String,
+    filesDir: java.io.File?,
+    cacheDir: java.io.File?,
+    externalDocuments: java.io.File?,
+    externalRoots: List<String>,
+  ): Boolean {
+    val filesRoot = try { filesDir?.canonicalPath } catch (_: Exception) { null }
+    val normalizedExt = externalRoots.mapNotNull {
+      try { java.io.File(it).canonicalPath } catch (_: Exception) { null }
+    }.distinct()
+    val roots = allowedRoots(filesDir, cacheDir, externalDocuments, normalizedExt)
+    return ChooserAllowlist.isAllowedByPolicy(canonicalPath, roots, filesRoot, normalizedExt)
+  }
+
+  private fun isExpandedReaderAllowed(activity: MainActivity, file: java.io.File): Boolean {
+    return try {
+      val docs = android.os.Environment.getExternalStoragePublicDirectory(
+        android.os.Environment.DIRECTORY_DOCUMENTS,
+      )
+      isAllowedByExpandedPolicy(
+        canonicalPath = file.canonicalPath,
+        filesDir = activity.filesDir,
+        cacheDir = activity.cacheDir,
+        externalDocuments = docs,
+        externalRoots = externalStorageRoots(),
+      )
+    } catch (_: Exception) {
+      false
+    }
+  }
+
+  private fun openReaderViaChooser(activity: MainActivity, file: java.io.File, path: String): Boolean {
+    val result = PathOpen.openChooser(
+      activity,
+      file.absolutePath,
+      if (file.isDirectory) "folder" else "view",
+    )
+    val ok = try {
+      org.json.JSONObject(result).optBoolean("ok", false)
+    } catch (_: Exception) {
+      false
+    }
+    if (ok) android.util.Log.i("dsh-image", "openNativePath ok: $path")
+    else android.util.Log.w("dsh-image", "openNativePath rejected: $path -> $result")
+    return ok
   }
 
 }

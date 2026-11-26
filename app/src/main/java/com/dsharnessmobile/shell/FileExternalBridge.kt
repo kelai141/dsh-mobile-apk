@@ -59,12 +59,13 @@ internal object FileExternalBridge {
     listOf(ERROR_NO_RECEIVER, ERROR_URI_DENIED, ERROR_IO, ERROR_BAD_REQUEST)
 
   /**
-   * 一次 Uri 读授权：交给目标应用的 Uri 与它的 MIME。
+   * 一次 Uri 读授权：交给目标应用的 Uri、真实 MIME 与可读文件名标签。
    *
    * @property uri 需要授权的 content Uri（文本形式）。
-   * @property mime ClipData 的 MIME 标签。
+   * @property mime ClipData 的真实 MIME（绝不能再用 newRawUri 退化成 text/uri-list）。
+   * @property label ClipData 的可读标签（优先文件名，系统分享面板据此展示名字与缩略图）。
    */
-  internal data class Grant(val uri: String, val mime: String)
+  internal data class Grant(val uri: String, val mime: String, val label: String = mime)
 
   /**
    * 一条要交给系统的意图（纯描述）。
@@ -96,59 +97,46 @@ internal object FileExternalBridge {
   /**
    * 组装「用别的应用打开」的计划。
    *
-   * 主意图 = ACTION_VIEW（能打开该类型的应用）；并列候选 = 父目录定位（可授权时才有）。
-   * 不把 ACTION_SEND 混进「打开」的候选：它属于 [sharePlan] 的主意图，混进来会让「打开方式」
-   * 也列出只发不收的应用，用户点进去看到的是转发界面。
+   * 主意图 = 纯净 ACTION_VIEW（能打开该类型的应用）；不混入 ACTION_SEND 或父目录 `resource/folder`，
+   * 避免系统选择器把转发/目录定位混进「打开方式」导致候选畸变或降级。
    *
    * @param fileUri 文件的 content Uri 文本。
    * @param mime 生效 MIME。
-   * @param parentUri 父目录的 content Uri 文本；null = 父目录不可授权，**不提供**目录项。
-   * @returns 主意图 + 并列候选。
+   * @param label 文件名标签（ClipData 展示名）。
+   * @returns 纯净单意图计划。
    */
-  internal fun openPlan(fileUri: String, mime: String, parentUri: String?): Plan {
+  internal fun openPlan(fileUri: String, mime: String, label: String = mime): Plan {
     val primary = IntentSpec(
       action = ACTION_VIEW,
       dataUri = fileUri,
       type = mime,
       streamUri = null,
-      grants = listOf(Grant(fileUri, mime)),
+      grants = listOf(Grant(fileUri, mime, label)),
     )
-    val initial = ArrayList<IntentSpec>()
-    folderSpec(parentUri)?.let { initial.add(it) }
-    return Plan(primary, initial)
+    return Plan(primary, emptyList())
   }
 
   /**
-   * 组装「转发」的计划。
+   * 组装「转发 / 分享文件」的计划。
    *
-   * 主意图 = ACTION_SEND + EXTRA_STREAM（聊天/邮件等只注册 SEND 的应用）；并列候选 =
-   * ACTION_VIEW（编辑器/看图等只注册 VIEW 的应用）+ 父目录定位（可授权时才有）。
+   * 主意图 = 纯净 ACTION_SEND + EXTRA_STREAM（微信/QQ/系统分享完整识别文件名、MIME 与缩略图）。
+   * 不混入 ACTION_VIEW 或父目录 `EXTRA_INITIAL_INTENTS`，防止 Android 10–17 系统 Sharesheet 退化为
+   * 仅显示基础转发项。
    *
    * @param fileUri 文件的 content Uri 文本。
    * @param mime 生效 MIME。
-   * @param parentUri 父目录的 content Uri 文本；null = 不提供目录项。
-   * @returns 主意图 + 并列候选。
+   * @param label 文件名标签（ClipData 展示名）。
+   * @returns 纯净单意图计划。
    */
-  internal fun sharePlan(fileUri: String, mime: String, parentUri: String?): Plan {
+  internal fun sharePlan(fileUri: String, mime: String, label: String = mime): Plan {
     val primary = IntentSpec(
       action = ACTION_SEND,
       dataUri = null,
       type = mime,
       streamUri = fileUri,
-      grants = listOf(Grant(fileUri, mime)),
+      grants = listOf(Grant(fileUri, mime, label)),
     )
-    val initial = ArrayList<IntentSpec>()
-    initial.add(
-      IntentSpec(
-        action = ACTION_VIEW,
-        dataUri = fileUri,
-        type = mime,
-        streamUri = null,
-        grants = listOf(Grant(fileUri, mime)),
-      ),
-    )
-    folderSpec(parentUri)?.let { initial.add(it) }
-    return Plan(primary, initial)
+    return Plan(primary, emptyList())
   }
 
   /**
@@ -250,8 +238,12 @@ internal object FileExternalBridge {
 
   // ── 适配层（IntentSpec → 真 Intent；无判定，只做格式转换）─────────────────
 
+  /** 构造携带真实 MIME（而非 newRawUri 的 text/uri-list）的授权 ClipData。 */
+  internal fun buildGrantClipData(label: CharSequence, mime: String, uri: android.net.Uri): ClipData =
+    ClipData(label, arrayOf(mime), ClipData.Item(uri))
+
   /**
-   * 把 [IntentSpec] 转成真 Intent，并**按 grants 设 flag + ClipData**。
+   * 把 [IntentSpec] 转成真 Intent，并**按 grants 设 flag + 真实 MIME 的 ClipData**。
    *
    * 这层刻意不含任何判定：要发几条、授权哪些 Uri 全部在 [openPlan]/[sharePlan] 算好。
    * 因此单测钉住描述层，就等于钉住了这一层的输入。
@@ -263,9 +255,6 @@ internal object FileExternalBridge {
     val intent = Intent(spec.action)
     // issue #978：**data 与 type 必须一次设好**。Intent.setType() 会把 data 清成 null
     // （setData() 同样会把 type 清空）—— 这是 Android 的既定行为，不是实现 bug。
-    // 旧实现先 setData 再 setType，于是只要 spec 带 type，data 就丢了：目标应用收到一条
-    // 既没有 uri 也没有可推断类型的意图，「用别的应用打开」在带 MIME 的文件上直接失效
-    // （queryIntentActivities 也会因此给出错误的候选集）。
     when {
       spec.dataUri != null && spec.type != null ->
         intent.setDataAndType(android.net.Uri.parse(spec.dataUri), spec.type)
@@ -273,10 +262,10 @@ internal object FileExternalBridge {
       spec.type != null -> intent.type = spec.type
     }
     spec.streamUri?.let { intent.putExtra(Intent.EXTRA_STREAM, android.net.Uri.parse(it)) }
-    // 每条意图各自授权：EXTRA_INITIAL_INTENTS 不继承 chooser 的授权。
+    // 真实 MIME 写入 ClipDescription，避免 ClipData.newRawUri 把一切写成 text/uri-list。
     for (grant in spec.grants) {
       intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-      intent.clipData = ClipData.newRawUri(grant.mime, android.net.Uri.parse(grant.uri))
+      intent.clipData = buildGrantClipData(grant.label, grant.mime, android.net.Uri.parse(grant.uri))
     }
     return intent
   }
@@ -284,7 +273,7 @@ internal object FileExternalBridge {
   /**
    * 组装最终交给系统的 chooser。
    *
-   * chooser 自身也要 flag + ClipData：系统把授权转给用户选中的目标时读的是 chooser 这一层。
+   * chooser 自身也要 flag + 真实 MIME ClipData：系统把授权转给用户选中的目标时读的是 chooser 这一层。
    *
    * @param plan 组装结果。
    * @param aliveInitial 过滤后的并列候选。
@@ -296,7 +285,7 @@ internal object FileExternalBridge {
     val chooser = Intent.createChooser(primary, title)
     for (grant in plan.primary.grants) {
       chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-      chooser.clipData = ClipData.newRawUri(grant.mime, android.net.Uri.parse(grant.uri))
+      chooser.clipData = buildGrantClipData(grant.label, grant.mime, android.net.Uri.parse(grant.uri))
     }
     if (aliveInitial.isNotEmpty()) {
       chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, aliveInitial.map { toIntent(it) }.toTypedArray())
@@ -306,60 +295,113 @@ internal object FileExternalBridge {
 
   // ── MIME 兜底（纯逻辑）────────────────────────────────────────────────────
 
+  private val NARROW_TEXT_MIMES = setOf(
+    "text/markdown",
+    "text/x-markdown",
+    "text/yaml",
+    "text/x-yaml",
+    "application/x-yaml",
+    "text/javascript",
+    "application/javascript",
+    "application/x-javascript",
+    "application/json",
+    "text/css",
+    "application/xml",
+    "text/xml",
+    "text/x-python",
+    "text/x-sh",
+    "application/x-sh",
+  )
+
   /**
-   * 页面没给 mime 时按扩展名兜底。
-   *
-   * 为什么需要兜底：ACTION_SEND 与 ACTION_VIEW 都靠 type 匹配接收方，type 为空或星号全类型时
-   * 多数应用不注册，选择器会空掉——比猜错类型更糟。命中不了才回 application/octet-stream
-   * （至少 Office / 压缩包管理器会接）。
+   * 按扩展名推断 MIME：文本/代码统一 `text/plain`，未知或无扩展名统一回退通配 MIME。
    *
    * @param fileName 文件名（可含路径，只看最后一段的扩展名）。
    * @returns 非空 MIME 字符串。
    */
   internal fun mimeForExtension(fileName: String): String {
-    val dot = fileName.lastIndexOf('.')
-    if (dot < 0 || dot == fileName.length - 1) return "application/octet-stream"
-    return when (fileName.substring(dot + 1).lowercase()) {
+    val base = fileName.replace('\\', '/').substringAfterLast('/')
+    val dot = base.lastIndexOf('.')
+    if (dot <= 0 || dot == base.length - 1) return "*/*"
+    return when (base.substring(dot + 1).lowercase()) {
       "jpg", "jpeg" -> "image/jpeg"
       "png" -> "image/png"
       "gif" -> "image/gif"
       "webp" -> "image/webp"
       "heic" -> "image/heic"
+      "heif" -> "image/heif"
+      "bmp" -> "image/bmp"
+      "ico" -> "image/x-icon"
+      "avif" -> "image/avif"
+      "svg" -> "image/svg+xml"
       "mp4" -> "video/mp4"
       "mov" -> "video/quicktime"
+      "mkv" -> "video/x-matroska"
+      "webm" -> "video/webm"
+      "avi" -> "video/x-msvideo"
+      "3gp" -> "video/3gpp"
+      "m4v" -> "video/x-m4v"
       "mp3" -> "audio/mpeg"
       "m4a" -> "audio/mp4"
+      "aac" -> "audio/aac"
       "wav" -> "audio/wav"
+      "flac" -> "audio/flac"
+      "ogg", "oga", "opus" -> "audio/ogg"
+      "amr" -> "audio/amr"
+      "aif", "aiff" -> "audio/aiff"
+      "mid", "midi" -> "audio/midi"
+      "wma" -> "audio/x-ms-wma"
       "pdf" -> "application/pdf"
-      "txt", "log", "md", "kt", "java", "js", "ts", "py", "sh", "css" -> "text/plain"
-      "json" -> "application/json"
-      "xml" -> "text/xml"
       "html", "htm" -> "text/html"
       "csv" -> "text/csv"
+      "txt", "log", "md", "markdown",
+      "json", "jsonl", "yml", "yaml", "toml", "ini", "conf", "cfg", "env", "xml",
+      "css", "scss", "less", "js", "mjs", "cjs", "ts", "tsx", "jsx",
+      "py", "sh", "bash", "zsh", "kt", "kts", "java", "c", "h", "cpp", "hpp",
+      "rs", "go", "rb", "php", "sql", "gradle", "properties", "diff", "patch" -> "text/plain"
       "zip" -> "application/zip"
+      "rar" -> "application/vnd.rar"
+      "7z" -> "application/x-7z-compressed"
+      "tar" -> "application/x-tar"
+      "gz", "tgz" -> "application/gzip"
+      "bz2" -> "application/x-bzip2"
+      "xz" -> "application/x-xz"
       "apk" -> "application/vnd.android.package-archive"
+      "epub" -> "application/epub+zip"
+      "rtf" -> "application/rtf"
       "doc" -> "application/msword"
       "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       "xls" -> "application/vnd.ms-excel"
       "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
       "ppt" -> "application/vnd.ms-powerpoint"
       "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-      else -> "application/octet-stream"
+      else -> "*/*"
     }
   }
 
   /**
-   * 最终生效的 MIME：页面给的优先，空或星号则退回按扩展名推断。
+   * 最终生效的 MIME：统一文本窄 MIME 到 `text/plain`，未知回退通配 MIME（`all/all`）。
    *
    * @param provided 页面传入的 mime（可能为空白）。
    * @param fileName 文件名（推断扩展名用）。
    * @returns 非空 MIME。
    */
   internal fun effectiveMime(provided: String?, fileName: String): String {
-    val given = provided?.trim().orEmpty()
-    // 星号类型在 ACTION_SEND/VIEW 上几乎匹配不到接收方（等于把选择器清空），按「未给」处理。
-    if (given.isEmpty() || given == "*/*") return mimeForExtension(fileName)
-    return given
+    val given = provided?.trim().orEmpty().lowercase()
+    if (given.isEmpty() || given == "*/*" || given == "application/octet-stream") {
+      return mimeForExtension(fileName)
+    }
+    if (given in NARROW_TEXT_MIMES) return "text/plain"
+    return provided!!.trim()
+  }
+
+  // 探活降级链：精确 MIME -> 文本统一 text/plain -> 通用通配 MIME。
+  internal fun mimeFallbackChain(mime: String): List<String> {
+    val out = ArrayList<String>(3)
+    out.add(mime)
+    if (mime.startsWith("text/") && mime != "text/plain") out.add("text/plain")
+    if (mime != "*/*") out.add("*/*")
+    return out
   }
 
   // ── 结果与文案 ──────────────────────────────────────────────────────────
@@ -437,16 +479,30 @@ internal object FileExternalBridge {
       return errorPayload(ERROR_URI_DENIED, path)
     }
     val fileUri = PathOpen.chooserUri(activity, file) ?: return errorPayload(ERROR_URI_DENIED, path)
-    val effective = effectiveMime(mime, file.name)
-    // 目录项只在父目录**也能授权**时才提供：否则文件管理器收到一个打不开的 Uri，
-    // 宁可不给（用户口径：不要硬塞一个打不开的 URI）。
-    val parentUri = file.parentFile?.let { PathOpen.chooserUri(activity, it) }
-    val plan = if (kind == KIND_SHARE) {
-      sharePlan(fileUri.toString(), effective, parentUri?.toString())
-    } else {
-      openPlan(fileUri.toString(), effective, parentUri?.toString())
+    val label = file.name
+    val initialMime = effectiveMime(mime, label)
+    val buildPlan = { candidateMime: String ->
+      if (kind == KIND_SHARE) {
+        sharePlan(fileUri.toString(), candidateMime, label)
+      } else {
+        openPlan(fileUri.toString(), candidateMime, label)
+      }
     }
-    val primaryAlive = hasReceiver(candidates(activity, plan.primary))
+    var effective = initialMime
+    var plan = buildPlan(effective)
+    var primaryAlive = hasReceiver(candidates(activity, plan.primary))
+    if (!primaryAlive) {
+      for (fallbackMime in mimeFallbackChain(initialMime)) {
+        if (fallbackMime == effective) continue
+        val fallbackPlan = buildPlan(fallbackMime)
+        if (hasReceiver(candidates(activity, fallbackPlan.primary))) {
+          effective = fallbackMime
+          plan = fallbackPlan
+          primaryAlive = true
+          break
+        }
+      }
+    }
     val aliveInitial = aliveSpecs(activity, plan.initial)
     if (!anyReceiver(primaryAlive, aliveInitial)) {
       android.util.Log.w("dsh-open", kind + ": no receiver: " + path + " mime=" + effective)

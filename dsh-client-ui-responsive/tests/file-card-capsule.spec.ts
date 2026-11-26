@@ -194,7 +194,7 @@ describe('卡片胶囊：行为', () => {
     capsule.attach()
     await flush()
     document.querySelector<HTMLElement>(EXTERNAL)!.click()
-    expect(bridge.calls.external).toEqual([['/work/report.md', 'text/markdown']])
+    expect(bridge.calls.external).toEqual([['/work/report.md', 'text/plain']])
     expect(bridge.calls.share).toEqual([])
   })
 
@@ -205,7 +205,7 @@ describe('卡片胶囊：行为', () => {
     capsule.attach()
     await flush()
     document.querySelector<HTMLElement>(SHARE)!.click()
-    expect(bridge.calls.share).toEqual([['/work/report.md', 'text/markdown']])
+    expect(bridge.calls.share).toEqual([['/work/report.md', 'text/plain']])
     expect(bridge.calls.external).toEqual([])
   })
 
@@ -361,7 +361,7 @@ describe('卡片胶囊：行为', () => {
     const bridge = makeBridge(() => '{"ok":true}')
     face = bridge
     restored.querySelector<HTMLElement>(EXTERNAL)!.click()
-    expect(bridge.calls.external).toEqual([['/work/a.md', 'text/markdown']])
+    expect(bridge.calls.external).toEqual([['/work/a.md', 'text/plain']])
   })
 
   it('安装能打开文件的应用后可直接重试，成功时清掉旧错误', async () => {
@@ -412,7 +412,7 @@ describe('卡片胶囊：行为', () => {
     face = bridge
     expect(capsule.externalAvailable()).toBe(true)
     expect(capsule.act('share', '/work/a.md')).toEqual({ ok: true })
-    expect(bridge.calls.share).toEqual([['/work/a.md', 'text/markdown']])
+    expect(bridge.calls.share).toEqual([['/work/a.md', 'text/plain']])
   })
 
   it('detach 摘掉已挂的胶囊', async () => {
@@ -797,18 +797,18 @@ describe('#991 左段固定为外部打开（无「默认模式」常量）', ()
     const external = document.querySelector<HTMLElement>(EXTERNAL)!
     expect(external.getAttribute('aria-label')).toBe('用其他应用打开：report.md')
     external.click()
-    expect(bridge.calls.external).toEqual([['/work/report.md', 'text/markdown']])
+    expect(bridge.calls.external).toEqual([['/work/report.md', 'text/plain']])
     // 卡片单击的默认动作仍由上游决定，本模块不参与（没有「模式」可改写它）。
     expect(document.querySelector(CAPSULE)!.hasAttribute('data-dsh-file-capsule-share-only')).toBe(false)
   })
 })
 
 describe('MIME 推断', () => {
-  it('已知扩展名给出 RFC 类型', () => {
-    expect(mimeOf('/a/b.md')).toBe('text/markdown')
+  it('已知扩展名给出高兼容类型，文本统一 text/plain', () => {
+    expect(mimeOf('/a/b.md')).toBe('text/plain')
     expect(mimeOf('/a/b.png')).toBe('image/png')
     expect(mimeOf('/a/b.apk')).toBe('application/vnd.android.package-archive')
-    expect(mimeOf('C:\\a\\b.json')).toBe('application/json')
+    expect(mimeOf('C:\\a\\b.json')).toBe('text/plain')
   })
 
   it('未知扩展名返回空串，交给壳侧嗅探', () => {

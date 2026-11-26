@@ -37,46 +37,78 @@ class PathOpenAllowlistTest {
   }
 
   private val filesDir = File(System.getProperty("java.io.tmpdir"), "dsh-allow-files").canonicalFile
+  private val cacheDir = File(System.getProperty("java.io.tmpdir"), "dsh-allow-cache").canonicalFile
   private val externalDocuments = File(System.getProperty("java.io.tmpdir"), "dsh-allow-documents").canonicalFile
+  private val sharedRoot = File(System.getProperty("java.io.tmpdir"), "dsh-allow-emulated").canonicalFile
 
-  /** 生产根表（与 FileIncoming.isReaderAllowed 同一个生成函数）。 */
+  /** 既有四条窄根（兼容断言）。 */
   private fun roots(): List<String> = FileIncoming.readerRoots(filesDir, externalDocuments)
 
-  /** 允许面判定（与 FileIncoming.isReaderAllowed 同一个判定函数）。 */
-  private fun allowed(path: File): Boolean = FileIncoming.readerAllowedBy(roots(), path.canonicalPath)
+  /** 扩展策略判定（硬黑名单永优先于允许根）。 */
+  private fun allowed(path: File): Boolean = FileIncoming.isAllowedByExpandedPolicy(
+    canonicalPath = path.canonicalPath,
+    filesDir = filesDir,
+    cacheDir = cacheDir,
+    externalDocuments = externalDocuments,
+    externalRoots = listOf(sharedRoot.canonicalPath),
+  )
 
   @Test
   fun theFourNarrowRootsStillPass() {
     val expected = listOf("home/.dsh/workspaces", "home/tmp", "usr/bin")
       .map { File(filesDir, it).canonicalPath } + File(externalDocuments, "dshdata").canonicalPath
-    assertEquals("允许根表必须恰好是这四条（多一条就等于放宽）", expected, roots())
+    assertEquals("基础四条根保持稳定", expected, roots())
     for (root in roots()) {
       assertTrue("允许根自身必须放行：" + root, allowed(File(root)))
       assertTrue("允许根的子路径必须放行：" + root, allowed(File(root, "a/b.txt")))
     }
   }
 
+  @Test
+  fun expandedUserDirectoriesPass() {
+    assertTrue("Termux 用户主目录项目可分享", allowed(File(filesDir, "home/projects/demo/report.md")))
+    assertTrue("usr/tmp 临时产物可分享", allowed(File(filesDir, "usr/tmp/build.zip")))
+    assertTrue("外部存储 Download 目录可分享", allowed(File(sharedRoot, "Download/pr1832.bundle")))
+    assertTrue("外部存储自定义用户目录可分享", allowed(File(sharedRoot, "我的文档/dsh测试/pic.png")))
+    assertTrue("外部存储 DCIM 照片可分享", allowed(File(sharedRoot, "DCIM/Camera/shot.jpg")))
+    assertTrue("外部存储根目录下的 Android/media（非私有沙盒）仍可分享", allowed(File(sharedRoot, "Android/media/photo.png")))
+    assertTrue("原生拍照成品目录可分享", allowed(File(cacheDir, "attachments/shot.jpg")))
+  }
+
   /**
-   * 缺陷本体：外部存储根下的第三方目录。修前 `/storage/emulated/0` 整支并进允许面 ⇒ 放行。
-   *
-   * 负控：把「并上外部存储根」那一支加回 `PathOpen.isChooserAllowedFor`（或让
-   * [ChooserAllowlist.permitted] 接受外部存储根），本用例立刻变红。
+   * issue #1571 核心红线：即使放开共享存储用户目录，第三方应用私有区、裸外部根与本应用私密凭据必须坚决拒绝。
    */
   @Test
-  fun anotherAppsPrivateDirectoryUnderSharedStorageIsRefused() {
-    val sharedRoot = File(System.getProperty("java.io.tmpdir"), "dsh-allow-emulated").canonicalFile
+  fun anotherAppsPrivateDirectoryAndSecretsAreHardDenied() {
     val victim = File(sharedRoot, "Android/data/com.example.other/files/token.db")
-    assertFalse("别的应用私有区绝不能被交给系统选择器（#1571 的触发样例）", allowed(victim))
-    assertFalse("外部存储根自身也不得放行", allowed(sharedRoot))
-    assertFalse("外部存储根下的普通目录也不得放行", allowed(File(sharedRoot, "DCIM/x.jpg")))
+    assertFalse("别的应用 Android/data 私有区绝不能被交给系统选择器（#1571）", allowed(victim))
+    assertFalse("Android/obb 绝不能放行", allowed(File(sharedRoot, "Android/obb/com.example/main.obb")))
+    assertFalse("Android/sandbox 绝不能放行", allowed(File(sharedRoot, "Android/sandbox/secret")))
+    assertFalse("外部存储根自身不得放行", allowed(sharedRoot))
+    assertFalse("engine 凭据 .credentials.yaml 绝不能放行", allowed(File(filesDir, "home/.dsh/.credentials.yaml")))
+    assertFalse("engine settings.yaml 绝不能放行", allowed(File(filesDir, "home/.dsh/settings.yaml")))
+    assertFalse("Termux .ssh 私钥绝不能放行", allowed(File(filesDir, "home/.ssh/id_ed25519")))
+    assertFalse("Termux .netrc 绝不能放行", allowed(File(filesDir, "home/.netrc")))
+    assertFalse("Termux .git-credentials 绝不能放行", allowed(File(filesDir, "home/.git-credentials")))
+    assertFalse("哪怕有 SAF 授权也不能绕过硬黑名单",
+      ChooserAllowlist.isAllowedByPolicy(
+        victim.canonicalPath,
+        listOf(sharedRoot.canonicalPath),
+        filesDir.canonicalPath,
+        listOf(sharedRoot.canonicalPath),
+      ))
   }
 
   /** 边界：前缀兄弟目录必须拒绝（裸 startsWith 会把 workspaces-evil 判成 workspaces 的子路径）。 */
   @Test
   fun siblingDirectoryWithSharedPrefixIsRefused() {
-    val sibling = File(filesDir, "home/tmp-evil/x.txt")
+    val sibling = File(filesDir, "home-evil/x.txt")
     assertFalse("前缀兄弟目录必须拒绝（根 + 分隔符 才是边界）", allowed(sibling))
-    assertFalse("workspaces 的前缀兄弟同样拒绝", allowed(File(filesDir, "home/.dsh/workspaces-evil/x")))
+    assertTrue("前缀兄弟 .dsh-other 不应被 .dsh 黑名单误伤",
+      allowed(File(filesDir, "home/.dsh-other/x")))
+    assertTrue("home/.dsh/workspaces 必须豁免放行", allowed(File(filesDir, "home/.dsh/workspaces/p1/a.txt")))
+    assertFalse("workspaces 前缀兄弟 workspaces-evil 在 .dsh 下必须拒绝",
+      allowed(File(filesDir, "home/.dsh/workspaces-evil/secret.txt")))
   }
 
   @Test

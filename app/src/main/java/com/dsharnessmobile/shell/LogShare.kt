@@ -399,10 +399,14 @@ internal object LogShare {
             type = MIME_ZIP
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            clipData = FileExternalBridge.buildGrantClipData(result.zipFile.name, MIME_ZIP, uri)
           }
           // 不新增 queries 声明：ACTION_SEND + createChooser 由系统解析，不需要包可见性。
-          val chooser = Intent.createChooser(send, "分享诊断包")
-          chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+          val title = if (UiText.isEnglish(activity)) "Share diagnostic bundle" else "分享诊断包"
+          val chooser = Intent.createChooser(send, title).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            clipData = FileExternalBridge.buildGrantClipData(result.zipFile.name, MIME_ZIP, uri)
+          }
           activity.startActivity(chooser)
           // 回执只给**细节**（文件名 + 缺失项数），完整句子由调用方用字符串资源拼——
           // 否则「已生成诊断包」会在资源串里再出现一次，读成「已生成诊断包 已生成诊断包 x.zip」。
