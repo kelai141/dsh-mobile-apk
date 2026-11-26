@@ -810,7 +810,11 @@ impl<J: Journal> Controller<J> {
             return error_json("node-not-verified", "success requires a matching Android node", saved.plan.target.alias());
         }
         let post_denial = if receipt.executed() == Executed::Yes {
-            self.policy.revalidate(&saved.plan).err()
+            if matches!(saved.plan.op, "vdCreate" | "vdDestroy") {
+                self.policy.revalidate_after_vdisplay_lifecycle(&saved.plan).err()
+            } else {
+                self.policy.revalidate(&saved.plan).err()
+            }
         } else { None };
         if matches!(saved.plan.op, "screenshot" | "readRegion") && receipt.ok() && post_denial.is_none() {
             let expected = self.images.get(&call_id).map(|image| &image.metadata);

@@ -374,6 +374,73 @@ fn su_only_root_advertises_and_plans_launch_app_and_key_event_without_shizuku() 
 }
 
 #[test]
+fn vd_create_and_destroy_settle_succeed_when_post_refresh_updates_screens_and_a11y() {
+    let mut core = controller();
+    let mut input = facts("all", 0, "no");
+    input["facts"]["screens"] = json!({"real":{"displayId":0,"width":1080,"height":2400,"rotation":0}});
+    input["facts"]["a11y"] = json!({
+        "enabled":"yes","online":"yes",
+        "supportedOps":{"state":"known","ops":["snapshot","click"]},
+        "displaySupport":{"state":"known","values":{"0":true}},
+        "displayOperations":{"0":["snapshot","click"]}
+    });
+    input["facts"]["shizuku"] = json!({
+        "installed":"no","running":"no","granted":"no","bound":"no","functionalReady":"no",
+        "serverUid":{"kind":"unknown"},"supportedOps":{"state":"unknown"},"displaySupport":{"state":"unknown"}
+    });
+    input["facts"]["root"] = json!({"authorization":"yes","consentValid":"yes","appSu":"yes"});
+    assert_eq!(call(&mut core, input.clone())["ok"], true);
+
+    // 1. vdCreate prepares & commits, then post-action refresh publishes new displayId 12 into screens + a11y.
+    let prepared = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","epoch":"900",
+        "callId":"vd-create-once","screenId":"virtual-1","operation":"vdCreate",
+        "args":{"width":720,"height":1600}}));
+    assert_eq!(prepared["code"], "prepared", "{prepared}");
+    let committed = call(&mut core, json!({"protocolVersion":1,"kind":"commit","callId":"vd-create-once"}));
+    assert_eq!(committed["dispatch"], "permitted", "{committed}");
+
+    input["facts"]["screens"]["virtual-1"] = json!({"displayId":12,"width":720,"height":1600,"rotation":0});
+    input["facts"]["a11y"]["displaySupport"]["values"]["12"] = json!(true);
+    input["facts"]["a11y"]["displayOperations"]["12"] = json!(["snapshot","click"]);
+    assert_eq!(call(&mut core, input.clone())["ok"], true);
+
+    let settled = call(&mut core, json!({"protocolVersion":1,"kind":"settle","callId":"vd-create-once",
+        "receipt":{"ok":true,"code":"vdisplay-active","executed":"yes","screenId":"virtual-1"}}));
+    assert_eq!(settled["ok"], true, "vdCreate must not fail with authorization-changed after creating display: {settled}");
+    assert_eq!(settled["code"], "vdisplay-active", "{settled}");
+
+    // 2. vdDestroy prepares & commits, then post-action refresh removes virtual-1 from screens + a11y.
+    let prep_destroy = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","epoch":"900",
+        "callId":"vd-destroy-once","screenId":"virtual-1","operation":"vdDestroy","args":{}}));
+    assert_eq!(prep_destroy["code"], "prepared", "{prep_destroy}");
+    let commit_destroy = call(&mut core, json!({"protocolVersion":1,"kind":"commit","callId":"vd-destroy-once"}));
+    assert_eq!(commit_destroy["dispatch"], "permitted", "{commit_destroy}");
+
+    input["facts"]["screens"].as_object_mut().unwrap().remove("virtual-1");
+    input["facts"]["a11y"]["displaySupport"]["values"].as_object_mut().unwrap().remove("12");
+    input["facts"]["a11y"]["displayOperations"].as_object_mut().unwrap().remove("12");
+    assert_eq!(call(&mut core, input.clone())["ok"], true);
+
+    let settled_destroy = call(&mut core, json!({"protocolVersion":1,"kind":"settle","callId":"vd-destroy-once",
+        "receipt":{"ok":true,"code":"vdisplay-destroyed","executed":"yes","screenId":"virtual-1"}}));
+    assert_eq!(settled_destroy["ok"], true, "vdDestroy must not fail with target-generation-mismatch after removing display: {settled_destroy}");
+    assert_eq!(settled_destroy["code"], "vdisplay-destroyed", "{settled_destroy}");
+
+    // 3. Revoking root consent during vdCreate still denies settlement.
+    let prep_revoked = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","epoch":"900",
+        "callId":"vd-create-revoked","screenId":"virtual-1","operation":"vdCreate",
+        "args":{"width":720,"height":1600}}));
+    assert_eq!(prep_revoked["code"], "prepared", "{prep_revoked}");
+    assert_eq!(call(&mut core, json!({"protocolVersion":1,"kind":"commit","callId":"vd-create-revoked"}))["dispatch"], "permitted");
+    input["facts"]["root"]["consentValid"] = json!("no");
+    assert_eq!(call(&mut core, input)["ok"], true);
+    let denied = call(&mut core, json!({"protocolVersion":1,"kind":"settle","callId":"vd-create-revoked",
+        "receipt":{"ok":true,"code":"vdisplay-active","executed":"yes","screenId":"virtual-1"}}));
+    assert_eq!(denied["ok"], false, "{denied}");
+    assert_eq!(denied["code"], "authorization-changed", "{denied}");
+}
+
+#[test]
 fn focused_unicode_text_uses_the_observed_native_channel_without_an_ime() {
     let mut core = controller();
     let mut input = facts("real-only", 0, "no");

@@ -823,6 +823,47 @@ impl PolicyState {
         Ok(())
     }
 
+    /// 虚拟屏生命周期变更（vdCreate / vdDestroy）落盘后的结算重验。
+    ///
+    /// 建屏/毁屏本身必然改变屏幕注册表与 A11y 的 displaySupport/displayOperations
+    /// （从而推进 `authorization_generation` 或移出被销毁的屏幕），因此结算阶段不以
+    /// 变更前的屏幕代次或 A11y 增量否决已成功的生命周期动作；但 epoch、scope 与所选
+    /// 通道授权仍必须持续有效。
+    pub fn revalidate_after_vdisplay_lifecycle(&self, plan: &DispatchPlan) -> Result<(), PolicyError> {
+        let spec = OperationSpec::for_name(plan.op)
+            .ok_or_else(|| PolicyError::new("op-unknown", format!("operation {} is not registered", plan.op)))?;
+        if plan.epoch != self.epoch {
+            return Err(PolicyError::new("epoch-mismatch", "plan belongs to another native session"));
+        }
+        if let Some(scope_generation) = plan.scope_generation {
+            if scope_generation != self.scope_generation {
+                return Err(PolicyError::new("scope-generation-mismatch", "screen scope changed after planning"));
+            }
+        }
+        if !matches!(self.scope, Scope::VirtualOnly | Scope::All) {
+            return Err(PolicyError::new(
+                "screen-out-of-scope",
+                format!("scope {} no longer allows virtual displays", self.scope.wire()),
+            ));
+        }
+        match plan.backend {
+            Backend::Root => {
+                if !self.root_only_available() {
+                    return Err(PolicyError::new("authorization-changed", "root authorization changed after planning"));
+                }
+            }
+            Backend::Shizuku => {
+                self.select_shizuku(spec, &plan.target).map_err(|_| {
+                    PolicyError::new("authorization-changed", "Shizuku channel authorization changed after planning")
+                })?;
+            }
+            _ => {
+                return Err(PolicyError::new("authorization-changed", "unexpected backend for virtual display lifecycle"));
+            }
+        }
+        Ok(())
+    }
+
     /// A11y→Shizuku 兜底。必须明确传入“未派发”证据和有限失败原因。
     /// 失败计划的目标与代次必须仍然有效，且不能换屏。
     pub fn fallback_plan(

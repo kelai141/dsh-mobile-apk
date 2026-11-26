@@ -97,7 +97,7 @@ internal class NativeVdisplayExecution(
       else -> if (ok) "yes" else "unknown"
     }
     return JSONObject().apply {
-      for (key in listOf("ok", "code", "guidance", "aliases", "displayId", "data", "diagnostic")) {
+      for (key in listOf("ok", "code", "guidance", "aliases", "displayId", "landedDisplayIds", "data", "diagnostic")) {
         if (receipt.has(key)) put(key, receipt.get(key))
       }
       put("ok", ok)

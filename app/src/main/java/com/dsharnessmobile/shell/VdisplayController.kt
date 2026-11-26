@@ -50,7 +50,7 @@ object VdisplayController {
    * 过滤后实测 1,969 B（保留 `Display #<n>` 分组锚点与 `ActivityRecord` 行）。
    */
   private const val ACTIVITY_DISPLAY_PROBE =
-    "dumpsys activity activities | grep -E '^ *Display #|ActivityRecord'"
+    "dumpsys activity activities | grep -E '^ *Display #|^ *Display: mDisplayId=|^ActivityTaskSupervisor|ActivityRecord'"
   private const val SHELL_PATH_PREFIX = "export PATH=/system/bin:/system/xbin:\$PATH; "
   private val SU_PRE_DISPATCH_REFUSALS = setOf(
     "no-su", "root-not-granted", "requesting", "empty-command", "root-grant-required",
@@ -953,6 +953,7 @@ object VdisplayController {
       if (priorDisplays.any { it != id }) return JSONObject().put("ok", false)
         .put("code", "vd-launch-denied").put("executed", "no").put("screenId", record.alias)
         .put("landedDisplayIds", JSONArray(priorDisplays.toList()))
+        .put("guidance", "$pkg 已在其他屏幕（displayId=${priorDisplays.joinToString(",")}）存在任务，拒绝在 ${record.alias} 重复拉起以避免抢回真实屏。")
     }
     // 拉起路径（0.14.0 模拟器逐条实测，**四条路只有最后一条成立**）：
     //
@@ -1052,12 +1053,18 @@ object VdisplayController {
     val out = LinkedHashSet<Int>()
     if (pkg.isBlank()) return out
     val header = Regex("""^\s*Display #([0-9]+)""")
+    val supervisorHeader = Regex("""^\s*Display:\s*mDisplayId=([0-9]+)""")
+    val sectionBoundary = Regex("""^ActivityTaskSupervisor\b""")
     val member = Regex("""(^|[\s:])""" + Regex.escape(pkg) + """/""")
     var current = -1
     for (line in activitiesDump.lineSequence()) {
-      val hit = header.find(line)
+      val hit = header.find(line) ?: supervisorHeader.find(line)
       if (hit != null) {
         current = hit.groupValues[1].toIntOrNull() ?: -1
+        continue
+      }
+      if (sectionBoundary.containsMatchIn(line)) {
+        current = -1
         continue
       }
       if (current < 0 || !line.contains("ActivityRecord{")) continue

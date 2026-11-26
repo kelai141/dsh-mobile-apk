@@ -118,4 +118,21 @@ class VdisplayLaunchLandingTest {
     assertTrue(VdisplayController.isOverlayDisplaySettingActive("720x1600/240"))
     assertTrue(VdisplayController.isOverlayDisplaySettingActive("1280x720/213;1920x1080/320"))
   }
+
+  @Test fun activityTaskSupervisorSectionDoesNotBleedVirtualDisplayIntoDisplayZero() {
+    val dump = """
+      Display #12 (activities from top to bottom):
+          topResumedActivity=ActivityRecord{48089135 u0 app.morphe.manager/.MainActivity_Default t9703}
+          * Hist  #0: ActivityRecord{48089135 u0 app.morphe.manager/.MainActivity_Default t9703}
+      Display #0 (activities from top to bottom):
+          topResumedActivity=ActivityRecord{83496618 u0 com.dsharnessmobile.shell/.MainActivity t9701}
+      ActivityTaskSupervisor state:
+        Display: mDisplayId=0 (organized)
+            * ActivityRecord{83496618 u0 com.dsharnessmobile.shell/.MainActivity t9701}
+        Display: mDisplayId=12
+            * ActivityRecord{48089135 u0 app.morphe.manager/.MainActivity_Default t9703}
+    """.trimIndent()
+    assertEquals(setOf(12), VdisplayController.displaysRunning("app.morphe.manager", dump))
+    assertEquals(setOf(0), VdisplayController.displaysRunning("com.dsharnessmobile.shell", dump))
+  }
 }
