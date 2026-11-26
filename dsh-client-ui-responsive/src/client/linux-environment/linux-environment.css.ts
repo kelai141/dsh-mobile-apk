@@ -1,7 +1,4 @@
-/**
- * 「Linux环境」设置分区样式：只复用壳侧已有的语义令牌与 `.dsh-dev-btn` 按钮骨架
- * （由 dev-section 样式表提供），本表只补布局与状态色。
- */
+/** Layout and semantic styles for optional resources, downloads, and Linux tools. */
 export const LINUX_ENVIRONMENT_CSS: string = `
 [data-plugin='linux-environment'] {
   display: flex;
@@ -15,7 +12,7 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   height: 100%;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 0 16px max(12px, env(safe-area-inset-bottom));
+  padding: 0 20px max(12px, env(safe-area-inset-bottom));
 }
 
 .dsh-linux-panel > [data-linux-environment] {
@@ -25,98 +22,99 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 }
 
 .dsh-linux-panel-header {
-  min-height: 56px;
+  min-height: 52px;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
+  margin-bottom: 12px;
 }
 
 .dsh-linux-panel-header > h1 {
   margin: 0;
   font-size: 16px;
+  line-height: 24px;
   font-weight: 600;
 }
 
-.dsh-resource-intro {
+.dsh-resource-row {
   display: grid;
-  gap: 16px;
-  margin-block: 8px 12px;
-  padding: 18px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 16px;
-  background: var(--dsw-alias-bg-layer-2);
-}
-
-.dsh-resource-intro-heading {
-  display: flex;
-  align-items: start;
-  gap: 12px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 64px;
+  padding-block: 10px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+  margin-bottom: 12px;
 }
 
 .dsh-resource-glyph {
   display: grid;
   place-items: center;
-  flex: 0 0 38px;
-  block-size: 38px;
-  border-radius: 10px;
+  inline-size: 32px;
+  block-size: 32px;
+  border-radius: var(--dsw-radius-sm);
   background: var(--dsw-alias-interactive-bg-hover);
   color: var(--dsw-alias-label-primary);
 }
 
-.dsh-resource-intro-heading h2 {
-  margin: 0 0 3px;
+.dsh-resource-copy h2 {
+  margin: 0;
   color: var(--dsw-alias-label-primary);
-  font-size: 17px;
-  line-height: 24px;
+  font-size: 14px;
+  line-height: 22px;
   font-weight: 600;
 }
 
-.dsh-resource-intro p {
+.dsh-resource-copy p {
   margin: 0;
   color: var(--dsw-alias-label-secondary);
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
 }
 
-.dsh-resource-intro .dsh-resource-size {
-  font-size: 13px;
+.dsh-resource-size {
   font-variant-numeric: tabular-nums;
 }
 
-.dsh-resource-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
+.dsh-resource-primary {
+  justify-self: end;
+  white-space: nowrap;
 }
 
-.dsh-resource-intro > button {
-  justify-self: start;
+.dsh-resource-group-title {
+  margin: 8px 0 2px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 600;
 }
+
+.dsh-resource-section-transfer { padding-block: 2px 12px; }
 
 .dsh-resource-back,
-.dsh-resource-link-button {
+.dsh-resource-dismiss {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 44px;
-  min-width: 44px;
-  padding: 0 8px;
+  position: relative;
+  inline-size: 32px;
+  block-size: 32px;
+  padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--dsw-radius-sm);
   background: transparent;
   color: var(--dsw-alias-label-secondary);
-  font: inherit;
-  font-size: 13px;
   cursor: pointer;
+  flex: none;
 }
 
-.dsh-resource-back:hover, .dsh-resource-link-button:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary);
+.dsh-resource-dismiss {
+  inline-size: 28px;
+  block-size: 28px;
 }
 
-.dsh-resource-back:focus-visible, .dsh-resource-link-button:focus-visible {
+.dsh-resource-back:focus-visible, .dsh-resource-dismiss:focus-visible {
   outline: 2px solid var(--dsw-alias-link);
   outline-offset: -2px;
 }
@@ -124,9 +122,10 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 .dsh-resource-download-button {
   display: inline-grid;
   place-items: center;
-  flex: 0 0 44px;
-  min-width: 44px;
-  min-height: 44px;
+  position: relative;
+  flex: 0 0 32px;
+  min-width: 32px;
+  min-height: 32px;
   padding: 0;
   border: 0;
   border-radius: 8px;
@@ -136,7 +135,20 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   cursor: pointer;
 }
 
-.dsh-resource-download-button:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-resource-primary,
+.dsh-linux-uninstall-actions > button {
+  position: relative;
+}
+
+.dsh-resource-primary::after,
+.dsh-resource-back::after,
+.dsh-resource-download-button::after,
+.dsh-linux-uninstall-actions > button::after {
+  content: '';
+  position: absolute;
+  inset: -4px 0;
+}
+
 .dsh-resource-download-button:focus-visible {
   outline: 2px solid var(--dsw-alias-link);
   outline-offset: -2px;
@@ -155,7 +167,7 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   inset: 0;
   width: 100%;
   height: 100%;
-  stroke-width: 2;
+  stroke-width: 1.5;
   transform: rotate(-90deg);
 }
 
@@ -182,15 +194,16 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 .dsh-resource-popover-outside {
   position: absolute;
   inset: 0;
-  background: color-mix(in srgb, var(--dsw-alias-bg-mask-1) 45%, transparent);
 }
 
 .dsh-resource-popover {
   box-sizing: border-box;
   position: absolute;
-  width: min(350px, calc(100vw - 24px));
-  padding: 10px 16px 12px;
-  border-radius: 16px;
+  width: min(316px, calc(100% - 32px));
+  padding: 12px 16px 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: var(--dsw-radius-lg);
   background: var(--dsw-alias-bg-layer-2);
   box-shadow: var(--dsw-elevation-prominent);
 }
@@ -200,21 +213,30 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   align-items: center;
   justify-content: space-between;
   margin-inline-end: -6px;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
 }
 
 .dsh-resource-popover h2 {
   margin: 0;
   color: var(--dsw-alias-label-primary);
-  font-size: 15px;
-  line-height: 1.45;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 600;
+}
+
+.dsh-resource-download-name {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
   font-weight: 600;
 }
 
 .dsh-resource-transfer {
   display: grid;
-  gap: 8px;
-  font-size: 13px;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
   font-variant-numeric: tabular-nums;
 }
 
@@ -226,21 +248,13 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   gap: 8px;
 }
 
-.dsh-resource-transfer-status {
+.dsh-resource-transfer-footer > :last-child {
   color: var(--dsw-alias-label-primary);
-}
-
-.dsh-resource-transfer-status strong { font-weight: 550; }
-.dsh-resource-transfer-footer button { margin-inline-start: auto; }
-.dsh-resource-transfer-footer p {
-  margin: 0;
-  font-size: 12px;
-  color: var(--dsw-alias-label-secondary);
 }
 
 .dsh-resource-transfer progress {
   width: 100%;
-  height: 5px;
+  height: 4px;
   overflow: hidden;
   border: 0;
   border-radius: 4px;
@@ -295,7 +309,7 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 
 .dsh-linux-uninstall-dialog[role='dialog'] {
   gap: 8px;
-  padding: 20px;
+  padding: 20px 24px 22px;
   max-height: calc(100vh - max(24px, var(--dsh-frame-overlay-top, 24px)) - 24px);
   overflow-y: auto;
 }
@@ -303,16 +317,16 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 .dsh-linux-uninstall-dialog h2 {
   margin: 0;
   color: var(--dsw-alias-label-primary);
-  font-size: 17px;
+  font-size: 16px;
   line-height: 24px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .dsh-linux-uninstall-dialog p {
   margin: 0;
   color: var(--dsw-alias-label-secondary);
   font-size: 14px;
-  line-height: 21px;
+  line-height: 22px;
   overflow-wrap: anywhere;
 }
 
@@ -321,13 +335,14 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 8px;
+  margin-top: 10px;
 }
 
-.dsh-linux-uninstall-actions button { min-height: 44px; }
+.dsh-linux-uninstall-actions .dsh-resource-danger {
+  color: var(--dsw-alias-state-error-primary);
+}
 
 .dsh-linux-env button.dsh-dev-btn,
-.dsh-linux-panel-header > button,
 .dsh-linux-terminal-tools > button:not(.dsh-linux-back),
 .dsh-linux-tools button:not(.dsh-linux-env-link),
 .dsh-linux-env-progress button,
@@ -336,17 +351,6 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   padding: 8px 14px;
   font-size: 13px;
   line-height: 20px;
-}
-
-.dsh-linux-env .dsh-linux-env-primary:not(:disabled) {
-  background: var(--dsw-alias-button-primary-fill, #162035);
-  border-color: transparent;
-  color: var(--dsw-alias-label-primary-foreground, #fff);
-  font-weight: 600;
-}
-
-.dsh-linux-env .dsh-linux-env-primary:not(:disabled):hover {
-  background: var(--dsw-alias-button-primary-hover, #303b50);
 }
 
 .dsh-linux-env-row select {
@@ -364,7 +368,7 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   min-height: 48px;
   padding: 0;
   border: 0;
-  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   background: transparent;
   color: var(--dsw-alias-label-primary);
   font: inherit;
@@ -372,7 +376,18 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   touch-action: manipulation;
 }
 
-.dsh-linux-env-link:not(:disabled):hover { background: var(--dsw-alias-interactive-bg-hover); }
+@media (hover: hover) {
+  .dsh-resource-back:hover, .dsh-resource-dismiss:hover {
+    background: var(--dsw-alias-interactive-bg-hover);
+    color: var(--dsw-alias-label-primary);
+  }
+
+  .dsh-resource-download-button:hover,
+  .dsh-linux-env-link:not(:disabled):not([data-linux-action='settings']):hover {
+    background: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
 .dsh-linux-env-link:disabled { color: var(--dsw-alias-label-tertiary); }
 .dsh-linux-env-link:focus-visible, .dsh-linux-env-row select:focus-visible {
   outline: 2px solid var(--dsw-alias-link);
@@ -493,9 +508,10 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   align-items: center;
 }
 
-.dsh-linux-env-actions > button.dsh-dev-btn {
-  flex: 0 1 auto;
-  width: auto;
+@media (max-width: 359px) {
+  .dsh-linux-panel { padding-inline: 16px; }
+  .dsh-resource-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .dsh-resource-glyph { display: none; }
 }
 
 .dsh-linux-env-error {

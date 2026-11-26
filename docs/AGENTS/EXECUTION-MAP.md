@@ -1198,6 +1198,8 @@ For opted-in releases, `installRuntimeAssets` stages Node on a digest change or 
 
 Linux 更新发现从 GitHub Releases Latest 读取当前清单，按宿主 ABI 提供运行时，并在安装时验证清单指定的资产。设置页显示时触发一次非阻塞查询，手动检查在安装前也可用，显式下载前重新查询。并发查询共享一次请求，2 秒状态轮询只读状态。Linux 已安装、已启用且用户开启启动检查时，引擎就绪后查询一次，24 小时内去重。Android 面板经显式确认准备并安装资产。离线或限流失败记入 `checkError`，已安装环境、重装和卸载仍可用。安装提交且状态落盘后，bootstrap 清理旧的 `plugins/runtime/<sha>`、`staging/<sha>` 与 `staging-*.part`。失败回滚保留旧版，卸载清理全部槽位。安装、重装、卸载和偏好写入要求 `confirmed:true`；设置页读写均回到 bootstrap。
 
+Optional Resources shows one primary action on the Linux row. After the Android queue accepts the first install from the sidebar panel, the panel returns to the previous conversation. The conversation header observes the same queue and opens transfer details. The resource row offers Open terminal when the runtime is ready, with update and removal controls under Linux settings.
+
 vendored bootstrap 与注入集的关系（0.15.1 起）：`plugins/dsh-linux-bootstrap/`（源 `kelai141/dsh-bionilux@3f86a85`，只源码；`lib/` 由 `build.mjs` 在链上重建）**已登记**进 `scripts/plugin-dirs.json` 的 `dirs`，并同时列在 `dynamicOnly` 里 —— 它的 `apply()` 需要函数型 config（`linuxAssetIO`），YAML 挂载表达不了，挂进 profile 只会抛 `TypeError`；因此它**随快照注入但刻意不登记进** `scripts/profile-web.cordis.patch.yml`，只由宿主在用户显式启用时动态加载。`check-patch-mounts`/`check-contract` 对 `dynamicOnly` 项按双向一致规则豁免，其余包仍判红。漂移由 `scripts/check-vendored-linux-bootstrap.mjs` 守（自带 `--self-test`：1 正控 + 3 负控），它**不进** `check-release-gates.mjs` 的 `GATES`（进册即要求本地链与云端链接线，而那两处是逐字节镜像面）。完整协议见 `docs/AGENTS/BRIDGE-API.md` 的 Linux 内部插件宿主节；设备证据限未启用状态，不代表完成真实安装验收。
 
 

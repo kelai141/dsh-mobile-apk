@@ -4,10 +4,13 @@ import { SUBLAYER_POP_EVENT } from '../mobile/back-stack.ts'
  * 终端与工具链是子页，返回只退出子页。终端会话由引擎持有。
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Button, IconChevronLeftOutlineMedium, IconCodeOutlineMedium, Modal, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  Button, IconChevronDownOutlineMedium, IconChevronLeftOutlineMedium, IconChevronRightOutlineMedium,
+  IconCodeOutlineMedium, Modal, Switch,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import { LinuxTerminal } from './LinuxTerminal.tsx'
 import { LinuxToolchains } from './LinuxToolchains.tsx'
-import { LinuxDownloadProgress } from './LinuxDownloadButton.tsx'
+import { downloadStatus, LinuxDownloadProgress } from './LinuxDownloadButton.tsx'
 import { acknowledgeInstallJob, formatBytes, refreshInstallJob, useLinuxInstallJob } from './install-job.ts'
 import { tr } from '../i18n.ts'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -329,6 +332,8 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
   const healthy = ready && status?.runtime?.healthy === true
   const canOfferInstall = !installed && !attempting && job?.state !== 'failed' && phase !== 'failed'
   const showTransfer = !!job && (jobWorking || job.state === 'failed')
+  const showTransferDetails = showTransfer && (!sidebar || job?.state === 'failed')
+  const canUpdate = installed && (primary === 'update' || primary === 'unknown')
   const openTerminal = () => {
     acknowledgeInstallJob()
     setTerminalOpen(true)
@@ -377,6 +382,7 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
           startInstallJob(manifest.version, runtime.id, specs, source, runtime.sharedNodeReuse === true)
           refreshInstallJob()
           setPhase('idle')
+          if (sidebar && current?.installed !== true && !installed) close()
           return
         }
         next = await installRuntimeAssets(runtime, specs, current, assets => {
@@ -479,39 +485,59 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
       </header>}
       {terminalOpen ? <LinuxTerminal onBack={sidebar ? undefined : () => setTerminalOpen(false)} /> :
         toolsOpen ? <LinuxToolchains onBack={sidebar ? undefined : () => setToolsOpen(false)} /> : <>
-      <div className="dsh-resource-intro" data-dsh-resource-card="linux">
-        <div className="dsh-resource-intro-heading">
-          <span className="dsh-resource-glyph" aria-hidden="true"><IconCodeOutlineMedium size={21} /></span>
-          <div>
-            <h2>{tr('Linux 工作环境', 'Linux workspace')}</h2>
-            {healthy ? <p role="status">{tr('已就绪', 'Ready')}</p> :
-              !showTransfer && !installed && <p>
-                {tr('在手机上运行终端命令和开发工具。', 'Run terminal commands and development tools on your phone.')}
-              </p>}
-          </div>
-        </div>
-        {showTransfer && job ? <LinuxDownloadProgress job={job} /> : healthy ?
-          <button type="button" className="dsh-dev-btn dsh-linux-env-primary"
-            data-linux-action="terminal" onClick={openTerminal}>
-            {tr('打开终端', 'Open terminal')}
-          </button> : canOfferInstall && <>
-            {firstDownloadBytes !== undefined && <p className="dsh-resource-size" data-dsh-resource-size="">
-              {tr('完整下载约 ', 'Full download about ') + formatBytes(firstDownloadBytes)}
+      <div className="dsh-resource-row" data-dsh-resource-card="linux">
+        <span className="dsh-resource-glyph" aria-hidden="true"><IconCodeOutlineMedium size={18} /></span>
+        <div className="dsh-resource-copy">
+          <h2>{tr('Linux 工作环境', 'Linux workspace')}</h2>
+          {showTransfer && job && !showTransferDetails ? <p role="status">{downloadStatus(job)}</p> :
+            healthy ? <p role="status">{tr('已就绪', 'Ready')}</p> :
+            !installed && !showTransfer && <p>
+              {tr('在手机上使用终端和开发工具。', 'Use a terminal and development tools on your phone.')}
             </p>}
-            <div className="dsh-resource-actions">
-              <button type="button" className="dsh-dev-btn dsh-linux-env-primary"
-                data-linux-action="install" data-linux-primary="install" disabled={primaryDisabled}
-                onClick={() => { void install() }}>
-                {primaryLabel(primary, status)}
-              </button>
-              {sidebar && <button type="button" className="dsh-resource-link-button"
-                data-linux-action="later" onClick={close}>{tr('暂不安装', 'Not now')}</button>}
-            </div>
-        </>}
+          {canOfferInstall && firstDownloadBytes !== undefined && <p className="dsh-resource-size" data-dsh-resource-size="">
+            {tr('约 ', 'About ') + formatBytes(firstDownloadBytes)}
+          </p>}
+        </div>
+        {!showTransfer && (installed ?
+          <Button variant="primary" className="dsh-resource-primary" data-linux-action="terminal"
+            disabled={!ready} onClick={openTerminal}>
+            {tr('打开终端', 'Open terminal')}
+          </Button> : canOfferInstall &&
+          <Button variant="primary" className="dsh-resource-primary" data-linux-action="install"
+            data-linux-primary="install" disabled={primaryDisabled} onClick={() => { void install() }}>
+            {primaryLabel(primary, status)}
+          </Button>)}
       </div>
+      {showTransferDetails && job && <div className="dsh-resource-section-transfer"><LinuxDownloadProgress job={job} /></div>}
+      {installed && sidebar && <h2 className="dsh-resource-group-title">{tr('管理', 'Manage')}</h2>}
       {!installed && !attempting && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
         data-linux-action="settings" aria-expanded={advanced} onClick={() => setAdvanced(value => !value)}>
-        <span>{tr('下载设置', 'Download settings')}</span><span aria-hidden="true">{advanced ? '−' : '›'}</span>
+        <span>{tr('下载设置', 'Download settings')}</span>
+        {advanced ? <IconChevronDownOutlineMedium size={14} /> : <IconChevronRightOutlineMedium size={14} />}
+      </button>}
+      <p className="dsh-linux-env-status" role="status" aria-live="polite"
+        hidden={statusError === '' && !advanced && (!installed || healthy)}
+        data-linux-status="summary"
+        data-linux-ready={ready && phase !== 'failed' ? 'true' : undefined}
+        data-linux-auto-check={installed && autoCheckState === 'done' && status?.updateAvailable === true ? 'update-available' : undefined}>
+        {statusError !== '' ? tr('状态暂不可读：', 'Status unavailable: ') + statusError : statusText(status)}
+      </p>
+      {installed && status?.autoStart !== undefined && (advanced || !ready) && <div className="dsh-linux-env-row">
+        <span>{tr('运行 Linux', 'Run Linux')}</span>
+        <Switch label={tr('运行 Linux', 'Run Linux')} disabled={busy} checked={status.injectionActivated === true}
+          onChange={enabled => {
+            if (!enabled && !window.confirm(tr('停止 Linux 会结束正在运行的终端和任务。', 'Stopping Linux ends active terminals and jobs.'))) return
+            void run(() => setRuntimePreference({ enabled }), 'idle')
+          }} />
+      </div>}
+      {installed && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
+        data-linux-action="toolchains" disabled={!ready || busy} onClick={() => setToolsOpen(true)}>
+        <span>{tr('工具链与存储', 'Toolchains and storage')}</span><IconChevronRightOutlineMedium size={14} />
+      </button>}
+      {installed && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
+        data-linux-action="settings" aria-expanded={advanced} onClick={() => setAdvanced(value => !value)}>
+        <span>{tr('Linux 设置', 'Linux settings')}</span>
+        {advanced ? <IconChevronDownOutlineMedium size={14} /> : <IconChevronRightOutlineMedium size={14} />}
       </button>}
       {advanced && <>
         <label className="dsh-linux-env-row">
@@ -529,34 +555,6 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
           </select>
         </label>}
       </>}
-
-      <p className="dsh-linux-env-status" role="status" aria-live="polite"
-        hidden={statusError === '' && !advanced && (!installed || healthy)}
-        data-linux-status="summary"
-        data-linux-ready={ready && phase !== 'failed' ? 'true' : undefined}
-        data-linux-auto-check={installed && autoCheckState === 'done' && status?.updateAvailable === true ? 'update-available' : undefined}>
-        {statusError !== '' ? tr('状态暂不可读：', 'Status unavailable: ') + statusError : statusText(status)}
-      </p>
-      {installed && status?.autoStart !== undefined && (advanced || !ready) && <div className="dsh-linux-env-row">
-        <span>{tr('运行 Linux', 'Run Linux')}</span>
-        <Switch label={tr('运行 Linux', 'Run Linux')} disabled={busy} checked={status.injectionActivated === true}
-          onChange={enabled => {
-            if (!enabled && !window.confirm(tr('停止 Linux 会结束正在运行的终端和任务。', 'Stopping Linux ends active terminals and jobs.'))) return
-            void run(() => setRuntimePreference({ enabled }), 'idle')
-          }} />
-      </div>}
-      {installed && !healthy && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
-        data-linux-action="terminal" disabled={!ready} onClick={openTerminal}>
-        <span>{tr('终端', 'Terminal')}</span><span aria-hidden="true">›</span>
-      </button>}
-      {installed && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
-        data-linux-action="toolchains" disabled={!ready || busy} onClick={() => setToolsOpen(true)}>
-        <span>{tr('工具链与存储', 'Toolchains and storage')}</span><span aria-hidden="true">›</span>
-      </button>}
-      {installed && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
-        data-linux-action="settings" aria-expanded={advanced} onClick={() => setAdvanced(value => !value)}>
-        <span>{tr('Linux 设置', 'Linux settings')}</span><span aria-hidden="true">{advanced ? '−' : '›'}</span>
-      </button>}
       {advanced && autoCheckState === 'checking' && !attempting && phase !== 'failed' && (
         <p className="dsh-linux-env-hint" role="status" data-linux-auto-check="checking">
           {tr('正在自动查询上游最新版本…', 'Checking upstream for the latest version…')}
@@ -567,14 +565,14 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
           {tr('可安装版本 ', 'Available version ') + status.availableVersion}
         </p>
       )}
-      {autoCheckState === 'done' && !attempting && phase !== 'failed' && installed && status?.updateAvailable === false && status?.updateBlocked !== true && (
+      {(!sidebar || advanced) && autoCheckState === 'done' && !attempting && phase !== 'failed' && installed && status?.updateAvailable === false && status?.updateBlocked !== true && (
         <p className="dsh-linux-env-hint" data-linux-auto-check="up-to-date">
           {status.latestReleaseVersion
             ? tr('已安装上游最新版本 ' + status.latestReleaseVersion + '。', 'Latest upstream release ' + status.latestReleaseVersion + ' is installed.')
             : tr('已查询上游最新版本：当前已是最新。', 'Checked upstream: already up to date.')}
         </p>
       )}
-      {autoCheckState === 'failed' && autoCheckError !== '' && !attempting && phase !== 'failed' && (
+      {(!sidebar || advanced) && autoCheckState === 'failed' && autoCheckError !== '' && !attempting && phase !== 'failed' && (
         <p className="dsh-linux-env-hint" data-linux-auto-check="failed">
           {tr('自动查询上游更新失败（不影响现有环境与重装/卸载）：', 'Automatic update check failed (existing environment, reinstall, and removal remain available): ') + autoCheckError}
         </p>
@@ -667,46 +665,34 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
         </div>
       )}
 
-      {(installed || advanced) && <div className="dsh-linux-env-actions">
-        {installed && (primary === 'update' || primary === 'unknown') && <button
-          type="button"
-          className="dsh-dev-btn dsh-linux-env-primary"
-          data-linux-action={installed ? 'update' : 'install'}
+      {(advanced || (canUpdate && !sidebar)) && <div className="dsh-linux-env-actions">
+        {canUpdate && <Button size="sm" variant="outline"
+          data-linux-action="update"
           data-linux-primary={primary}
           disabled={primaryDisabled}
           onClick={() => { void install() }}
         >
           {primaryLabel(primary, status)}
-        </button>}
-        {advanced && <button
-          type="button"
-          className="dsh-dev-btn"
+        </Button>}
+        {advanced && <Button size="sm" variant="outline"
           data-linux-action="check"
           disabled={busy}
           onClick={() => { void run(queryLatestRelease, 'checking') }}
         >
           {tr('检查更新', 'Check for updates')}
-        </button>}
-        {installed && advanced && <button
-          type="button"
-          className="dsh-dev-btn"
+        </Button>}
+        {installed && advanced && <Button size="sm" variant="outline"
           data-linux-action="reinstall"
-          disabled={busy || !installed}
+          disabled={busy}
           onClick={() => { void install({ reinstall: true }) }}
         >
           {tr('重新安装', 'Reinstall')}
-        </button>}
-        {installed && advanced && <button
-          type="button"
-          className="dsh-dev-btn dsh-dev-danger"
-          data-linux-action="uninstall"
-          disabled={busy || !installed}
-          onClick={() => setConfirmUninstall(true)}
-        >
-          {tr('卸载 Linux 环境', 'Remove Linux environment')}
-        </button>}
-
+        </Button>}
       </div>}
+      {installed && advanced && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
+        data-linux-action="uninstall" disabled={busy} onClick={() => setConfirmUninstall(true)}>
+        <span>{tr('卸载 Linux 环境', 'Remove Linux environment')}</span><IconChevronRightOutlineMedium size={14} />
+      </button>}
 
       {phase === 'failed' && error !== '' && (
         <div className="dsh-linux-env-error" role="alert" data-linux-error="true">
@@ -742,7 +728,7 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
           <Button data-modal-autofocus="" data-linux-uninstall="cancel" onClick={() => setConfirmUninstall(false)}>
             {tr('取消', 'Cancel')}
           </Button>
-          <Button variant="outline" className="dsh-dev-danger" data-linux-uninstall="confirm"
+          <Button variant="outline" className="dsh-resource-danger" data-linux-uninstall="confirm"
             disabled={busy || !installed} onClick={() => {
               setConfirmUninstall(false)
               void run(uninstallEnvironment, 'uninstalling')
