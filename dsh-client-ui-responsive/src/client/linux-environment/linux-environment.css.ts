@@ -15,27 +15,245 @@ export const LINUX_ENVIRONMENT_CSS: string = `
   height: 100%;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: var(--dsh-mobile-top-inset, 0px) 16px max(12px, env(safe-area-inset-bottom));
+  padding: 0 16px max(12px, env(safe-area-inset-bottom));
 }
 
 .dsh-linux-panel > [data-linux-environment] {
-  max-width: 680px;
+  max-width: 620px;
   margin-inline: auto;
   padding-top: 0;
 }
 
 .dsh-linux-panel-header {
-  min-height: 52px;
+  min-height: 56px;
   display: flex;
   align-items: center;
-  gap: 12px;
-  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  gap: 6px;
 }
 
 .dsh-linux-panel-header > h1 {
   margin: 0;
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 600;
+}
+
+.dsh-resource-intro {
+  display: grid;
+  gap: 16px;
+  margin-block: 8px 12px;
+  padding: 18px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 16px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.dsh-resource-intro-heading {
+  display: flex;
+  align-items: start;
+  gap: 12px;
+}
+
+.dsh-resource-glyph {
+  display: grid;
+  place-items: center;
+  flex: 0 0 38px;
+  block-size: 38px;
+  border-radius: 10px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsh-resource-intro-heading h2 {
+  margin: 0 0 3px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 17px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.dsh-resource-intro p {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.dsh-resource-intro .dsh-resource-size {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dsh-resource-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.dsh-resource-intro > button {
+  justify-self: start;
+}
+
+.dsh-resource-back,
+.dsh-resource-link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dsh-resource-back:hover, .dsh-resource-link-button:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsh-resource-back:focus-visible, .dsh-resource-link-button:focus-visible {
+  outline: 2px solid var(--dsw-alias-link);
+  outline-offset: -2px;
+}
+
+.dsh-resource-download-button {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-link);
+  touch-action: manipulation;
+  cursor: pointer;
+}
+
+.dsh-resource-download-button:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-resource-download-button:focus-visible {
+  outline: 2px solid var(--dsw-alias-link);
+  outline-offset: -2px;
+}
+
+.dsh-resource-ring {
+  display: inline-grid;
+  position: relative;
+  place-items: center;
+  flex-shrink: 0;
+  color: var(--dsw-alias-link);
+}
+
+.dsh-resource-ring > svg:first-child {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  stroke-width: 2;
+  transform: rotate(-90deg);
+}
+
+.dsh-resource-ring-track { stroke: var(--dsw-alias-border-l3); }
+.dsh-resource-ring-progress { stroke: currentColor; stroke-linecap: round; }
+.dsh-resource-ring[data-state='paused'] { color: var(--dsw-alias-label-secondary); }
+.dsh-resource-ring[data-state='failed'] { color: var(--dsw-alias-label-error, #b0252b); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .dsh-resource-ring-progress[data-moving='true'] {
+    transform-origin: 50% 50%;
+    animation: dsh-resource-turn 1.4s linear infinite;
+  }
+}
+
+@keyframes dsh-resource-turn { to { transform: rotate(1turn); } }
+
+.dsh-resource-popover-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+
+.dsh-resource-popover-outside {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--dsw-alias-bg-mask-1) 45%, transparent);
+}
+
+.dsh-resource-popover {
+  box-sizing: border-box;
+  position: absolute;
+  width: min(350px, calc(100vw - 24px));
+  padding: 10px 16px 12px;
+  border-radius: 16px;
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-elevation-prominent);
+}
+
+.dsh-resource-popover > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-inline-end: -6px;
+  margin-bottom: 8px;
+}
+
+.dsh-resource-popover h2 {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 15px;
+  line-height: 1.45;
+  font-weight: 600;
+}
+
+.dsh-resource-transfer {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dsh-resource-transfer-status,
+.dsh-resource-transfer-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.dsh-resource-transfer-status {
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsh-resource-transfer-status strong { font-weight: 550; }
+.dsh-resource-transfer-footer button { margin-inline-start: auto; }
+.dsh-resource-transfer-footer p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsh-resource-transfer progress {
+  width: 100%;
+  height: 5px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  accent-color: var(--dsw-alias-link);
+}
+
+.dsh-resource-transfer progress[value] { appearance: none; }
+.dsh-resource-transfer progress[value]::-webkit-progress-bar {
+  background: var(--dsw-alias-border-l3);
+}
+.dsh-resource-transfer progress[value]::-webkit-progress-value {
+  border-radius: 4px;
+  background: var(--dsw-alias-link);
 }
 
 .dsh-linux-env-header > span {

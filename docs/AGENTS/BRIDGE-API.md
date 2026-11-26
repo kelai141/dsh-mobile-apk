@@ -281,6 +281,8 @@ bootstrap 调用 `linuxPluginHost.install({directory,entry='lib/index.js',config
 | `linuxAssetResume()` | 使用当前资产原清单、摘要、大小及来源恢复下载，并复用 `.part` 文件中的已接收字节。 |
 | `linuxInstallJob(action, payload)` | `start` 校验并原子持久化安装任务后排队；`status` 返回任务与当前资产进度；`pause` 请求暂停；`retry` 恢复暂停或失败任务。任务文件为 `linux-environment/install-job.json`。 |
 
+`linuxInstallJob('status', null)` includes the release `version`, selected `runtimeId`, and the aggregate `totalBytes` and `availableBytes`. Available bytes count completed assets and the current asset's reported bytes, including reused data. They measure preparation against the manifest, and can reach the total before activation. Both the chat header and Optional resources read this status and keep download progress separate from environment activation.
+
 设置页从固定版本的发布 manifest 取得 runtime 插件、backend、rootfs 与 Node 资产，按序调用 `linuxInstallJob('start', payload)`。APK 将 `{version, runtimeId, assets, index, state}` 通过原子替换写入 `linux-environment/install-job.json`。任务由单线程 worker 执行，随后的状态查询读取任务阶段及 `linuxAssetPrepareStatus()` 进度。EngineService 恢复时调用 `resumePending()`，继续 `queued` 或 `installing` 状态任务；下载进度通过系统通知展示。暂停状态和资产索引持久化，重试后继续当前资产并复用 `.part` 文件。完成全部暂存后，安装任务向引擎 POST `/install`，携带固定 `runtimeId` 与 `expectedVersion`。
 
 壳侧判据（实现见 `app/src/main/java/com/dsharnessmobile/shell/LinuxAssetIO.kt`、`LinuxAssetExtractor.kt`、`LinuxAssetPrepare.kt` 与 `LinuxInstallJob.kt`）：只接受 https + 主机白名单（`github.com` / GitHub 资产 CDN）且路径必须是本仓 Releases 的 `<tag>/<asset>`；重定向逐跳复核；SHA-256 与字节数都要符合清单；解包由 Linux 专用 `LinuxAssetExtractor` 执行，下载、工作与发布路径均约束在 `DSH_FILES_DIR/linux-environment` 内。环境根目录与 `linux-bootstrap-state.json` 在场时才接受准备请求。全部通过后原子发布至 `staging/<sha256>/`，归档字节与解包目录均保留，供引擎侧复验与重建。

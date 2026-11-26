@@ -11,6 +11,8 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { readFileSync } from 'node:fs'
 import { LinuxEnvironmentSection } from '../src/client/linux-environment/LinuxEnvironmentSection.tsx'
+import { LinuxDownloadButton } from '../src/client/linux-environment/LinuxDownloadButton.tsx'
+import { refreshInstallJob } from '../src/client/linux-environment/install-job.ts'
 import { assetsFor, fetchManifest, installRuntimeAssets, RouteError, type AssetSpec } from '../src/client/linux-environment/transport.ts'
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
@@ -130,13 +132,13 @@ describe('first-install manifest discovery', () => {
 })
 
 describe('index.ts registration', () => {
-  it('registers the section exactly once, under the Linux label, and imports the section', () => {
+  it('registers the optional resource section exactly once and imports the Linux section', () => {
     const source = readFileSync('src/client/index.ts', 'utf8')
     const registrations = source.split("id: 'linux-environment'").length - 1
     expect(registrations).toBe(1)
     expect(source).toContain("import { LinuxEnvironmentSection } from './linux-environment/LinuxEnvironmentSection.tsx'")
     expect(source).toContain('}, LinuxEnvironmentSection))')
-    expect(source).toMatch(/label: \(\) => tr\('Linux环境'/)
+    expect(source).toMatch(/label: \(\) => tr\('可选资源'/)
   })
 })
 
@@ -151,6 +153,8 @@ describe('LinuxEnvironmentSection', () => {
       }) }
     }))
     const element = await render()
+    expect(element.querySelector('[data-linux-action="check"]')).toBeNull()
+    await act(async () => { element.querySelector<HTMLButtonElement>('[data-linux-action="settings"]')!.click() })
     const check = element.querySelector('[data-linux-action="check"]') as HTMLButtonElement
     expect(check.disabled).toBe(false)
     expect(element.querySelector('[data-linux-auto-check="update-available"]')?.textContent).toContain('0.10.8')
@@ -214,7 +218,7 @@ describe('LinuxEnvironmentSection', () => {
 
     const element = await render()
     const install = element.querySelector('[data-linux-action="install"]') as HTMLButtonElement
-    expect(install.textContent).toContain('一键下载并安装')
+    expect(install.textContent).toContain('下载并安装')
 
     await act(async () => { install.click() })
     // 轮询间隔 600ms：等两次即可收敛。
@@ -241,12 +245,13 @@ describe('LinuxEnvironmentSection', () => {
 
     const element = await render()
     const install = element.querySelector('[data-linux-action="install"]') as HTMLButtonElement
+    const manifestReads = calls.filter(call => call.url.endsWith('/manifest')).length
     await act(async () => {
       install.click()
       install.click()
       await new Promise((resolve) => { setTimeout(resolve, 50) })
     })
-    expect(calls.filter((call) => call.url.endsWith('/manifest')).length).toBe(1)
+    expect(calls.filter((call) => call.url.endsWith('/manifest')).length - manifestReads).toBe(1)
     expect(calls.filter((call) => call.url.endsWith('/install')).length).toBe(1)
   }, 20000)
 
@@ -275,7 +280,7 @@ describe('LinuxEnvironmentSection', () => {
     const retry = element.querySelector('[data-linux-action="retry"]') as HTMLButtonElement | null
     expect(retry).not.toBeNull()
     expect(retry?.disabled).toBe(false)
-    expect(element.querySelector('[data-linux-action="install"]')).not.toBeNull()
+    expect(element.querySelector('[data-linux-action="install"]')).toBeNull()
   }, 20000)
 
   it('reports a missing bridge instead of silently pretending to download', async () => {
@@ -319,7 +324,7 @@ describe('LinuxEnvironmentSection', () => {
     const header = element.querySelector('.dsh-linux-panel-header')!
     const back = header.querySelector('button')!
     const tools = element.querySelector<HTMLButtonElement>('[data-linux-action="toolchains"]')!
-    expect(header.querySelector('h1')?.textContent).toBe('Linux 环境')
+    expect(header.querySelector('h1')?.textContent).toBe('可选资源')
     expect(element.querySelector('[data-linux-action="back"]')).toBeNull()
     await act(async () => { element.querySelector<HTMLButtonElement>('[data-linux-action="settings"]')!.click() })
     const diagnostics = element.querySelector('.dsh-linux-diagnostics')!
@@ -329,7 +334,7 @@ describe('LinuxEnvironmentSection', () => {
     expect(header.querySelector('h1')?.textContent).toBe('工具链')
     expect(element.querySelector('[data-dsh-settings-sublayer-back]')).toBeNull()
     await act(async () => { back.click() })
-    expect(header.querySelector('h1')?.textContent).toBe('Linux 环境')
+    expect(header.querySelector('h1')?.textContent).toBe('可选资源')
     expect(close).not.toHaveBeenCalled()
     await act(async () => { back.click() })
     expect(close).toHaveBeenCalledOnce()
@@ -633,7 +638,28 @@ describe('LinuxEnvironmentSection', () => {
     const primary = element.querySelector('[data-linux-action="install"]') as HTMLButtonElement
     expect(primary.disabled).toBe(false)
     expect(primary.getAttribute('data-linux-primary')).toBe('install')
-    expect(primary.textContent).toContain('一键下载并安装')
+    expect(primary.textContent).toContain('下载并安装')
+  })
+
+  it('shows aggregate progress in the toolbar and opens download details', async () => {
+    let snapshot = { state: 'queued', availableBytes: 42, totalBytes: 100, progress: { stage: 'downloading' } }
+    Object.defineProperty(window, 'androidBridge', {
+      value: { linuxInstallJob: () => JSON.stringify(snapshot) }, configurable: true,
+    })
+    const open = vi.fn()
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    root = createRoot(host)
+    await act(async () => { root!.render(<LinuxDownloadButton open={open} />) })
+    const button = host.querySelector('button')!
+    expect(button.getAttribute('aria-label')).toBe('正在下载 Linux · 42%')
+    await act(async () => { button.click() })
+    expect(document.querySelector('[data-dsh-resource-details]')?.textContent).toContain('42%')
+    expect(open).not.toHaveBeenCalled()
+    snapshot = { ...snapshot, state: 'installing', availableBytes: 100 }
+    await act(async () => { refreshInstallJob() })
+    expect(button.getAttribute('aria-label')).toBe('正在准备 Linux 环境')
+    expect(document.querySelector('[data-dsh-resource-details]')?.textContent).toContain('正在准备 Linux 环境')
   })
 
   it('re-prepares pinnedManifest assets via the Android bridge before offline reinstall', async () => {

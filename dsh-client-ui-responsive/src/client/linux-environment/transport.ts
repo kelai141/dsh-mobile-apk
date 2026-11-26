@@ -373,6 +373,10 @@ export interface AssetPrepareSnapshot {
 
 export interface InstallJob {
   state?: 'queued' | 'paused' | 'installing' | 'failed' | 'done'
+  runtimeId?: string
+  version?: string
+  availableBytes?: number
+  totalBytes?: number
   error?: string
   index?: number
   total?: number
