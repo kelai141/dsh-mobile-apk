@@ -4,7 +4,7 @@ import { SUBLAYER_POP_EVENT } from '../mobile/back-stack.ts'
  * 终端与工具链是子页，返回只退出子页。终端会话由引擎持有。
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Button, IconChevronLeftOutlineMedium, IconCodeOutlineMedium, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconChevronLeftOutlineMedium, IconCodeOutlineMedium, Modal, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { LinuxTerminal } from './LinuxTerminal.tsx'
 import { LinuxToolchains } from './LinuxToolchains.tsx'
 import { LinuxDownloadProgress } from './LinuxDownloadButton.tsx'
@@ -172,6 +172,7 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
   const [advanced, setAdvanced] = useState(false)
+  const [confirmUninstall, setConfirmUninstall] = useState(false)
   const [source, setSource] = useState(savedSource)
   const [status, setStatus] = useState<LinuxStatus | null>(null)
   const [statusError, setStatusError] = useState('')
@@ -700,11 +701,7 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
           className="dsh-dev-btn dsh-dev-danger"
           data-linux-action="uninstall"
           disabled={busy || !installed}
-          onClick={() => {
-            if (window.confirm(tr('卸载 Linux 环境及其根文件系统？', 'Remove Linux and its root filesystem?'))) {
-              void run(() => uninstallEnvironment(), 'uninstalling')
-            }
-          }}
+          onClick={() => setConfirmUninstall(true)}
         >
           {tr('卸载 Linux 环境', 'Remove Linux environment')}
         </button>}
@@ -731,6 +728,29 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
       </details>}
 
       </>}
+      <Modal
+        open={confirmUninstall}
+        onClose={() => setConfirmUninstall(false)}
+        title={tr('卸载 Linux 环境？', 'Remove the Linux environment?')}
+        className="dsh-linux-uninstall-dialog"
+        backdropBlur={false}
+        headless
+      >
+        <h2>{tr('卸载 Linux 环境？', 'Remove the Linux environment?')}</h2>
+        <p>{tr('这会删除 Linux 根文件系统及其中的软件包。', 'This removes the Linux root filesystem and its installed packages.')}</p>
+        <div className="dsh-linux-uninstall-actions">
+          <Button data-modal-autofocus="" data-linux-uninstall="cancel" onClick={() => setConfirmUninstall(false)}>
+            {tr('取消', 'Cancel')}
+          </Button>
+          <Button variant="outline" className="dsh-dev-danger" data-linux-uninstall="confirm"
+            disabled={busy || !installed} onClick={() => {
+              setConfirmUninstall(false)
+              void run(uninstallEnvironment, 'uninstalling')
+            }}>
+            {tr('卸载', 'Remove')}
+          </Button>
+        </div>
+      </Modal>
     </section>
   )
 }

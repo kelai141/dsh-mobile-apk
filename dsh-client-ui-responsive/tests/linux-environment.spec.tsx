@@ -641,6 +641,35 @@ describe('LinuxEnvironmentSection', () => {
     expect(primary.textContent).toContain('下载并安装')
   })
 
+  it('keeps cancellation safe and only removes Linux after the dialog is confirmed', async () => {
+    const { calls, impl } = makeFetch({
+      '/api/android/linux-environment/status': { body: STATUS_INSTALLED },
+      '/api/android/linux-environment/check': { body: STATUS_INSTALLED },
+      '/api/android/linux-environment/uninstall': { body: { installed: false } },
+    })
+    vi.stubGlobal('fetch', impl)
+    const element = await render()
+    await act(async () => { element.querySelector<HTMLButtonElement>('[data-linux-action="settings"]')!.click() })
+    const trigger = element.querySelector<HTMLButtonElement>('[data-linux-action="uninstall"]')!
+    await act(async () => { trigger.click() })
+
+    const dialog = document.querySelector('[role="dialog"].dsh-linux-uninstall-dialog')!
+    expect(dialog.getAttribute('aria-label')).toBe('卸载 Linux 环境？')
+    const cancel = dialog.querySelector<HTMLButtonElement>('[data-linux-uninstall="cancel"]')!
+    expect(document.activeElement).toBe(cancel)
+    expect(calls.filter(call => call.url.endsWith('/uninstall'))).toHaveLength(0)
+    await act(async () => { cancel.click() })
+    expect(document.querySelector('.dsh-linux-uninstall-dialog')).toBeNull()
+    expect(calls.filter(call => call.url.endsWith('/uninstall'))).toHaveLength(0)
+
+    await act(async () => { trigger.click() })
+    await act(async () => { document.querySelector<HTMLButtonElement>('[data-linux-uninstall="confirm"]')!.click() })
+    expect(document.querySelector('.dsh-linux-uninstall-dialog')).toBeNull()
+    expect(calls.filter(call => call.url.endsWith('/uninstall'))).toEqual([
+      { url: '/api/android/linux-environment/uninstall', method: 'POST', body: { confirmed: true } },
+    ])
+  })
+
   it('shows aggregate progress in the toolbar and opens download details', async () => {
     let snapshot = { state: 'queued', availableBytes: 42, totalBytes: 100, progress: { stage: 'downloading' } }
     Object.defineProperty(window, 'androidBridge', {

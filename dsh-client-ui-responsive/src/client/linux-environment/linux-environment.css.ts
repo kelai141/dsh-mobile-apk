@@ -293,6 +293,39 @@ export const LINUX_ENVIRONMENT_CSS: string = `
 .dsh-linux-env-progress progress { width: 100%; accent-color: var(--dsw-alias-link); }
 .dsh-linux-env-actions { padding-block: 16px; }
 
+.dsh-linux-uninstall-dialog[role='dialog'] {
+  gap: 8px;
+  padding: 20px;
+  max-height: calc(100vh - max(24px, var(--dsh-frame-overlay-top, 24px)) - 24px);
+  overflow-y: auto;
+}
+
+.dsh-linux-uninstall-dialog h2 {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 17px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.dsh-linux-uninstall-dialog p {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 14px;
+  line-height: 21px;
+  overflow-wrap: anywhere;
+}
+
+.dsh-linux-uninstall-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.dsh-linux-uninstall-actions button { min-height: 44px; }
+
 .dsh-linux-env button.dsh-dev-btn,
 .dsh-linux-panel-header > button,
 .dsh-linux-terminal-tools > button:not(.dsh-linux-back),
