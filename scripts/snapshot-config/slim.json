@@ -148,6 +148,22 @@
     {
       "path": "usr/share/man",
       "reason": "man 手册页：设备上无任何消费者（无 man 浏览路径），整树删除同时降字节/条目/符号链接三个维度"
+    },
+    {
+      "path": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-inspector/lib/devtools",
+      "reason": "Inspector DevTools 静态前端资源包（约 22.95 MiB，含 Lighthouse worker ~8.78 MiB）：默认 web/headless profile 不启用 experimental-inspector，避免常驻快照体积膨胀"
+    }
+  ],
+  "hoistedDedup": [
+    {
+      "package": "zod",
+      "expectedVersion": "4.6.6",
+      "hosts": [
+        "@deepseek-ai/dsh-action-cards",
+        "@deepseek-ai/dsh-creation-recommendations",
+        "@deepseek-ai/dsh-experimental-liveshare",
+        "@deepseek-ai/dsh-plugin-recommendations"
+      ]
     }
   ],
   "extensionDelete": [

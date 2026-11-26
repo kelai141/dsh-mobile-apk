@@ -112,14 +112,19 @@ async function json(response: Response): Promise<Record<string, unknown> | null>
   }
 }
 
-async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
+async function request<T>(
+  method: 'GET' | 'POST',
+  path: string,
+  body?: unknown,
+  extraHeaders?: Record<string, string>,
+): Promise<T> {
   const init: RequestInit = {
     method,
     credentials: 'same-origin',
     cache: 'no-store',
     headers: body === undefined
-      ? { accept: 'application/json' }
-      : { accept: 'application/json', 'content-type': 'application/json' },
+      ? { accept: 'application/json', ...(extraHeaders ?? {}) }
+      : { accept: 'application/json', 'content-type': 'application/json', ...(extraHeaders ?? {}) },
   }
   if (body !== undefined) init.body = JSON.stringify(body)
   let response: Response
@@ -177,9 +182,10 @@ export function terminalRequest(action: TerminalAction): Promise<TerminalUpdate 
  * check answers 404/405 there, so exactly that status falls back to `check`
  * once; every other failure surfaces unchanged.
  */
-export async function fetchManifest(): Promise<ReleaseManifest> {
+export async function fetchManifest(options?: { pinned?: boolean }): Promise<ReleaseManifest> {
+  const headers = options?.pinned ? { 'x-dsh-manifest-scope': 'pinned' } : undefined
   try {
-    const payload = await request<{ manifest?: ReleaseManifest }>('GET', LINUX_ROUTES.manifest)
+    const payload = await request<{ manifest?: ReleaseManifest }>('GET', LINUX_ROUTES.manifest, undefined, headers)
     if (payload.manifest && typeof payload.manifest === 'object') return payload.manifest
     if (payload.manifest !== null) throw new RouteError('The host returned no manifest', 200)
   } catch (cause) {
@@ -189,7 +195,7 @@ export async function fetchManifest(): Promise<ReleaseManifest> {
     throw new RouteError('The host does not expose the release manifest', cause.status)
   }
   await request<LinuxStatus>('POST', LINUX_ROUTES.check)
-  const checked = await request<{ manifest?: ReleaseManifest }>('GET', LINUX_ROUTES.manifest)
+  const checked = await request<{ manifest?: ReleaseManifest }>('GET', LINUX_ROUTES.manifest, undefined, headers)
   if (checked.manifest && typeof checked.manifest === 'object') return checked.manifest
   throw new RouteError('The host does not expose the release manifest')
 }

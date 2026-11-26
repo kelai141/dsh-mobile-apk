@@ -1,0 +1,6 @@
+{
+  "engine": "0.2.2-rc.3",
+  "package": "@deepseek-ai/dsh-storage-sqlite@0.2.2-rc.3",
+  "capturedFile": "lib/index.js",
+  "sourceSha256": "10bba6eb6c7e421757f170c9b19449707eb498b717cb16d3acf7e4f98c20b52c"
+}

@@ -45,6 +45,35 @@ class UpdateManager(private val context: Context) {
    */
   var manifestUrl: String = DEFAULT_MANIFEST_URL
 
+  internal var spaceCheck: ((requiredBytes: Long) -> String?)? = null
+
+  private fun effectiveSpaceCheck(requiredBytes: Long): String? =
+    spaceCheck?.invoke(requiredBytes) ?: defaultSpaceReason(context.filesDir, requiredBytes)
+
+  private fun defaultSpaceReason(filesDir: File, requiredBytes: Long): String? {
+    return try {
+      val stat = android.os.StatFs(filesDir.absolutePath)
+      val free = stat.availableBytes
+      if (free >= requiredBytes) return null
+      val needMb = requiredBytes / (1024 * 1024)
+      val freeMb = free / (1024 * 1024)
+      "存储空间不足：在线更新需要约 " + needMb + " MB 可用空间，当前仅 " + freeMb + " MB，请清理空间后重试。"
+    } catch (_: Throwable) {
+      null
+    }
+  }
+
+  internal fun preDownloadRequiredBytes(declaredSize: Long): Long {
+    val archiveNeed = if (declaredSize > 0L) declaredSize else 0L
+    val extractEstimate = if (declaredSize > 0L) maxOf(declaredSize * 5L, 256L * 1024L * 1024L) else 64L * 1024L * 1024L
+    return archiveNeed + extractEstimate + 64L * 1024L * 1024L
+  }
+
+  internal fun preExtractRequiredBytes(archive: File, uncompressedSize: Long?): Long {
+    val fallback = maxOf(archive.length() * 5L, 64L * 1024L * 1024L)
+    return (uncompressedSize ?: fallback) + 64L * 1024L * 1024L
+  }
+
   /**
    * Run the update flow on a background thread.
    * @param onStatus 进度与终态回执（任意线程；**终态**由 `outcome` 判定，调用方不再猜前缀）。
@@ -57,6 +86,7 @@ class UpdateManager(private val context: Context) {
       var ownsTransactionStage = false
       var probationStarted = false
       try {
+        SnapshotTransaction.pruneOrphanUpdateArchives(context.filesDir, activeFile = archive)
         onStatus(UpdateStatus(UpdateOutcome.Working, "检查更新…"))
         // S-10：未配置可信发布源 = 未启用（不再对着模拟器别名超时，也不再给出「可用」的错觉）。
         // 0.14.1 批 2（P0-2）：这是**能力缺失**，不是故障——如实回一个中性终态，界面据此走 Info 相位。
@@ -77,6 +107,11 @@ class UpdateManager(private val context: Context) {
         val expectedSha = manifest.getString("sha256")
         val declaredSize = manifest.optLong("size", 0)
 
+        val preDownloadRequired = Companion.preDownloadRequiredBytes(declaredSize)
+        effectiveSpaceCheck(preDownloadRequired)?.let { reason ->
+          throw SnapshotTransaction.InsufficientSpaceException(preDownloadRequired, reason)
+        }
+
         onStatus(UpdateStatus(UpdateOutcome.Working, "下载快照（" + (declaredSize / 1024 / 1024) + " MB）…"))
         download(url, archive, declaredSize)
 
@@ -84,6 +119,12 @@ class UpdateManager(private val context: Context) {
         val actual = sha256(archive)
         if (!actual.equals(expectedSha, ignoreCase = true)) {
           throw IllegalStateException("SHA256 不匹配: " + actual.take(12) + "…")
+        }
+
+        val uncompressed = SnapshotExtractor.uncompressedSizeOrNull(archive)
+        val preExtractRequired = Companion.preExtractRequiredBytes(archive, uncompressed)
+        effectiveSpaceCheck(preExtractRequired)?.let { reason ->
+          throw SnapshotTransaction.InsufficientSpaceException(preExtractRequired, reason)
         }
 
         onStatus(UpdateStatus(UpdateOutcome.Working, "解压新快照…"))
@@ -110,6 +151,7 @@ class UpdateManager(private val context: Context) {
         SnapshotExtractor.extract(
           archive.inputStream(), declaredSize, stage, { _, _ -> }, runtimeRoot = context.filesDir,
         )
+        SnapshotFs.deletePath(archive)
         val newUsr = File(stage, "usr")
         if (!SnapshotFs.exists(File(newUsr, "bin/node"))) throw IllegalStateException("新快照缺少 node")
         if (PluginMounts.prepareOnlineHardManifest(context, stage, expectedSha, baseFingerprint) == null) {
@@ -348,6 +390,17 @@ class UpdateManager(private val context: Context) {
 
     /** 开发/验收用的模拟器别名（仅 http 且仅此主机允许走明文）。 */
     private const val EMULATOR_HOST = "10.0.2.2"
+
+    internal fun preDownloadRequiredBytes(declaredSize: Long): Long {
+      val archiveNeed = if (declaredSize > 0L) declaredSize else 0L
+      val extractEstimate = if (declaredSize > 0L) maxOf(declaredSize * 5L, 256L * 1024L * 1024L) else 64L * 1024L * 1024L
+      return archiveNeed + extractEstimate + 64L * 1024L * 1024L
+    }
+
+    internal fun preExtractRequiredBytes(archive: File, uncompressedSize: Long?): Long {
+      val fallback = maxOf(archive.length() * 5L, 64L * 1024L * 1024L)
+      return (uncompressedSize ?: fallback) + 64L * 1024L * 1024L
+    }
 
     /** manifest 声明体积之上允许的余量（旧的**事后**判据同值，现改为边写边判，见 [downloadArchive]）。 */
     internal const val DECLARED_SIZE_SLACK_BYTES = 16L * 1024L * 1024L

@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, createReadStream, statSync, utimesSync } from "node:fs";
 import { chmod, link, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { createLazyRequire } from "@deepseek-ai/dsh-lazy-require";
+import { existsSync as dshMobileExistsSync, readFileSync as dshMobileReadFileSync } from "node:fs";
 //#region lib/types/compression-limiter.js
 /** Instance-owned concurrency bound for native image transformations. */
 /**
@@ -481,18 +482,23 @@ async function publishImmutableAlias(root, source, target, sha256) {
 	const parent = dirname(target);
 	try {
 		await ensureDurableDirectory(parent, await ensureDurableHome(dirname(dirname(resolve(root)))));
+		let dshMobileWroteAliasMeta = false;
 		try {
 			await link(source, target).catch(async (error) => {
-				/* dsh-mobile link->rename fallback: Android app-private dirs reject link(2) (EACCES). */
-				if (!(error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOTSUP"))) throw error;
-				await rename(source, target);
+				/* dsh-mobile cas-alias-metadata fallback: Android app-private dirs reject link(2) (EACCES). */
+				if (!(error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOTSUP" || error.code === "ENOSYS"))) throw error;
+				const aliasPath = `${target}.dsh-alias.json`;
+				const tmpAlias = `${aliasPath}.${randomUUID()}.tmp`;
+				await writeFile(tmpAlias, `${JSON.stringify({ sha256 })}\n`, { mode: 256 });
+				await rename(tmpAlias, aliasPath);
+				dshMobileWroteAliasMeta = true;
 			});
 		} catch (error) {
 			/* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race. */
 			if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
 			if (await digestFile(target) !== sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");
 		}
-		await chmod(target, 256);
+		if (!dshMobileWroteAliasMeta) await chmod(target, 256);
 		const stop = resolve(root);
 		for (let level = parent; level !== stop; level = dirname(level)) {
 			await syncDirectory(level);
@@ -688,6 +694,21 @@ function storedFilePath(root, ref) {
 function storedFileObjectPath(root, sha256) {
 	return join(root, "file-objects", sha256.slice(0, 2), sha256);
 }
+function dshMobileResolveReadableFilePath(root, ref) {
+	/* dsh-mobile cas-alias-dual-read */
+	const legacyPath = storedFilePath(root, ref);
+	if (dshMobileExistsSync(legacyPath)) return legacyPath;
+	const sha256 = ensureFileReference(ref);
+	const aliasPath = `${legacyPath}.dsh-alias.json`;
+	if (dshMobileExistsSync(aliasPath)) {
+		try {
+			const meta = JSON.parse(dshMobileReadFileSync(aliasPath, "utf8"));
+			if (meta && meta.sha256 === sha256) return storedFileObjectPath(root, sha256);
+		} catch {}
+	}
+	const objectPath = storedFileObjectPath(root, sha256);
+	return dshMobileExistsSync(objectPath) ? objectPath : legacyPath;
+}
 /**
 * Commit one file byte-for-byte below a versioned attachment root.
 * @param root - absolute `DSH_HOME/attachments/v1` root.
@@ -735,7 +756,7 @@ async function saveFileStreamVerbatim(root, input) {
 async function* readFileStreamVerbatim(root, ref, signal) {
 	signal?.throwIfAborted();
 	const sha256 = ensureFileReference(ref);
-	const stream = createReadStream(storedFilePath(root, ref), {
+	const stream = createReadStream(dshMobileResolveReadableFilePath(root, ref), {
 		highWaterMark: 65536,
 		...signal === void 0 ? {} : { signal }
 	});
@@ -1065,7 +1086,7 @@ var LocalAttachmentStore = class extends AttachmentStore {
 		return readFileStreamVerbatim(this.root, ref, signal);
 	}
 	fileHostPath(ref) {
-		return storedFilePath(this.root, ref);
+		return dshMobileResolveReadableFilePath(this.root, ref);
 	}
 	async readImageRequest(ref, target, signal) {
 		return this.requestVersion(ref, target, void 0, signal);

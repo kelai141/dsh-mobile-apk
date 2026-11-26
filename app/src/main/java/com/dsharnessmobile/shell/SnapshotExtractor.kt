@@ -444,6 +444,32 @@ object SnapshotExtractor {
     override fun open(): SeekableInputStream = ApkAssetSeekable(apkPath, startOffset, length)
   }
 
+  /** File-backed seekable source for downloaded update archives and offline preflight sizing. */
+  class FileSeekableSource(private val file: File) : SnapshotSeekableSource {
+    override fun open(): SeekableInputStream = ApkAssetSeekable(file.absolutePath, 0L, file.length())
+  }
+
+  /**
+   * Read the declared uncompressed byte total from an XZ stream footer/index without
+   * decompressing blocks (bounded to a tiny footer read). Returns null when the source
+   * is not seekable or malformed so normal extraction/verification handles failure reporting.
+   */
+  fun uncompressedSizeOrNull(source: SnapshotSeekableSource): Long? {
+    val cache = ResettableArrayCache(BasicArrayCache.getDefaultCache())
+    return try {
+      source.open().use { probe ->
+        SeekableXZInputStream(probe, cache).use { stream -> stream.length().takeIf { it >= 0L } }
+      }
+    } catch (_: Throwable) {
+      null
+    } finally {
+      cache.reset()
+    }
+  }
+
+  fun uncompressedSizeOrNull(file: File): Long? =
+    if (!file.isFile) null else uncompressedSizeOrNull(FileSeekableSource(file))
+
   /** 见 [ApkAssetSource]。position 相对 [startOffset]，length 截到条目长度，越界不可读。 */
   class ApkAssetSeekable(
     apkPath: String,

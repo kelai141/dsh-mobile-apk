@@ -50,7 +50,7 @@ const PYTHON = process.platform === 'win32' ? 'python' : 'python3'
 // 清单/模板与编排逻辑分离：预装包、镜像链、剥离清单、瘦身清单、seed 模板、apt.conf、
 // install-clang.sh 均在本目录维护；编排器只读数据 + 走流程。@@PREFIX@@ 为模板占位
 // （构建期替换为设备端前缀，本地 stage 路径不可烧入）。
-import { checkShippedProfileManifests, pruneRetiredAttachmentSeed } from './lib/profile-seed.mjs'
+import { checkShippedProfileManifests, pruneHoistedDuplicates, pruneRetiredAttachmentSeed } from './lib/profile-seed.mjs'
 const CFG_DIR = join(ROOT, 'scripts', 'snapshot-config')
 const readCfg = (f) => readFileSync(join(CFG_DIR, f), 'utf8')
 const PREINSTALL = JSON.parse(readCfg('preinstall.json'))
@@ -1428,6 +1428,8 @@ log('清单驱动裁剪：treeDelete + extensionDelete…')
     const n = String(counted).trim().split(/\s+/).pop()
     log(`  extensionDelete 已删 ${entry.root} 下的 *${entry.ext}：${n} 个`)
   }
+  const deduped = pruneHoistedDuplicates(rootDir, SLIM.hoistedDedup ?? [])
+  if (deduped > 0) log(`  hoistedDedup 已移除冗余嵌套包：${deduped} 个`)
 }
 // 只匹配两种 macOS helper 的已知载荷文件，保留同目录中的许可。
 for (const platform of ['darwin-arm64', 'darwin-x64']) {

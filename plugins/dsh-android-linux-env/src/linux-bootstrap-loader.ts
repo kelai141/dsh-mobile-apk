@@ -115,7 +115,10 @@ export async function mountLinuxBootstrap(ctx: Context, options: {
  * @param dataDir bootstrap 的 dataDir（`<filesDir>/linux-environment`）。
  * @returns manifest 或 null（从未 check 过）。
  */
-export function readLinuxManifest(dataDir: string): Record<string, unknown> | null {
+export function readLinuxManifest(
+  dataDir: string,
+  options: { pinnedOnly?: boolean } = {},
+): Record<string, unknown> | null {
   let raw: string
   try {
     raw = readFileSync(join(dataDir, 'linux-bootstrap-state.json'), 'utf8')
@@ -130,7 +133,10 @@ export function readLinuxManifest(dataDir: string): Record<string, unknown> | nu
   }
   if (state === null || typeof state !== 'object') return null
   const record = state as { availableManifest?: unknown; pinnedManifest?: unknown }
-  for (const candidate of [record.availableManifest, record.pinnedManifest]) {
+  const candidates = options.pinnedOnly
+    ? [record.pinnedManifest]
+    : [record.availableManifest, record.pinnedManifest]
+  for (const candidate of candidates) {
     if (candidate !== null && typeof candidate === 'object' && !Array.isArray(candidate)) {
       return candidate as Record<string, unknown>
     }

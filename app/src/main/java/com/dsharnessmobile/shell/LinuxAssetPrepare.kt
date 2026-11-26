@@ -326,9 +326,41 @@ internal object LinuxAssetPrepare {
       ?: return LinuxAssetIO.Failure(LinuxAssetIO.CODE_SPEC_INVALID, "工作目录推导被拒绝：${spec.sha256}")
 
     val cached = File(staged, "asset.tar.xz")
-    if (!java.nio.file.Files.isSymbolicLink(staged.toPath()) &&
-      cached.isFile && File(staged, "unpacked").isDirectory && File(staged, "kind").takeIf(File::isFile)?.readText() == spec.kind.wire &&
-      LinuxAssetIO.verifyVerdict(SnapshotBundledAsset.digest({ cached.inputStream() }), spec) == null) return null
+    val cachedValid = !java.nio.file.Files.isSymbolicLink(staged.toPath()) &&
+      !java.nio.file.Files.isSymbolicLink(cached.toPath()) &&
+      cached.isFile &&
+      File(staged, "kind").takeIf(File::isFile)?.readText() == spec.kind.wire &&
+      LinuxAssetIO.verifyVerdict(SnapshotBundledAsset.digest({ cached.inputStream() }), spec) == null
+    if (cachedValid && File(staged, "unpacked").isDirectory) return null
+    if (cachedValid) {
+      // Unpacked tree was reclaimed after commit while asset.tar.xz stayed for offline reinstall.
+      // Re-extract into workDir first and atomically move into staged/unpacked without deleting cached.
+      if (java.nio.file.Files.isSymbolicLink(staging.toPath())) SnapshotFs.deletePath(staging)
+      SnapshotFs.deletePath(staging)
+      pruneStalePartDirs(root, spec.sha256)
+      val tempUnpacked = File(staging, "unpacked")
+      if (!tempUnpacked.mkdirs()) {
+        return LinuxAssetIO.Failure(LinuxAssetIO.CODE_DOWNLOAD_FAILED, "无法创建解压目录")
+      }
+      progress("extracting", spec.size)
+      LinuxAssetIO.extract(cached, tempUnpacked, root, spec.kind, LinuxAssetIO.limitsFor(spec.kind))?.let { failure ->
+        SnapshotFs.deletePath(staging)
+        return failure
+      }
+      val stagedUnpacked = File(staged, "unpacked")
+      SnapshotFs.deletePath(stagedUnpacked)
+      try {
+        Files.move(tempUnpacked.toPath(), stagedUnpacked.toPath(), ATOMIC_MOVE)
+      } catch (failure: IOException) {
+        SnapshotFs.deletePath(staging)
+        return LinuxAssetIO.Failure(
+          LinuxAssetIO.CODE_DESTINATION_ESCAPE,
+          "Could not restore unpacked staging directory from cached archive: ${failure.message}",
+        )
+      }
+      SnapshotFs.deletePath(staging)
+      return null
+    }
     SnapshotFs.deletePath(staged)
     if (java.nio.file.Files.isSymbolicLink(staging.toPath())) SnapshotFs.deletePath(staging)
     pruneStalePartDirs(root, spec.sha256)

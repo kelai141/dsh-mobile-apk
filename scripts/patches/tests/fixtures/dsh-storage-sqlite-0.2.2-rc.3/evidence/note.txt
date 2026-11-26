@@ -1,0 +1,1 @@
+Captured unmodified runtime files (package.json, lib/index.js) for @deepseek-ai/dsh-storage-sqlite@0.2.2-rc.3 from the storage-audit baseline runtime package directory for regression testing sqlite-storage-wal-vacuum-S1.

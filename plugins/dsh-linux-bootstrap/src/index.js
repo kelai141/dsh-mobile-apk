@@ -389,6 +389,18 @@ export function createMobileBootstrap(options = {}) {
       state.injectionActivated = true
       state.lastError = null
       await save()
+      // Startup sweep for devices upgraded from builds that retained derived unpacked trees.
+      const keepShas = collectManifestAssetDigests(state.pinnedManifest, state.runtimeId)
+      if (state.availableManifest && state.availableManifest !== state.pinnedManifest) {
+        for (const sha of collectManifestAssetDigests(state.availableManifest, state.runtimeId)) {
+          keepShas.add(sha)
+        }
+      }
+      await pruneOldHostStaging(hostStagingRoot, {
+        keepShas,
+        pruneUnpackedForKeepShas: true,
+        keepPartShas: true,
+      })
     } catch (error) {
       // Activation failure leaves the record installed but inactive: no download,
       // no silent revival, and the reason stays visible in status().
@@ -505,7 +517,7 @@ export function createMobileBootstrap(options = {}) {
         }
       }
       await pruneOldPluginSlots(pluginRoot, { keepDirectory: state.pluginDirectory })
-      await pruneOldHostStaging(hostStagingRoot, { keepShas })
+      await pruneOldHostStaging(hostStagingRoot, { keepShas, pruneUnpackedForKeepShas: true })
       return emit()
     } catch (error) {
       // 顺序：**先回滚资产、再回滚 host scope**（issue #1374）。

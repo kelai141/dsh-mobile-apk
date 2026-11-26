@@ -41,8 +41,10 @@ var JsonlSessionHandle = class {
 	/** Set when a drain failed; the automatic timer stays quiet until the next drain. */
 	drainPaused = false;
 	draining;
+	compactionSummaries = /* @__PURE__ */ new Map();
 	constructor(storage, id, header, access, state, lease) {
 		this.storage = storage;
+		if (Array.isArray(state?.primed?.events)) dshMobileCollectCompactionSummaries(state.primed.events, this.compactionSummaries);
 		this.id = id;
 		this.header = header;
 		this.access = access;
@@ -233,7 +235,8 @@ var JsonlSessionHandle = class {
 			if (this.state.recoveredTail.length > 0) await this.storage.persistBatch(this.header, this.state.recoveredTail, this.state.materialized, this.state.inheritedEventCount);
 			this.state.recoveredTail = void 0;
 		}
-		await this.storage.persistBatch(this.header, batch, this.state.materialized, this.state.inheritedEventCount);
+		await this.storage.persistBatch(this.header, batch, this.state.materialized, this.state.inheritedEventCount, this.compactionSummaries);
+		dshMobileCollectCompactionSummaries(batch, this.compactionSummaries);
 		this.state.materialized = true;
 		this.state.cursor += batch.length;
 		this.state.primed = void 0;
@@ -948,16 +951,104 @@ function logPath(root, cwd, id, compression) {
 * @param events - the batch to serialize, in log order.
 * @returns the batch's JSONL text; the writer adds the final newline.
 */
-function eventLines(events) {
-	return events.map(eventLine).join("\n");
+/* dsh-mobile compaction dedup (C5): avoid writing duplicate summary copies across compaction/summary.rawOutput and checkpoint user/message. */
+function dshMobileCollectCompactionSummaries(events, targetMap) {
+	if (!Array.isArray(events)) return targetMap;
+	for (const event of events) {
+		if (!event || event.type !== "compaction/summary") continue;
+		const data = event.data;
+		if (data && typeof data === "object" && !Array.isArray(data) && typeof data.compactionId === "string" && Array.isArray(data.summary)) {
+			targetMap.set(data.compactionId, data.summary);
+		}
+	}
+	return targetMap;
+}
+function dshMobileDeduplicateCompactionEncoded(encoded, compactionSummaries) {
+	if (!encoded || typeof encoded !== "object" || Array.isArray(encoded)) return encoded;
+	const data = encoded.data;
+	if (!data || typeof data !== "object" || Array.isArray(data)) return encoded;
+	if (encoded.type === "compaction/summary") {
+		const cid = data.compactionId;
+		const summary = data.summary;
+		if (typeof cid === "string" && Array.isArray(summary)) {
+			if (compactionSummaries) compactionSummaries.set(cid, summary);
+			if (data.rawOutput !== void 0 && isDeepStrictEqual(data.rawOutput, summary)) {
+				const nextData = { ...data };
+				delete nextData.rawOutput;
+				nextData.dshCompactDedup = { rawOutputSameAsSummary: true };
+				return { ...encoded, data: nextData };
+			}
+		}
+		return encoded;
+	}
+	if (encoded.type === "user/message" && compactionSummaries) {
+		const source = data.source;
+		if (source && typeof source === "object" && source.kind === "compact-checkpoint" && typeof source.compactionId === "string") {
+			const knownSummary = compactionSummaries.get(source.compactionId);
+			const content = data.content;
+			if (knownSummary !== void 0 && Array.isArray(content) && content.length === knownSummary.length + 2
+				&& content[0] && typeof content[0] === "object" && content[0].type === "text"
+				&& content[content.length - 1] && typeof content[content.length - 1] === "object" && content[content.length - 1].type === "text"
+				&& isDeepStrictEqual(content.slice(1, -1), knownSummary)) {
+				return {
+					...encoded,
+					data: {
+						...data,
+						content: [content[0], content[content.length - 1]],
+						dshCompactCheckpointRef: source.compactionId
+					}
+				};
+			}
+		}
+	}
+	return encoded;
+}
+function dshMobileHydrateCompactionRow(row, compactionSummaries) {
+	if (!row || typeof row !== "object" || Array.isArray(row)) return row;
+	const data = row.data;
+	if (!data || typeof data !== "object" || Array.isArray(data)) return row;
+	if (row.type === "compaction/summary") {
+		if (data.dshCompactDedup !== void 0) {
+			if (!Array.isArray(data.summary)) throw new Error("corrupt compact-dedup compaction/summary record");
+			const nextData = { ...data };
+			if (data.dshCompactDedup && data.dshCompactDedup.rawOutputSameAsSummary === true && nextData.rawOutput === void 0) {
+				nextData.rawOutput = structuredClone(data.summary);
+			}
+			delete nextData.dshCompactDedup;
+			row.data = nextData;
+		}
+		if (typeof row.data.compactionId === "string" && Array.isArray(row.data.summary)) {
+			compactionSummaries.set(row.data.compactionId, row.data.summary);
+		}
+		return row;
+	}
+	if (row.type === "user/message" && data.dshCompactCheckpointRef !== void 0) {
+		const cid = data.dshCompactCheckpointRef;
+		const knownSummary = typeof cid === "string" ? compactionSummaries.get(cid) : void 0;
+		if (knownSummary === void 0 || !Array.isArray(data.content) || data.content.length !== 2) {
+			throw new Error(`corrupt compaction checkpoint reference "${String(cid)}"`);
+		}
+		const nextData = {
+			...data,
+			content: [data.content[0], ...structuredClone(knownSummary), data.content[1]]
+		};
+		delete nextData.dshCompactCheckpointRef;
+		row.data = nextData;
+	}
+	return row;
+}
+function eventLines(events, committedSummaries) {
+	const workingSummaries = new Map(committedSummaries);
+	return events.map((event) => eventLine(event, workingSummaries)).join("\n");
 }
 /**
 * Serialize one current event as one JSONL record without its trailing newline.
 * @param event - current event to encode.
+* @param compactionSummaries - optional per-log compaction summary table.
 * @returns one physical JSON record.
 */
-function eventLine(event) {
-	return JSON.stringify(sessionFormatCatalog.encodeCurrentEvent(event));
+function eventLine(event, compactionSummaries) {
+	return JSON.stringify(dshMobileDeduplicateCompactionEncoded(sessionFormatCatalog.encodeCurrentEvent(event), compactionSummaries));
 }
 /**
 * Refuse a header carrying a format version this build does not read BEFORE
@@ -1014,6 +1105,7 @@ var SessionLogScanner = class {
 	fragmentBytes = 0;
 	inputBytes;
 	committedBytes;
+	dshCompactionSummaries = /* @__PURE__ */ new Map();
 	eventLine = 0;
 	issue;
 	finished = false;
@@ -1094,6 +1186,12 @@ var SessionLogScanner = class {
 			this.issue ??= issue;
 			return;
 		}
+		let hydrationError;
+		try {
+			dshMobileHydrateCompactionRow(decoded, this.dshCompactionSummaries);
+		} catch (error) {
+			hydrationError = error instanceof Error ? error : new Error(String(error));
+		}
 		try {
 			assertV4RowAdmission(decoded, KNOWN_SESSION_EVENT_TYPES);
 		} catch (error) {
@@ -1105,6 +1203,7 @@ var SessionLogScanner = class {
 			return;
 		}
 		try {
+			if (hydrationError !== void 0) throw hydrationError;
 			this.restore.decodeRow(decoded);
 		} catch (error) {
 			/* v8 ignore next -- every production Session format decoder rejects with Error. */
@@ -1691,6 +1790,7 @@ var MigratingJsonlRows = class {
 	fragmentBytes = 0;
 	rowIndex = 0;
 	issue;
+	dshCompactionSummaries = /* @__PURE__ */ new Map();
 	constructor(restore) {
 		this.restore = restore;
 	}
@@ -1736,6 +1836,7 @@ var MigratingJsonlRows = class {
 			if (typeof row === "object" && row !== null && row.type === "turn/end") throw this.issue;
 			return;
 		}
+		dshMobileHydrateCompactionRow(row, this.dshCompactionSummaries);
 		this.restore.decodeRow(row);
 	}
 };
@@ -1918,10 +2019,12 @@ async function syncDirectory(path, internals) {
 /** Produce bounded JSONL chunks while yielding between main-thread encoding slices. */
 async function* encodeMigrationRows(artifact, format, signal) {
 	signal?.throwIfAborted();
+	const compactionSummaries = /* @__PURE__ */ new Map();
 	let lines = [];
 	let bytes = 0;
 	for (const value of artifact.events) {
-		const line = `${stringifyJson(format.encodeEvent(value), `migrated Session event ${value.seq}`)}\n`;
+		const encoded = dshMobileDeduplicateCompactionEncoded(format.encodeEvent(value), compactionSummaries);
+		const line = `${stringifyJson(encoded, `migrated Session event ${value.seq}`)}\n`;
 		const lineBytes = Buffer.byteLength(line);
 		if (bytes > 0 && bytes + lineBytes > MIGRATION_WORK_CHUNK_BYTES) {
 			yield Buffer.from(lines.join(""));
@@ -2948,10 +3051,10 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 	* @param isMaterialized - whether the session already has a durable artifact.
 	* @param inheritedEventCount - the exact fork-inherited prefix length written into a materializing header line.
 	*/
-	async persistBatch(header, events, isMaterialized, inheritedEventCount) {
+	async persistBatch(header, events, isMaterialized, inheritedEventCount, compactionSummaries) {
 		this.coldLogMemo.delete(header.id);
 		await this.ensureRootEncoding();
-		if (isMaterialized) await this.appendLines(header, events);
+		if (isMaterialized) await this.appendLines(header, events, compactionSummaries);
 		else {
 			await this.materialize(header, inheritedEventCount, events);
 			this.tracker.materialized(header.id);
@@ -3329,8 +3432,8 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 		return Buffer.concat([headerFrame, eventFrame]);
 	}
 	/** Encode one durable append batch in the configured physical representation. */
-	async encodeEventBatch(events) {
-		const body = eventLines(events) + "\n";
+	async encodeEventBatch(events, compactionSummaries) {
+		const body = eventLines(events, compactionSummaries) + "\n";
 		return this.compression === "zstd" ? compressZstdFrame(body) : body;
 	}
 	/** fsync a POSIX directory so a just-created/renamed entry is crash-durable. */
@@ -3349,8 +3452,8 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 	* previous size before rethrowing because the unchanged cursor will retry the
 	* batch; leaving partial bytes would create duplicate sequence numbers.
 	*/
-	async appendLines(meta, events) {
-		const content = await this.encodeEventBatch(events);
+	async appendLines(meta, events, compactionSummaries) {
+		const content = await this.encodeEventBatch(events, compactionSummaries);
 		const path = logPath(this.root, meta.cwd, meta.id, this.compression);
 		const handle = await open(path, "a");
 		let closed = false;

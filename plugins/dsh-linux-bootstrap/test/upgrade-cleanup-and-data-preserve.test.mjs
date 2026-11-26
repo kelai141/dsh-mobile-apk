@@ -272,12 +272,17 @@ test('overwrite upgrade prunes old runtime slots, old staging dirs, and .part le
   assert.equal(v2Status.version, '0.10.8')
   assert.equal(v2Status.updateAvailable, false)
 
-  // Active v2 plugin slot & v2 staging assets (including shared node) MUST survive.
+  // Active v2 plugin slot & v2 staging archives (including shared node) MUST survive,
+  // while derived staging/<sha>/unpacked trees are reclaimed after commit.
   assert.equal(await exists(path.join(f.pluginRoot, f.pluginV2.sha256, 'lib', 'index.js')), true)
   assert.equal(await exists(path.join(f.stagingRoot, f.pluginV2.sha256, 'asset.tar.xz')), true)
   assert.equal(await exists(path.join(f.stagingRoot, f.digestsV2.backend, 'asset.tar.xz')), true)
   assert.equal(await exists(path.join(f.stagingRoot, f.digestsV2.rootfs, 'asset.tar.xz')), true)
   assert.equal(await exists(path.join(f.stagingRoot, f.sharedNodeSha, 'asset.tar.xz')), true)
+  assert.equal(await exists(path.join(f.stagingRoot, f.pluginV2.sha256, 'unpacked')), false)
+  assert.equal(await exists(path.join(f.stagingRoot, f.digestsV2.backend, 'unpacked')), false)
+  assert.equal(await exists(path.join(f.stagingRoot, f.digestsV2.rootfs, 'unpacked')), false)
+  assert.equal(await exists(path.join(f.stagingRoot, f.sharedNodeSha, 'unpacked')), false)
 
   // Retired v1 plugin slot, retired v1 staging dirs, and .part leftovers MUST be cleaned.
   assert.equal(await exists(path.join(f.pluginRoot, f.pluginV1.sha256)), false, 'old runtime plugin slot must be pruned')
@@ -412,4 +417,30 @@ test('cleanup helpers refuse symlinks and non-matching directories', async (t) =
   // Verify symlink target still exists if symlink was created.
   const linkStat = await lstat(path.join(stagingRoot, symlinkName)).catch(() => null)
   if (linkStat) assert.equal(linkStat.isSymbolicLink(), true)
+})
+
+test('pruneOldHostStaging reclaims unpacked only when asset.tar.xz exists and no active part dir matches', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-unpacked-prune-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const stagingRoot = path.join(dir, 'staging')
+  const shaReady = '1'.repeat(64)
+  const shaActivePart = '2'.repeat(64)
+  const shaNoArchive = '3'.repeat(64)
+
+  await stageDummyAsset(stagingRoot, shaReady)
+  await stageDummyAsset(stagingRoot, shaActivePart)
+  await mkdir(path.join(dir, `staging-${shaActivePart}.part`), { recursive: true })
+  await mkdir(path.join(stagingRoot, shaNoArchive, 'unpacked'), { recursive: true })
+  await writeFile(path.join(stagingRoot, shaNoArchive, 'unpacked', 'payload.txt'), 'keep')
+
+  await pruneOldHostStaging(stagingRoot, {
+    keepShas: new Set([shaReady, shaActivePart, shaNoArchive]),
+    pruneUnpackedForKeepShas: true,
+    keepPartShas: true,
+  })
+
+  assert.equal(await exists(path.join(stagingRoot, shaReady, 'asset.tar.xz')), true)
+  assert.equal(await exists(path.join(stagingRoot, shaReady, 'unpacked')), false)
+  assert.equal(await exists(path.join(stagingRoot, shaActivePart, 'unpacked')), true)
+  assert.equal(await exists(path.join(stagingRoot, shaNoArchive, 'unpacked', 'payload.txt')), true)
 })

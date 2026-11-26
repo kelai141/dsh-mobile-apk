@@ -71,4 +71,21 @@ class LogRotationTest {
     assertTrue(".1.log 必须原样保留", rotated.exists())
     assertEquals("previous generation", rotated.readText())
   }
+
+  @Test
+  fun pruneDayLogsEvictsOldDaysUnderBudgetWhilePreservingActiveDay() {
+    val active = at("dsh-2026-11-25.log").apply { writeText("A".repeat(40)); setLastModified(9000L) }
+    val activeRot = at("dsh-2026-11-25.1.log").apply { writeText("B".repeat(40)); setLastModified(8000L) }
+    val old1 = at("dsh-2026-11-20.log").apply { writeText("1".repeat(40)); setLastModified(1000L) }
+    val old2 = at("dsh-2026-11-21.log").apply { writeText("2".repeat(40)); setLastModified(2000L) }
+    val unrelated = at("notes.txt").apply { writeText("keep") }
+
+    val removed = LogCollector.pruneDayLogs(tmp.root, activeDay = "2026-11-25", maxKeepFiles = 3, maxTotalBytes = 120L)
+    assertEquals(1, removed)
+    assertFalse(old1.exists())
+    assertTrue(old2.exists())
+    assertTrue(active.exists())
+    assertTrue(activeRot.exists())
+    assertTrue(unrelated.exists())
+  }
 }

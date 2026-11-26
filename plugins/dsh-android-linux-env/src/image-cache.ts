@@ -1,9 +1,10 @@
 /** Manual cleanup eligibility follows explicit access; history replay never renews it. */
-import { existsSync, lstatSync, readdirSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, unlinkSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import type { CleanupSkip, CleanupTarget } from './runtime-cache.js'
 
 export const IMAGE_IDLE_TTL_MS = 120 * 60 * 1000
+export const DEFAULT_REQUEST_IMAGE_CACHE_BYTES = 128 * 1024 * 1024
 const TEMP_IDLE_TTL_MS = IMAGE_IDLE_TTL_MS
 const HASH = /^[0-9a-f]{64}$/
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
@@ -90,4 +91,62 @@ export function scanImageCache(home: string, files: string, policy: ImageCachePo
   }
   for (const [root, depth] of roots) scan(root, depth)
   return { targets, skipped }
+}
+
+/** Evict oldest rebuildable request-image preview files when cache exceeds maxBytes. */
+export function enforceRequestImageBudget(
+  home: string,
+  options: { maxBytes?: number; apply?: boolean } = {},
+): { totalBytesBefore: number; totalBytesAfter: number; removed: string[]; evictedBytes: number } {
+  const maxBytes = options.maxBytes ?? DEFAULT_REQUEST_IMAGE_CACHE_BYTES
+  const apply = options.apply !== false
+  const root = join(home, 'cache', 'attachments', 'request-images')
+  if (!existsSync(root)) return { totalBytesBefore: 0, totalBytesAfter: 0, removed: [], evictedBytes: 0 }
+  try {
+    if (lstatSync(home).isSymbolicLink() || lstatSync(join(home, 'cache')).isSymbolicLink() || lstatSync(root).isSymbolicLink()) {
+      return { totalBytesBefore: 0, totalBytesAfter: 0, removed: [], evictedBytes: 0 }
+    }
+  } catch {
+    return { totalBytesBefore: 0, totalBytesAfter: 0, removed: [], evictedBytes: 0 }
+  }
+  const items: Array<{ path: string; size: number; mtimeMs: number }> = []
+  try {
+    for (const bucket of readdirSync(root).sort()) {
+      if (!/^[0-9a-f]{2}$/.test(bucket)) continue
+      const bucketDir = join(root, bucket)
+      const bStat = lstatSync(bucketDir)
+      if (bStat.isSymbolicLink() || !bStat.isDirectory()) continue
+      for (const name of readdirSync(bucketDir).sort()) {
+        if (!HASH.test(name)) continue
+        const filePath = join(bucketDir, name)
+        const fStat = lstatSync(filePath)
+        if (fStat.isSymbolicLink() || !fStat.isFile()) continue
+        items.push({ path: filePath, size: fStat.size, mtimeMs: Number.isFinite(fStat.mtimeMs) ? fStat.mtimeMs : 0 })
+      }
+    }
+  } catch {
+    return { totalBytesBefore: 0, totalBytesAfter: 0, removed: [], evictedBytes: 0 }
+  }
+  const totalBytesBefore = items.reduce((sum, item) => sum + item.size, 0)
+  if (totalBytesBefore <= maxBytes) {
+    return { totalBytesBefore, totalBytesAfter: totalBytesBefore, removed: [], evictedBytes: 0 }
+  }
+  items.sort((a, b) => (a.mtimeMs - b.mtimeMs) || a.path.localeCompare(b.path))
+  let currentBytes = totalBytesBefore
+  const removed: string[] = []
+  let evictedBytes = 0
+  for (const item of items) {
+    if (currentBytes <= maxBytes) break
+    if (apply) {
+      try {
+        unlinkSync(item.path)
+      } catch {
+        continue
+      }
+    }
+    currentBytes -= item.size
+    evictedBytes += item.size
+    removed.push(item.path)
+  }
+  return { totalBytesBefore, totalBytesAfter: currentBytes, removed, evictedBytes }
 }

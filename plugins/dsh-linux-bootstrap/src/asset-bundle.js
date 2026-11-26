@@ -314,9 +314,11 @@ async function publishHostStagedBundle({ hostStagingRoot, asset, root, finalDire
     throw new Error('Host-staged archive does not match the release manifest (SHA-256 or size)')
   }
   const unpackedRoot = path.join(stagedRoot, 'unpacked')
-  const unpackedInfo = await lstat(unpackedRoot)
-  if (!unpackedInfo.isDirectory() || unpackedInfo.isSymbolicLink()) {
-    throw new Error('Host-staged bundle is missing its unpacked tree')
+  const unpackedInfo = await lstat(unpackedRoot).catch(() => null)
+  if (!unpackedInfo || !unpackedInfo.isDirectory() || unpackedInfo.isSymbolicLink()) {
+    const error = new Error('Host-staged bundle is missing its unpacked tree')
+    error.code = 'linux-asset-not-prepared'
+    throw error
   }
   const packageDirectory = await pickPackageDirectory(unpackedRoot)
   const unpackedSize = await unpackedBytes(packageDirectory)
@@ -456,14 +458,50 @@ export async function pruneOldPluginSlots(pluginRoot, { keepDirectory = null, re
  * leftovers after commit or uninstall.
  *
  * Best-effort: never deletes digests in `keepShas` (unless `pruneAll` is true) and never
- * deletes state files, user data, or non-matching directories.
+ * deletes state files, user data, or non-matching directories. When
+ * `pruneUnpackedForKeepShas` is true, active digests keep their retained `asset.tar.xz`
+ * (plus `kind`) for offline reinstall while releasing their derived `unpacked/` trees.
  */
-export async function pruneOldHostStaging(hostStagingRoot, { keepShas = null, pruneAll = false } = {}) {
+export async function pruneOldHostStaging(hostStagingRoot, {
+  keepShas = null,
+  pruneAll = false,
+  pruneUnpackedForKeepShas = false,
+  keepPartShas = false,
+} = {}) {
   const removed = []
   const failed = []
   if (typeof hostStagingRoot !== 'string' || !hostStagingRoot) return { removed, failed }
   const stagingRoot = path.resolve(hostStagingRoot)
   const keepSet = pruneAll ? new Set() : (keepShas instanceof Set ? keepShas : new Set(keepShas ?? []))
+  const activePartShas = new Set()
+
+  const collectActiveParts = async (dir) => {
+    try {
+      const entries = await readdir(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isSymbolicLink() || !entry.isDirectory()) continue
+        const match = /^staging-([a-f0-9]{64})\.part$/.exec(entry.name)
+        if (match) activePartShas.add(match[1])
+      }
+    } catch { /* Best-effort scan only. */ }
+  }
+
+  if (pruneUnpackedForKeepShas && keepPartShas) {
+    await collectActiveParts(stagingRoot)
+    if (path.basename(stagingRoot) === 'staging') {
+      await collectActiveParts(path.dirname(stagingRoot))
+    }
+  }
+
+  const removeTarget = async (target) => {
+    try {
+      await rm(target, { recursive: true, force: true })
+      removed.push(target)
+    } catch (error) {
+      failed.push(target)
+      console.warn('[dsh-linux-bootstrap] old staging cleanup skipped: ' + target + ' (' + String(error?.message ?? error) + ')')
+    }
+  }
 
   const sweepDir = async (dir, { pruneShaSlots = false } = {}) => {
     let entries
@@ -478,15 +516,29 @@ export async function pruneOldHostStaging(hostStagingRoot, { keepShas = null, pr
       if (entry.isSymbolicLink() || !entry.isDirectory()) continue
       const target = path.join(dir, entry.name)
       if (!isPathWithin(dir, target)) continue
-      const isShaDir = pruneShaSlots && SHA256_DIR.test(entry.name) && (pruneAll || !keepSet.has(entry.name))
-      const isPartDir = STAGING_PART_DIR.test(entry.name)
-      if (!isShaDir && !isPartDir) continue
-      try {
-        await rm(target, { recursive: true, force: true })
-        removed.push(target)
-      } catch (error) {
-        failed.push(target)
-        console.warn('[dsh-linux-bootstrap] old staging cleanup skipped: ' + target + ' (' + String(error?.message ?? error) + ')')
+      const isShaDir = pruneShaSlots && SHA256_DIR.test(entry.name)
+      if (isShaDir) {
+        if (pruneAll || !keepSet.has(entry.name)) {
+          await removeTarget(target)
+          continue
+        }
+        if (pruneUnpackedForKeepShas && !activePartShas.has(entry.name)) {
+          const unpacked = path.join(target, 'unpacked')
+          const archive = path.join(target, 'asset.tar.xz')
+          if (!isPathWithin(target, unpacked)) continue
+          const [archiveStat, unpackedStat] = await Promise.all([
+            lstat(archive).catch(() => null),
+            lstat(unpacked).catch(() => null),
+          ])
+          if (archiveStat && !archiveStat.isSymbolicLink() && archiveStat.isFile() &&
+              unpackedStat && !unpackedStat.isSymbolicLink() && unpackedStat.isDirectory()) {
+            await removeTarget(unpacked)
+          }
+        }
+        continue
+      }
+      if (!keepPartShas && STAGING_PART_DIR.test(entry.name)) {
+        await removeTarget(target)
       }
     }
   }

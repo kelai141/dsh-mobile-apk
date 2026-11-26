@@ -309,6 +309,36 @@
       "test": "scripts/patches/tests/publish-exclusive-reclaim.test.mjs"
     },
     {
+      "id": "spj-compaction-dedup-C5",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
+      "scope": "engine",
+      "summary": "JSONL 持久化边界对 compaction/summary 冗余 rawOutput 与 compact-checkpoint user/message 摘要正文去重，并在读取/迁移恢复前按 compactionId 透明重建，兼容历史无标记事件、fork 前缀、replay 与导出",
+      "provenance": "2026-11-25 存储专项审计 #5：compaction 双写（compaction/summary + checkpoint user/message + 相同 rawOutput）造成 3x 物理冗余",
+      "requires": [
+        "publish-exclusive-F7"
+      ],
+      "marker": "dsh-mobile compaction dedup (C5)",
+      "test": "scripts/patches/tests/spj-compaction-dedup-C5.test.mjs"
+    },
+    {
+      "id": "sqlite-storage-wal-vacuum-S1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-storage-sqlite/lib/index.js",
+      "scope": "engine",
+      "summary": "磁盘 storage-sqlite 启用 auto_vacuum=INCREMENTAL 与 wal_autocheckpoint=256，并在关闭及删除批后执行有界 incremental_vacuum 与 WAL checkpoint(TRUNCATE/PASSIVE)，跳过 :memory:",
+      "provenance": "2026-11-25 存储专项审计 #6：通用 storage-sqlite 缺少 WAL/freelist 回收策略",
+      "marker": "dsh-mobile sqlite storage maintenance (S1)",
+      "test": "scripts/patches/tests/sqlite-wal-vacuum.test.mjs"
+    },
+    {
+      "id": "session-query-wal-vacuum-S2",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-query-sqlite/lib/index.js",
+      "scope": "engine",
+      "summary": "派生 session-query-sqlite 磁盘索引启用 auto_vacuum=INCREMENTAL 与 wal_autocheckpoint=256，并在删除对账后与关闭前执行有界 incremental_vacuum 与 WAL checkpoint，跳过 :memory:",
+      "provenance": "2026-11-25 存储专项审计 #6：派生 FTS5 SQLite 索引删行/重置后主库块与 WAL 不回收",
+      "marker": "dsh-mobile session-query sqlite maintenance (S2)",
+      "test": "scripts/patches/tests/sqlite-wal-vacuum.test.mjs"
+    },
+    {
       "id": "fs-local-link-F8",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js",
       "scope": "engine",

@@ -149,4 +149,25 @@ class UpdateManagerPolicyTest {
     assertTrue(cleanup.contains("OnlineUpdateGate.end()"))
     assertFalse("legacy usr-old must never be deleted to start a new transaction", update.contains("SnapshotFs.deletePath(old)"))
   }
+
+  @Test
+  fun preflightAndPreExtractChecksIncludeDownloadAndUnpackedBudgets() {
+    val dlReq = UpdateManager.preDownloadRequiredBytes(100L * 1024L * 1024L)
+    assertTrue("pre-download must cover archive + 5x unpack + 64 MiB slack", dlReq >= 664L * 1024L * 1024L)
+    val tmp = java.nio.file.Files.createTempFile("upd-preflight", ".tar.xz").toFile()
+    try {
+      tmp.writeBytes(ByteArray(1024))
+      val extReq = UpdateManager.preExtractRequiredBytes(tmp, 200L * 1024L * 1024L)
+      assertEquals(264L * 1024L * 1024L, extReq)
+    } finally {
+      tmp.delete()
+    }
+    val engine = java.io.File("src/main/java/com/dsharnessmobile/shell/EngineManager.kt").let {
+      (if (it.isFile) it else java.io.File("app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt")).readText()
+    }
+    assertTrue(
+      "EngineManager must run preExtractionRequiredBytes + insufficientSpaceReason before extractAndValidate",
+      engine.indexOf("preExtractionRequiredBytes") in 1 until engine.indexOf("SnapshotRefreshStage.extractAndValidate("),
+    )
+  }
 }

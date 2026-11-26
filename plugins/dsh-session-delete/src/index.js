@@ -20,7 +20,18 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SessionDeleteError, assertSessionId, deleteStoredSession, inspectQuarantine, quarantineStoredSession, sweepGraveyards } from './session-delete.js'
+import {
+  SessionDeleteError,
+  assertSessionId,
+  deleteStoredSession,
+  inspectQuarantine,
+  quarantineStoredSession,
+  removeSessionProjectionCacheFile,
+  sessionsRoot,
+  sweepGraveyards,
+  sweepOrphanProjectionCaches,
+} from './session-delete.js'
+export { collectGlobalAttachmentReferences, sweepOrphanAttachments } from './attachment-gc.js'
 
 /** Log tag shared with the client half so device logs can be grepped by one string. */
 const TAG = '[dsh-session-delete]'
@@ -268,7 +279,7 @@ export async function removeSession(ctx, sessionId) {
     throw new SessionDeleteError('session-active', 'the conversation is running; stop it before deleting', { sessionId })
   }
 
-  return deleteStoredSession({
+  const outcome = await deleteStoredSession({
     home: process.env.DSH_HOME ?? join(homedir(), '.dsh'),
     sessionId,
     isActive: false,
@@ -296,6 +307,15 @@ export async function removeSession(ctx, sessionId) {
       }
     },
   })
+  try {
+    const cache = typeof ctx.get === 'function' ? ctx.get('sessionProjectionCache') : undefined
+    if (typeof cache?.table?.delete === 'function') {
+      await cache.table.delete(sessionId)
+    }
+  } catch (error) {
+    log(ctx, 'warn', 'projection cache memory eviction failed (ignored)', { sessionId, error: String(error?.message ?? error) })
+  }
+  return outcome
 }
 
 /**
@@ -336,7 +356,10 @@ export function apply(ctx) {
   const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   // 启动清扫上次失败删除留下的 *.deleting-* 墓地目录（best-effort；见 sweepGraveyards 注释）。
   sweepGraveyards(home).then(
-    (removed) => { if (removed.length > 0) log(ctx, 'info', 'swept leftover graveyard directories', { count: removed.length }) },
+    async (removed) => {
+      if (removed.length > 0) log(ctx, 'info', 'swept leftover graveyard directories', { count: removed.length })
+      await sweepOrphanProjectionCaches(home, (level, message, extra) => log(ctx, level, message, extra))
+    },
     () => {},
   )
   // issue #1587：隔离件不自动过期（可恢复承诺），但「磁盘被吃掉多少」必须可查。

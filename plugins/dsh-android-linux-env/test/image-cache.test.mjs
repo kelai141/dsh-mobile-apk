@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, utimesSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { IMAGE_IDLE_TTL_MS, imageCacheEligible } from '../lib/image-cache.js'
+import { IMAGE_IDLE_TTL_MS, enforceRequestImageBudget, imageCacheEligible } from '../lib/image-cache.js'
 import { planCleanup, executeCleanup } from '../lib/runtime-cache.js'
 
 function fixture() {
@@ -70,4 +70,23 @@ test('受控负控：伪造计划不能删新图/文件附件/未知图，符号
   symlinkSync(external, join(linkedHome, 'attachments/v1/objects'), process.platform === 'win32' ? 'junction' : 'dir')
   assert.equal(imageCacheEligible(join(linkedHome, 'attachments/v1/objects/aa', 'a'.repeat(64)), linkedHome, f.env.DSH_FILES_DIR, f.policy, f.env), false)
   assert.equal(readFileSync(join(external, 'aa', 'a'.repeat(64)), 'utf8'), 'outside')
+})
+
+test('enforceRequestImageBudget 按 mtime 由旧到新淘汰超额 request-images 预览，不碰原图与会话', () => {
+  const f = fixture()
+  const h1 = '1'.repeat(64), h2 = '2'.repeat(64), h3 = '3'.repeat(64)
+  const p1 = f.write(join(f.env.DSH_HOME, 'cache/attachments/request-images/11', h1), 'x'.repeat(500), 60_000)
+  const p2 = f.write(join(f.env.DSH_HOME, 'cache/attachments/request-images/22', h2), 'y'.repeat(500), 30_000)
+  const p3 = f.write(join(f.env.DSH_HOME, 'cache/attachments/request-images/33', h3), 'z'.repeat(500), 5_000)
+  const under = enforceRequestImageBudget(f.env.DSH_HOME, { maxBytes: 2000 })
+  assert.equal(under.removed.length, 0)
+
+  const over = enforceRequestImageBudget(f.env.DSH_HOME, { maxBytes: 1000 })
+  assert.equal(over.removed.length, 2, 'f.preview + p1 oldest must be evicted down to <=1000 bytes')
+  assert.equal(existsSync(f.preview), false)
+  assert.equal(existsSync(p1), false)
+  assert.equal(existsSync(p2), true)
+  assert.equal(existsSync(p3), true)
+  assert.equal(existsSync(f.object), true)
+  assert.equal(existsSync(f.session), true)
 })

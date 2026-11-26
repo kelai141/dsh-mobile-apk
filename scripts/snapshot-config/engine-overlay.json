@@ -517,18 +517,6 @@
     },
     "@deepseek-ai/dsh-session-telemetry-otel": {
       "@opentelemetry/api-logs": "0.222.0"
-    },
-    "@deepseek-ai/dsh-action-cards": {
-      "zod": "4.6.6"
-    },
-    "@deepseek-ai/dsh-creation-recommendations": {
-      "zod": "4.6.6"
-    },
-    "@deepseek-ai/dsh-experimental-liveshare": {
-      "zod": "4.6.6"
-    },
-    "@deepseek-ai/dsh-plugin-recommendations": {
-      "zod": "4.6.6"
     }
   },
   "keepUnpublished": [

@@ -280,4 +280,46 @@ class FileIncomingCleanupTest {
       dir.deleteRecursively()
     }
   }
+
+  @Test
+  fun sweepWorkspaceCompactsMetaNdjsonWhileKeepingProtectedAndLiveEntries() {
+    val dir = Files.createTempDirectory("meta-compact").toFile()
+    try {
+      val now = 10_000_000_000L
+      val ttl = 7L * 24 * 60 * 60 * 1000
+      val expiredDeleted = File(dir, "gone-old.pdf").absolutePath
+      val pendingMissing = File(dir, "pending-ref.pdf").absolutePath
+      val liveOld = File(dir, "live-old.pdf").apply { writeText("keep") }
+      val fresh = File(dir, "fresh.pdf").absolutePath
+      val meta = File(dir, FileIncoming.META_ENTRY)
+      meta.writeText(
+        buildString {
+          append("${now - ttl - 5000}\t$expiredDeleted\n")
+          append("${now - ttl - 4000}\t$pendingMissing\n")
+          append("${now - ttl - 3000}\t${liveOld.absolutePath}\n")
+          append("${now - 1000}\t$fresh\n")
+          append("${now - 500}\t$fresh\n")
+          append("malformed-line\n")
+        },
+      )
+
+      FileIncoming.sweepWorkspace(
+        dir = dir,
+        pendingPaths = listOf(pendingMissing),
+        queuedPaths = emptyList(),
+        now = now,
+        ttlMs = ttl,
+      )
+
+      val lines = meta.readLines()
+      assertEquals(3, lines.size)
+      assertFalse(lines.any { it.contains(expiredDeleted) })
+      assertTrue(lines.any { it.contains(pendingMissing) })
+      assertTrue(lines.any { it.contains(liveOld.absolutePath) })
+      assertEquals(1, lines.count { it.contains(fresh) })
+      assertTrue(lines.single { it.contains(fresh) }.startsWith("${now - 500}\t"))
+    } finally {
+      dir.deleteRecursively()
+    }
+  }
 }

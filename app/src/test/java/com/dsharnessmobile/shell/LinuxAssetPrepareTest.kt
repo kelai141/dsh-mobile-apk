@@ -524,4 +524,32 @@ class LinuxAssetPrepareTest {
     assertTrue("无关用户目录不得误删", File(userData, "note.txt").isFile)
     assertTrue("其它已暂存目录归 bootstrap 清理，prepare 不误删", activeStaged.isDirectory)
   }
+
+  @Test
+  fun reextractsCachedArchiveOfflineWhenUnpackedWasReclaimed() {
+    val bytes = goodArchive()
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    assertTrue(JSONObject(LinuxAssetPrepare.start(root, specJson(bytes))).getBoolean("ok"))
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+
+    val staged = stagedDir(bytes)
+    val unpacked = File(staged, "unpacked")
+    val cachedArchive = File(staged, "asset.tar.xz")
+    assertTrue(unpacked.isDirectory)
+    assertTrue(cachedArchive.isFile)
+
+    // 模拟安装提交后回收派生 unpacked 树，仅保留归档以备离线重装。
+    SnapshotFs.deletePath(unpacked)
+    assertFalse(unpacked.exists())
+    assertTrue(cachedArchive.isFile)
+
+    LinuxAssetPrepare.reset()
+    LinuxAssetPrepare.opener = LinuxAssetIO.Opener { _, _, _ -> throw AssertionError("离线重装不得触发网络下载") }
+    assertTrue(JSONObject(LinuxAssetPrepare.start(root, specJson(bytes))).getBoolean("ok"))
+    val restoredState = status()
+    assertEquals(restoredState.toString(), LinuxAssetPrepare.PHASE_OK, restoredState.getString("phase"))
+    assertTrue(File(unpacked, "package/package.json").isFile)
+    assertTrue(File(unpacked, "package/lib/index.js").isFile)
+    assertTrue("离线复解后仍需保留 asset.tar.xz", cachedArchive.isFile)
+  }
 }

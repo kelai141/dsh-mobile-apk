@@ -311,6 +311,17 @@ class EngineManager(private val context: Context, private val pickToken: String?
         SnapshotFs.deletePath(stage)
         return false
       }
+      SnapshotTransaction.pruneOrphanUpdateArchives(filesDir)
+      val preflightStageBytes = estimateBundledSnapshotExtractedBytes()
+      val preflightRequired = SnapshotTransaction.preExtractionRequiredBytes(preflightStageBytes, homeDir)
+      insufficientSpaceReason(filesDir, preflightRequired)?.let { reason ->
+        Log.e(TAG, "snapshot refresh refused before extracting: " + reason)
+        onStage(reason)
+        lastRefreshFailure = SnapshotTransaction.InsufficientSpaceException(preflightRequired, reason)
+        lastRefreshFailureCode = null
+        SnapshotFs.deletePath(stage)
+        return false
+      }
       if (!SnapshotRefreshStage.extractAndValidate(
           stage,
           extract = { extractSnapshotTo(it, onProgress) },
@@ -983,6 +994,22 @@ class EngineManager(private val context: Context, private val pickToken: String?
    * @param onProgress bytesDone, bytesTotal.
    * @returns true on success.
    */
+  private fun estimateBundledSnapshotExtractedBytes(): Long {
+    val assetFd = try {
+      context.assets.openFd(BUNDLED_SNAPSHOT_ASSET).use { fd -> fd.startOffset to fd.length }
+    } catch (_: Throwable) {
+      null
+    }
+    val offset = assetFd?.first ?: 0L
+    val compressed = assetFd?.second ?: 0L
+    val exact = if (offset > 0L && compressed > 0L) {
+      SnapshotExtractor.uncompressedSizeOrNull(
+        SnapshotExtractor.ApkAssetSource(context.packageCodePath, offset, compressed),
+      )
+    } else null
+    return exact ?: if (compressed > 0L) maxOf(compressed * 5L, 256L * 1024L * 1024L) else 0L
+  }
+
   private fun extractSnapshotTo(stage: File, onProgress: (Long, Long) -> Unit): Boolean {
     // D-2（0.14.7 / task-9）：取 fd.length 用的 AssetFileDescriptor **必须关闭**。
     // 旧实现 `val fd = context.assets.openFd(...)` 从不 close —— 真机 logcat 里那句
@@ -1739,6 +1766,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // .snapshot-previous/usr（上一轮已丢的救援通道，有寿命）。
       preludeProbe.step("migrate-python-packages") { migratePythonPackages("engine-start") }
       preludeProbe.step("apply-runtime-patches") { applyRuntimePatches() }
+      preludeProbe.step("prune-runtime-budgets") {
+        pruneCompileCacheDir(File(ensurePrivateDshData(), ".node-compile-cache"))
+        pruneDiagnosticsDirs(File(context.filesDir, "diagnostics"))
+        pruneDiagnosticsDirs(File(dshDataDir, "diagnostics"))
+      }
       preludeProbe.report(TAG, context)
       // --no-open: the engine must never try to open a desktop browser on Android
       // (the WebView IS the UI). Without it, rc.2's spawn xdg-open on a missing
@@ -2062,6 +2094,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       } catch (_: Throwable) {
       }
       LogCollector.log(TAG, "diagnostics mirrored: " + dir.absolutePath)
+      pruneDiagnosticsDirs(dir.parentFile ?: dir)
       return dir
     } catch (t: Throwable) {
       Log.w(TAG, "diagnostics mirror failed", t)
@@ -3756,6 +3789,66 @@ internal const val MIRROR_LOG_LIMIT_BYTES: Long = 2L * 1024 * 1024
 
 /** engine.log 轮转保留世代数（review C5；旧为 2 代 + 本体 = 3 份，崩溃循环会滚掉首个现场）。 */
 internal const val ENGINE_LOG_GENERATIONS = 5
+
+internal const val DIAGNOSTICS_MAX_DIRS = 12
+internal const val DIAGNOSTICS_MAX_BYTES: Long = 64L * 1024 * 1024
+internal const val COMPILE_CACHE_MAX_BYTES: Long = 96L * 1024 * 1024
+
+/** Evict oldest diagnostic snapshot directories beyond count or total byte budgets. */
+internal fun pruneDiagnosticsDirs(
+  root: File,
+  maxDirs: Int = DIAGNOSTICS_MAX_DIRS,
+  maxBytes: Long = DIAGNOSTICS_MAX_BYTES,
+): Int {
+  if (!root.isDirectory || SnapshotFs.isSymbolicLink(root)) return 0
+  val dirs = (root.listFiles() ?: return 0)
+    .filter { it.isDirectory && !SnapshotFs.isSymbolicLink(it) }
+    .map { d -> Triple(d, d.lastModified(), SnapshotFs.sizeOf(d)) }
+    .sortedWith(compareBy<Triple<File, Long, Long>> { it.second }.thenBy { it.first.name })
+  var remainingDirs = dirs.size
+  var remainingBytes = dirs.sumOf { it.third }
+  var removed = 0
+  for ((dir, _, bytes) in dirs) {
+    if (remainingDirs <= maxDirs && remainingBytes <= maxBytes) break
+    SnapshotFs.deletePath(dir)
+    if (!SnapshotFs.exists(dir)) {
+      remainingDirs -= 1
+      remainingBytes -= bytes
+      removed += 1
+    }
+  }
+  return removed
+}
+
+/** Evict oldest `.node-compile-cache` entries by mtime when cache size exceeds [maxBytes]. */
+internal fun pruneCompileCacheDir(
+  cacheDir: File,
+  maxBytes: Long = COMPILE_CACHE_MAX_BYTES,
+): Int {
+  if (!cacheDir.isDirectory || SnapshotFs.isSymbolicLink(cacheDir)) return 0
+  val files = ArrayList<File>()
+  fun collect(dir: File) {
+    for (child in dir.listFiles() ?: return) {
+      if (SnapshotFs.isSymbolicLink(child)) continue
+      if (child.isDirectory) collect(child)
+      else if (child.isFile) files += child
+    }
+  }
+  collect(cacheDir)
+  var totalBytes = files.sumOf { it.length() }
+  if (totalBytes <= maxBytes) return 0
+  files.sortWith(compareBy<File> { it.lastModified() }.thenBy { it.absolutePath })
+  var removed = 0
+  for (f in files) {
+    if (totalBytes <= maxBytes) break
+    val len = f.length()
+    if (f.delete()) {
+      totalBytes -= len
+      removed += 1
+    }
+  }
+  return removed
+}
 
 /**
  * 诊断镜像的有界单份复制（#211.3，JVM 单测）：只读 [limitBytes] 上限内的**尾部**字节，
