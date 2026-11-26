@@ -2,6 +2,7 @@
 import { FLOAT_MIN_SIZE } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { LayoutState, PaneId, PaneNode, TabId, TabRecord, FloatRect, SplitId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { currentDeviceForm, isBubbleChromeActive, type DeviceForm } from './form-marker.ts'
 
 export const WORKSPACE_MAX_WIDTH = 1100
 export const DRAG_SAFE_PX = 24
@@ -140,6 +141,7 @@ export class MobileWorkspaces implements WorkspaceNavigation {
   private snapshotAtPress: LayoutState | undefined
   private status: HTMLElement | undefined
   private statusTimer: number | undefined
+  private lastForm: DeviceForm | undefined
 
   constructor(owner: unknown, private readonly overlay?: (fullscreen: boolean) => void) { this.owner = owner as Owner }
   get hiddenTabs(): ReadonlySet<TabId> { return new Set([...this.picker.values()].filter((id): id is TabId => id !== undefined)) }
@@ -239,7 +241,7 @@ export class MobileWorkspaces implements WorkspaceNavigation {
     const actions = store.actions
     if (this.bounded.has(actions)) return
     this.bounded.add(actions)
-    const mobile = (): boolean => this.panel !== undefined && window.innerWidth <= WORKSPACE_MAX_WIDTH
+    const mobile = (): boolean => this.panel !== undefined && isBubbleChromeActive()
     const bound = (rect: FloatRect): FloatRect => clampFloatRect(rect, this.floatBounds())
     const floatTab = actions.floatTab
     actions.floatTab = (session, tab, rect) => floatTab(session, tab, mobile() ? bound(rect) : rect)
@@ -278,10 +280,16 @@ export class MobileWorkspaces implements WorkspaceNavigation {
   }
   private sync(): void {
     const session = this.owner.mounted.getSnapshot()
-    const panel = window.innerWidth <= WORKSPACE_MAX_WIDTH && session ? [...document.querySelectorAll<HTMLElement>('[data-sidebar-right-panel][data-sidebar-right-open]')]
+    const form = currentDeviceForm()
+    const activeChrome = isBubbleChromeActive()
+    const wasMounted = this.panel !== undefined
+    const panel = activeChrome && session ? [...document.querySelectorAll<HTMLElement>('[data-sidebar-right-panel][data-sidebar-right-open]')]
       .find(node => node.getAttribute('data-sidebar-right-session') === session && !node.closest('[hidden]')) : undefined
     if (panel !== this.panel || session !== this.session) {
       this.unmount(); this.panel = panel; this.session = session
+      if (!activeChrome && wasMounted && this.lastForm !== undefined) {
+        this.overlay?.(false)
+      }
       if (panel) {
         this.status = document.createElement('div'); this.status.className = 'dsh-workspace-status'; this.status.setAttribute('role', 'status')
         this.status.setAttribute('data-dsh-workspace-chrome', ''); panel.append(this.status)
@@ -289,6 +297,8 @@ export class MobileWorkspaces implements WorkspaceNavigation {
         try { if (localStorage.getItem('dsh-mobile-workspace-swap:' + session) === '1') this.swapped.add(session!) } catch { /* private storage */ }
       }
     }
+    const previousForm = this.lastForm
+    this.lastForm = form
     const layout = this.layout(), panes = this.panes(layout)
     if (!panel || !layout || !session || panes.length === 0) return
     const store = this.store()
@@ -299,7 +309,9 @@ export class MobileWorkspaces implements WorkspaceNavigation {
     if (panel.style.getPropertyValue('--dsh-dockkit-float-top') !== floatTop + 'px') {
       panel.style.setProperty('--dsh-dockkit-float-top', floatTop + 'px')
     }
-    this.overlay?.(panel.getAttribute('data-sidebar-right-panel') === 'fullscreen')
+    const enteredNonPortrait = previousForm === 'phone-portrait' && form !== 'phone-portrait'
+    const wantsFullscreen = !enteredNonPortrait && panel.getAttribute('data-sidebar-right-panel') === 'fullscreen'
+    this.overlay?.(wantsFullscreen)
     const active = this.activeId
     if (active && !this.hiddenTabs.has(active)) {
       const history = this.history.get(session) ?? []

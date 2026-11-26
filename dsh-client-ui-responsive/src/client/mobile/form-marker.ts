@@ -27,6 +27,72 @@
 /** Width at or below which the phone form applies; matches upstream's 768px fullscreen threshold. */
 export const MOBILE_FORM_MAX_WIDTH = 767
 
+/** Attribute on `<html>` publishing the four-state unified device form. */
+export const DEVICE_FORM_ATTR = 'data-dsh-device-form'
+
+/** Attribute on `<html>` indicating whether mobile bubble chrome should manage the right sidebar. */
+export const BUBBLE_CHROME_ATTR = 'data-dsh-bubble-chrome'
+
+/** Unified device form states derived from (shortSide, aspectRatio, orientation). */
+export type DeviceForm = 'phone-portrait' | 'phone-landscape' | 'tablet-portrait' | 'desktop-landscape'
+
+/** Any viewport whose shorter edge is below 560 CSS px is always a phone. */
+export const PHONE_SHORT_SIDE_PX = 560
+
+/** Ultra-high-DPI elongated phones (e.g. 20:9/21:9) can exceed 560 CSS px on short edge; gate by aspect >= 2.0 below 680px so 16:9 1067x566 inset viewports keep desktop-landscape. */
+export const PHONE_ELONGATED_SHORT_SIDE_PX = 680
+export const PHONE_ELONGATED_ASPECT = 2.0
+
+/**
+ * Pure four-state classifier using both shortest side and aspect ratio so high-DPI
+ * tall phones never get misclassified as tablets while 16:9 / 1600x900 desktop-class
+ * viewports receive full PC semantics.
+ */
+export function classifyDeviceForm(width: number, height: number): DeviceForm {
+  const w = Math.max(1, Number.isFinite(width) ? width : 1)
+  const h = Math.max(1, Number.isFinite(height) ? height : 1)
+  const shortSide = Math.min(w, h)
+  const longSide = Math.max(w, h)
+  const aspect = longSide / shortSide
+  const landscape = w > h
+  const isPhone = shortSide < PHONE_SHORT_SIDE_PX
+    || (shortSide < PHONE_ELONGATED_SHORT_SIDE_PX && aspect >= PHONE_ELONGATED_ASPECT)
+  if (isPhone) return landscape ? 'phone-landscape' : 'phone-portrait'
+  return landscape ? 'desktop-landscape' : 'tablet-portrait'
+}
+
+/** Read current viewport dimensions and classify the device form. */
+export function currentDeviceForm(): DeviceForm {
+  const docEl = typeof document !== 'undefined' ? document.documentElement : undefined
+  const w = docEl?.clientWidth || window.innerWidth || 1
+  const h = docEl?.clientHeight || window.innerHeight || 1
+  return classifyDeviceForm(w, h)
+}
+
+/** Desktop-landscape uses upstream's native PC tab strip; all other mobile/tablet forms use bubble chrome. */
+export function usesBubbleChrome(form: DeviceForm): boolean {
+  return form !== 'desktop-landscape'
+}
+
+/** Only portrait phones and explicit fullscreen mode allow the right sidebar to overlay the conversation. */
+export function rightbarOverlaysConversation(form: DeviceForm, fullscreen: boolean): boolean {
+  return form === 'phone-portrait' || fullscreen
+}
+
+/** Authoritative runtime check shared by SidebarBubbles and MobileWorkspaces (compatible with matchMedia test mocks). */
+export function isBubbleChromeActive(mediaMatches?: boolean): boolean {
+  const root = typeof document !== 'undefined' ? document.documentElement : undefined
+  const published = root?.getAttribute(DEVICE_FORM_ATTR) as DeviceForm | null
+  if (published === 'phone-portrait' || published === 'phone-landscape' || published === 'tablet-portrait' || published === 'desktop-landscape') {
+    return usesBubbleChrome(published)
+  }
+  if (mediaMatches === false) return false
+  const vv = typeof window !== 'undefined' ? window.visualViewport : null
+  const w = (vv && vv.width > 0 ? vv.width : 0) || root?.clientWidth || window.innerWidth || 1
+  const h = (vv && vv.height > 0 ? vv.height : 0) || root?.clientHeight || window.innerHeight || 1
+  return usesBubbleChrome(classifyDeviceForm(w, h))
+}
+
 /** The media query the marker mirrors. */
 const MOBILE_FORM_QUERY = `(max-width: ${MOBILE_FORM_MAX_WIDTH}px)`
 
@@ -39,7 +105,7 @@ const SETTINGS_TAG = 'data-dsh-settings-dialog'
 /** Root tag consumed by the narrow-form stylesheet to pin the drawer for the settings panel alone. */
 const SETTINGS_OPEN_TAG = 'data-dsh-settings-open'
 
-/** Marks the phone form on `<html>` and tags the upstream frame root. */
+/** Marks the phone form and four-state device form on `<html>` and tags the upstream frame root. */
 export class MobileFormMarker {
   private media: MediaQueryList | null = null
   private observer: MutationObserver | null = null
@@ -50,6 +116,8 @@ export class MobileFormMarker {
   attach(): void {
     this.media = typeof window.matchMedia === 'function' ? window.matchMedia(MOBILE_FORM_QUERY) : null
     this.media?.addEventListener?.('change', this.syncForm)
+    window.addEventListener('resize', this.syncForm)
+    window.visualViewport?.addEventListener('resize', this.syncForm)
     this.syncForm()
     this.observer = new MutationObserver(this.syncDom)
     this.observer.observe(document.documentElement, { childList: true, subtree: true })
@@ -60,6 +128,8 @@ export class MobileFormMarker {
   detach(): void {
     this.media?.removeEventListener?.('change', this.syncForm)
     this.media = null
+    window.removeEventListener('resize', this.syncForm)
+    window.visualViewport?.removeEventListener('resize', this.syncForm)
     this.observer?.disconnect()
     this.observer = null
     this.frame?.removeAttribute(FRAME_TAG)
@@ -67,6 +137,8 @@ export class MobileFormMarker {
     this.modal?.removeAttribute(SETTINGS_TAG)
     this.modal = null
     document.documentElement.removeAttribute('data-dsh-mobile-form')
+    document.documentElement.removeAttribute(DEVICE_FORM_ATTR)
+    document.documentElement.removeAttribute(BUBBLE_CHROME_ATTR)
     document.documentElement.removeAttribute('data-dsh-modal-open')
     document.documentElement.removeAttribute(SETTINGS_OPEN_TAG)
   }
@@ -115,7 +187,10 @@ export class MobileFormMarker {
 
   private readonly syncForm = (): void => {
     const matches = this.media === null ? window.innerWidth <= MOBILE_FORM_MAX_WIDTH : this.media.matches
-    document.documentElement.toggleAttribute('data-dsh-mobile-form', matches)
+    const form = currentDeviceForm()
+    document.documentElement.setAttribute(DEVICE_FORM_ATTR, form)
+    document.documentElement.toggleAttribute(BUBBLE_CHROME_ATTR, usesBubbleChrome(form))
+    document.documentElement.toggleAttribute('data-dsh-mobile-form', matches && form !== 'desktop-landscape')
   }
 
   private readonly syncFrame = (): void => {

@@ -5,6 +5,7 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-locale/client'
 import { WORKSPACE_MAX_WIDTH, DRAG_SAFE_PX, DRAG_DWELL_MS, type WorkspaceNavigation } from './mobile-workspaces.ts'
 import type {} from './sidebar-bubbles.locales.ts'
 import { forwardControlClick } from './activation-guard.ts'
+import { DEVICE_FORM_ATTR, isBubbleChromeActive } from './form-marker.ts'
 
 /**
  * 0.14.9：面板收起时也保持挂载。悬浮气泡头（.dsh-bubble-header）现在随内容一起滑入滑出
@@ -166,7 +167,7 @@ export class SidebarBubbles {
     })
     this.observer.observe(document.documentElement, {
       childList: true, subtree: true, characterData: true, attributes: true,
-      attributeFilter: ['data-dsh-mobile-form', 'data-sidebar-right-open', 'data-sidebar-right-session', 'data-dockkit-pane-active', 'aria-selected', 'aria-label', 'disabled', 'hidden', 'class', 'style'],
+      attributeFilter: ['data-dsh-mobile-form', DEVICE_FORM_ATTR, 'data-sidebar-right-open', 'data-sidebar-right-session', 'data-dockkit-pane-active', 'aria-selected', 'aria-label', 'disabled', 'hidden', 'class', 'style'],
     })
     window.addEventListener('resize', this.refresh)
     window.visualViewport?.addEventListener('resize', this.refresh)
@@ -226,7 +227,7 @@ export class SidebarBubbles {
 
   private sync(): void {
     const owner = this.options.session()
-    const narrow = this.media?.matches ?? window.innerWidth <= WORKSPACE_MAX_WIDTH
+    const narrow = isBubbleChromeActive(this.media?.matches)
     const panel = narrow && owner !== undefined
       ? [...document.querySelectorAll<HTMLElement>(PANEL)].find(node => node.getAttribute('data-sidebar-right-session') === owner && node.closest('[hidden]') === null) ?? null : null
     if (panel !== this.panel || owner !== this.owner) {

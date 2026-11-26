@@ -87,6 +87,8 @@ describe('workspace divider fraction geometry', () => {
 function viewport(width = 800, height = 1200) {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
   Object.defineProperty(window, 'innerHeight', { configurable: true, value: height })
+  Object.defineProperty(document.documentElement, 'clientWidth', { configurable: true, value: width })
+  Object.defineProperty(document.documentElement, 'clientHeight', { configurable: true, value: height })
 }
 
 function rect(left: number, top: number, width: number, height: number): DOMRect {
@@ -274,7 +276,8 @@ function makeHarness() {
     mounted: { getSnapshot: () => mountedSession },
     adopted: new Map([[SESSION, { store }]]),
   }
-  const workspaces = new MobileWorkspaces(owner)
+  const overlayCalls: boolean[] = []
+  const workspaces = new MobileWorkspaces(owner, fullscreen => { overlayCalls.push(fullscreen) })
   mounted.push(workspaces)
   dock.subscribe(() => { nativeSnapshot.bySession[SESSION].layout = dock.getSnapshot().state })
   dock.subscribe(() => renderNativeLayout())
@@ -282,7 +285,7 @@ function makeHarness() {
   const flush = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
   const open = (kind: string, contentId: string, title = contentId) => dock.openContent({ kind, contentId, title })
   return {
-    dock, panel, grid, workspaces, contentBodies, open, flush,
+    dock, panel, grid, workspaces, contentBodies, open, flush, overlayCalls,
     setMountedSession: (id: string | undefined) => { mountedSession = id },
   }
 }
@@ -735,5 +738,31 @@ describe('mobile workspace navigation over native Dockkit planners', () => {
     expect(Object.hasOwn(terminal, 'keepMounted')).toBe(false)
     expect(Object.hasOwn(lateTerminal, 'keepMounted')).toBe(false)
     expect(alreadyRetained.keepMounted).toBe(true)
+  })
+
+  it('pushes instead of overlaying when rotating from portrait phone into phone-landscape or 1600x900 desktop-landscape', async () => {
+    viewport(412, 915)
+    const h = makeHarness()
+    const panel = document.querySelector<HTMLElement>('[data-sidebar-right-panel]')!
+    panel.setAttribute('data-sidebar-right-panel', 'fullscreen')
+    await h.flush()
+    expect(h.overlayCalls.at(-1)).toBe(true)
+    expect(panel.getAttribute('data-dsh-workspaces')).toBe('1')
+
+    // Rotate to phone landscape (915x412): forced portrait fullscreen is cleared so right sidebar pushes conversation.
+    viewport(915, 412)
+    window.dispatchEvent(new Event('resize'))
+    await h.flush()
+    expect(h.overlayCalls.at(-1)).toBe(false)
+    expect(panel.getAttribute('data-dsh-workspaces')).toBe('1')
+    expect(panel.getAttribute('data-dsh-workspace-orientation')).toBe('horizontal')
+
+    // Rotate to 1600x900 @ DPR 1.5 (1067x600 desktop-landscape): mobile workspaces step aside for native PC tab strip.
+    viewport(1067, 600)
+    window.dispatchEvent(new Event('resize'))
+    await h.flush()
+    expect(h.overlayCalls.at(-1)).toBe(false)
+    expect(panel.hasAttribute('data-dsh-workspaces')).toBe(false)
+    h.workspaces.detach()
   })
 })
