@@ -1008,4 +1008,56 @@ class FactoryProfilePatchTest {
     assertEquals("含空格的引号 id 不得被截断成两个：\n" + out.text, 1,
       Regex("""id:\s*["']?a""").findAll(out.text).count())
   }
+
+  @Test
+  fun normalizeAndMergeReportRemovedLegacyMobileIdOnlyWhenNormalized() {
+    val normalized = FactoryProfilePatch.normalizeLegacyAgentDefaultModel(legacySinglePointLive)
+    assertEquals(setOf(FactoryProfilePatch.LEGACY_MOBILE_ID), normalized.removedIds)
+
+    val merged = FactoryProfilePatch.merge(legacySinglePointLive, newShapeFactory)
+    assertTrue(
+      "merge 归一旧单点写法后必须在 removedIds 记录 LEGACY_MOBILE_ID",
+      FactoryProfilePatch.LEGACY_MOBILE_ID in merged.removedIds,
+    )
+
+    val userOwned = """
+      - id: agent-default-model
+        disabled: true
+      - insert:
+          - id: agent-default-model-mobile
+            name: 'some-user-package'
+            config:
+              provider: user-choice
+    """.trimIndent() + "\n"
+    val userNormalized = FactoryProfilePatch.normalizeLegacyAgentDefaultModel(userOwned)
+    assertTrue("未触发归一不得把 LEGACY_MOBILE_ID 计入 removedIds", userNormalized.removedIds.isEmpty())
+    val userMerged = FactoryProfilePatch.merge(userOwned, newShapeFactory)
+    assertFalse("用户同名条目不得进入 removedIds", FactoryProfilePatch.LEGACY_MOBILE_ID in userMerged.removedIds)
+    assertTrue("用户同名条目必须保留", userMerged.text.contains("some-user-package"))
+  }
+
+  @Test
+  fun repairRetiredEntriesReportsOnlyActuallyDroppedIds() {
+    val live = """
+      - insert:
+          - id: dsh-undo-savepoint
+            name: dsh-undo-savepoint
+          - id: android-manage
+            name: '@dsh-android/dsh-android-manage'
+            config:
+              keep: true
+          - id: android-vdisplay
+            name: '@user/my-vdisplay'
+      - id: ui-layout
+        disabled: true
+    """.trimIndent() + "\n"
+    val result = FactoryProfilePatch.repairRetiredEntries(
+      live,
+      retiredFactories = FactoryProfilePatch.RETIRED_FACTORY_ENTRIES,
+    )
+    assertEquals(
+      setOf("dsh-undo-savepoint", "ui-layout"),
+      result.removedIds,
+    )
+  }
 }

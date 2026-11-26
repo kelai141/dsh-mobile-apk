@@ -107,8 +107,21 @@ internal object FactoryProfilePatch {
   /** 旧写法 insert 的那个包名（用于把块与「用户自装同名 id」区分开）。 */
   internal const val LEGACY_MOBILE_NAME = "@deepseek-ai/dsh-agent-default-model"
 
-  /** 纠正结果：[text] 为纠正后全文，[changes] 为人类可读的改动说明（写日志/诊断）。 */
-  internal class Result(val text: String, val changes: List<String>)
+  /**
+   * 合并与退役清理阶段允许从 live patch 消失的条目 id 政策上界：
+   * 退役工厂插件、退役 disabled 行、以及旧单点写法归一迁走的 [LEGACY_MOBILE_ID]。
+   * 写盘校验时仍与本次实际产出的 [Result.removedIds] 取交集，确保未触发归一的用户同名条目
+   * 或带用户配置的退役条目若意外消失仍会被拒。
+   */
+  internal val ALLOWED_REMOVED_IDS: Set<String> =
+    RETIRED_FACTORY_ENTRIES.keys + RETIRED_DISABLED_ROW_IDS + LEGACY_MOBILE_ID
+
+  /** 纠正结果：[text] 为纠正后全文，[changes] 为人类可读的改动说明（写日志/诊断），[removedIds] 为设计内实际删掉的条目 id。 */
+  internal class Result(
+    val text: String,
+    val changes: List<String>,
+    val removedIds: Set<String> = emptySet(),
+  )
 
   /** 列 0 的列表项起始：`- `、裸 `-`（行尾）都算；tab 缩进**不算**（缩进的 `-` 是子条目）。 */
   private val TOP_ITEM = Regex("""^-(?:\s|$)""")
@@ -194,11 +207,13 @@ internal object FactoryProfilePatch {
       return Result(factoryText, if (factoryText.isBlank()) emptyList() else listOf("live 为空：落工厂件"))
     }
     val changes = ArrayList<String>()
+    val removedIds = LinkedHashSet<String>()
     // ⓪ 归一旧「单点」写法（必须先于 reconcile/append：它是条目 id 层面的重构，
     //    后两步都建立在「条目集已正确」这一前提上）。
     val normalized = normalizeLegacyAgentDefaultModel(liveText)
     val live = normalized.text
     changes += normalized.changes
+    removedIds += normalized.removedIds
     // 归一的**结构化校验**（Lead 要求：放宽必须是有结构的收窄，不是削弱校验）。
     // 失败即抛：绝不把一个未校验的归一结果交给后续 reconcile/append，更不落盘。
     if (normalized.changes.isNotEmpty()) {
@@ -238,6 +253,7 @@ internal object FactoryProfilePatch {
       val r = reconcileBlock(block, factoryDisabled, factoryEntryIds, retired)
       resolved += r.text
       changes += r.changes
+      removedIds += r.droppedIds
       for (entry in block.entries) if (entry.id !in r.droppedIds) present += entry.id
     }
 
@@ -288,7 +304,7 @@ internal object FactoryProfilePatch {
       val separator = if (out.endsWith("\n") || out.isEmpty()) "" else "\n"
       out += separator + tail
     }
-    return Result(out, changes)
+    return Result(out, changes, removedIds)
   }
 
   /**
@@ -298,8 +314,10 @@ internal object FactoryProfilePatch {
    * 「retired 行」两种情形。旧写法里
    *   ① `agent-default-model` 的 `disabled: true` —— 新工厂件**不再有** disabled（改成 config 覆盖）
    *      ⇒ `factoryDisabled` 不含它 ⇒ 不纠正；
-   *   ② `agent-default-model-mobile` —— 新工厂件里**不存在**该 id ⇒ 属 live 独有条目 ⇒ 按设计保留。
-   * 于是**已升级设备**（正是报障用户）永远停在旧形态，单点依旧存在。
+   *   ② `agent-default-model-mobile` —— 新工厂件里**不存在**该 id，在引入本归一前会被当成 live
+   *      独有条目保留；本函数会把它的 `config:` 搬到上游 id 上并删除 `-mobile` 子条目，同时在
+   *      [Result.removedIds] 中记录 [LEGACY_MOBILE_ID]，供写盘前的退役校验放行这次计划内删除。
+   * 于是**已升级设备**（正是报障用户）在无归一前永远停在旧形态，单点依旧存在。
    * 干净安装不受影响（live 为空 ⇒ 直接落工厂件）。
    *
    * **触发条件（刻意收窄 —— 宁可少迁，不可错迁）**：同时满足
@@ -381,7 +399,7 @@ internal object FactoryProfilePatch {
         else -> sb.append(block.text)
       }
     }
-    return Result(sb.toString(), changes)
+    return Result(sb.toString(), changes, setOf(LEGACY_MOBILE_ID))
   }
 
   /**
@@ -449,6 +467,7 @@ internal object FactoryProfilePatch {
   ): Result {
     if (liveText.isBlank() || retired.isEmpty()) return Result(liveText, emptyList())
     val changes = ArrayList<String>()
+    val removedIds = LinkedHashSet<String>()
     val sb = StringBuilder(liveText.length)
     for (block in parseBlocks(liveText)) {
       var out: String? = null
@@ -462,7 +481,12 @@ internal object FactoryProfilePatch {
           val cleaned = removeDisabledTrue(fragment, entry.indent.length + 2)
           if (cleaned == fragment) continue
           val stripped = dropIfActionless(cleaned)
-          if (stripped != null) replacements[index] = stripped else drops += index
+          if (stripped != null) {
+            replacements[index] = stripped
+          } else {
+            drops += index
+            removedIds += entry.id
+          }
         }
         if (replacements.isNotEmpty() || drops.isNotEmpty()) {
           changes += "移除退役行的 disabled 残留: " + hits.joinToString(",") { it.id }
@@ -471,7 +495,7 @@ internal object FactoryProfilePatch {
       }
       sb.append(out ?: block.text)
     }
-    return Result(sb.toString(), changes)
+    return Result(sb.toString(), changes, removedIds)
   }
 
   /**
@@ -489,6 +513,7 @@ internal object FactoryProfilePatch {
   ): Result {
     if (liveText.isBlank() || (retired.isEmpty() && retiredFactories.isEmpty())) return Result(liveText, emptyList())
     val changes = ArrayList<String>()
+    val removedIds = LinkedHashSet<String>()
     val sb = StringBuilder(liveText.length)
     for (block in parseBlocks(liveText)) {
       var text = block.text
@@ -507,6 +532,7 @@ internal object FactoryProfilePatch {
           val fragment = lineRange(block.lines, entry.startLine, entry.endLine)
           if (index in factoryIndexes && !hasEntryConfig(fragment)) {
             drops += index
+            removedIds += entry.id
             removedFactory = true
             continue
           }
@@ -514,7 +540,12 @@ internal object FactoryProfilePatch {
             val cleaned = removeDisabledTrue(fragment, entry.indent.length + 2)
             if (cleaned != fragment) {
               val stripped = dropIfActionless(cleaned)
-              if (stripped != null) replacements[index] = stripped else drops += index
+              if (stripped != null) {
+                replacements[index] = stripped
+              } else {
+                drops += index
+                removedIds += entry.id
+              }
             }
           }
         }
@@ -534,7 +565,7 @@ internal object FactoryProfilePatch {
       if (tidied != text) changes += "清理空 insert 组"
       sb.append(tidied)
     }
-    return Result(sb.toString(), changes)
+    return Result(sb.toString(), changes, removedIds)
   }
 
   // ── 块级工具（对外沿用） ────────────────────────────────────────────────────

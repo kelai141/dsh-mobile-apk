@@ -2958,4 +2958,170 @@ class SnapshotTransactionTest {
       SnapshotFs.deletePath(filesDir)
     }
   }
+
+  /**
+   * issue #1863：旧版 live `cordis.patch.yml` 含双行单点写法（`agent-default-model` + `disabled: true`
+   * 与 `- insert: - id: agent-default-model-mobile`），跨版升级时 `FactoryProfilePatch.merge()` 必然把
+   * `agent-default-model-mobile` 归一迁走。退役结构校验必须放行本次计划内移除的 `LEGACY_MOBILE_ID`，
+   * 否则 `swap()` 抛出 `SnapshotFsException(snapshot-atomic-write)` 并锁死启动。
+   */
+  @Test
+  fun profileSwapNormalizesLegacyAgentDefaultModelWithoutTrippingRetirementGuard() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(live, "old-node", "old-profile")
+      writeRuntime(stage, "new-node", "new-profile")
+      val livePatch = File(live, "home/.dsh/profiles/web/cordis.patch.yml")
+      livePatch.writeText(
+        """
+          - id: agent-default-model
+            disabled: true
+          - insert:
+              - id: agent-default-model-mobile
+                name: '@deepseek-ai/dsh-agent-default-model'
+                config:
+                  provider: xiaomimimo
+                  model: mimo-v2.5
+          - insert:
+              - id: dsh-undo-savepoint
+                name: dsh-undo-savepoint
+          - id: ui-layout
+            disabled: true
+          - id: user-custom
+            config:
+              theme: keep
+        """.trimIndent() + "\n",
+      )
+      File(stage, "home/.dsh/profiles/web/cordis.patch.yml").writeText(
+        """
+          - id: agent-default-model
+            config:
+              provider: deepseek-official
+              model: deepseek-v4-flash
+          - insert:
+              - id: shell-termux
+                name: '@dsh-android/dsh-shell-termux'
+        """.trimIndent() + "\n",
+      )
+
+      SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp1863",
+        startedAt = 1L,
+      )
+
+      val merged = livePatch.readText()
+      assertFalse("归一后不得残留 agent-default-model-mobile", merged.contains("agent-default-model-mobile"))
+      assertFalse("退役工厂条目必须移除", merged.contains("dsh-undo-savepoint"))
+      assertFalse("退役 disabled 行必须移除", merged.contains("ui-layout"))
+      assertTrue("用户 provider 必须保留", merged.contains("provider: xiaomimimo"))
+      assertTrue("用户 model 必须保留", merged.contains("model: mimo-v2.5"))
+      assertFalse("上游行不得保留 disabled: true", merged.contains("disabled: true"))
+      assertTrue("用户自定义条目必须保留", merged.contains("id: user-custom"))
+      assertTrue("工厂新条目必须补入", merged.contains("id: shell-termux"))
+      SnapshotTransaction.finish(filesDir)
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  /**
+   * issue #1863 反证：
+   *  A) 用户自装同名 `agent-default-model-mobile`（非官方包名）不得触发归一且必须完整保留；
+   *  B) 写盘校验 `validateRetirementKeepsOtherEntries` 仍拦截计划外消失（即使 id 为 `agent-default-model-mobile`
+   *     或传了未授权的 `allowedRemovedIds`）。
+   */
+  @Test
+  fun profileSwapPreservesUserOwnedLegacyMobileNameAndRejectsUnplannedDrop() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(live, "old-node", "old-profile")
+      writeRuntime(stage, "new-node", "new-profile")
+      val livePatch = File(live, "home/.dsh/profiles/web/cordis.patch.yml")
+      livePatch.writeText(
+        """
+          - id: agent-default-model
+            disabled: true
+          - insert:
+              - id: agent-default-model-mobile
+                name: '@user/my-default-model'
+                config:
+                  provider: custom
+          - id: user-custom
+            config:
+              theme: keep
+        """.trimIndent() + "\n",
+      )
+      File(stage, "home/.dsh/profiles/web/cordis.patch.yml").writeText(
+        """
+          - id: agent-default-model
+            config:
+              provider: deepseek-official
+          - insert:
+              - id: shell-termux
+                name: '@dsh-android/dsh-shell-termux'
+        """.trimIndent() + "\n",
+      )
+
+      SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp1863-user",
+        startedAt = 2L,
+      )
+
+      val merged = livePatch.readText()
+      assertTrue("用户自装同名条目不得被归一删除", merged.contains("id: agent-default-model-mobile"))
+      assertTrue("用户自装包名必须保留", merged.contains("@user/my-default-model"))
+      assertTrue("用户自定义条目必须保留", merged.contains("id: user-custom"))
+      SnapshotTransaction.finish(filesDir)
+
+      val guard = SnapshotTransaction::class.java.getDeclaredMethod(
+        "validateRetirementKeepsOtherEntries",
+        String::class.java,
+        String::class.java,
+        String::class.java,
+        Set::class.java,
+      )
+      guard.isAccessible = true
+      val self = SnapshotTransaction::class.java.getDeclaredField("INSTANCE").get(null)
+
+      val beforeWithMobile = "- id: agent-default-model-mobile\n  name: '@user/my-default-model'\n- id: user-custom\n"
+      val afterDroppedMobile = "- id: user-custom\n"
+      val unplannedFailure = runCatching {
+        try {
+          guard.invoke(self, beforeWithMobile, afterDroppedMobile, "cordis.patch.yml", emptySet<String>())
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+          throw e.targetException
+        }
+      }.exceptionOrNull()
+      assertTrue("未声明 LEGACY_MOBILE_ID 时消失必须抛出 SnapshotFsException", unplannedFailure is SnapshotFsException)
+      assertEquals(CODE_ATOMIC_WRITE, (unplannedFailure as SnapshotFsException).code)
+
+      val beforeWithCustom = "- id: user-custom\n- id: shell-termux\n"
+      val afterDroppedCustom = "- id: shell-termux\n"
+      val unauthorizedFailure = runCatching {
+        try {
+          guard.invoke(self, beforeWithCustom, afterDroppedCustom, "cordis.patch.yml", setOf("user-custom"))
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+          throw e.targetException
+        }
+      }.exceptionOrNull()
+      assertTrue("政策上界之外的 id 即使传入 allowedRemovedIds 也必须被拦截", unauthorizedFailure is SnapshotFsException)
+      assertEquals(CODE_ATOMIC_WRITE, (unauthorizedFailure as SnapshotFsException).code)
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
 }
