@@ -180,6 +180,14 @@ class FileExternalBridgeTest {
   // ── 3. 目录项辅助：不给空父目录 Uri ──────────────────────────────────────────
 
   @Test
+  fun `父目录不可授权时干脆不提供目录项`() {
+    assertNull("父目录 Uri 为 null 时不提供目录项", FileExternalBridge.folderSpec(null))
+    assertNull("空白父目录 Uri 同样不提供", FileExternalBridge.folderSpec("  "))
+    assertTrue("open 主计划保持纯净单意图", FileExternalBridge.openPlan(file, "image/jpeg", "photo.jpg").initial.isEmpty())
+    assertTrue("share 主计划保持纯净单意图", FileExternalBridge.sharePlan(file, "image/jpeg", "photo.jpg").initial.isEmpty())
+  }
+
+  @Test
   fun `目录项传的是父目录且 type 是 resource folder`() {
     val folder = FileExternalBridge.folderSpec(parent)
     assertNotNull("父目录有效时可构造目录项", folder)
@@ -190,8 +198,6 @@ class FileExternalBridgeTest {
     assertEquals("目录项也必须已授权",
       listOf(parent), FileExternalBridge.exposedUris(folder))
     assertTrue("目录项的 Uri 必须已授权", FileExternalBridge.fullyGranted(folder))
-    assertNull("父目录 Uri 为 null 时不提供目录项", FileExternalBridge.folderSpec(null))
-    assertNull("空白父目录 Uri 同样不提供", FileExternalBridge.folderSpec("  "))
   }
 
   @Test
@@ -295,6 +301,10 @@ class FileExternalBridgeTest {
       FileExternalBridge.effectiveMime("application/json", "a.json"))
     assertEquals("页面给了专属类型就用页面的", "image/heic",
       FileExternalBridge.effectiveMime("image/heic", "a.weird"))
+  }
+
+  @Test
+  fun `MIME 降级链按文本与二进制逐级回退至星号`() {
     assertEquals("文本降级链先试原类型再 text/plain 再 */*",
       listOf("text/csv", "text/plain", "*/*"),
       FileExternalBridge.mimeFallbackChain("text/csv"))
