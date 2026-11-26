@@ -188,6 +188,16 @@ export function openExternalFile(bridge: FileCardBridge, path: string): CardBrid
   }
 }
 
+/** Share one device file through the Android share sheet; read the bridge at the gesture. */
+export function shareExternalFile(bridge: FileCardBridge, path: string): CardBridgeResult {
+  if (typeof bridge.shareFile !== 'function') return { ok: false, reason: 'unavailable' }
+  try {
+    return readAnswer(bridge.shareFile(path, mimeOf(path)))
+  } catch {
+    return { ok: false, reason: 'bridge-error' }
+  }
+}
+
 /** 文件名（末段），用于无障碍文案。 */
 function nameOf(path: string): string {
   return path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1)
@@ -572,12 +582,11 @@ export class FileCardCapsule {
 
   /** 调用壳桥并返回本次打开或分享的结果。 */
   act(action: CardAction, path: string): CardBridgeResult {
-    const mime = mimeOf(path)
     const bridge = this.bridge()
     if (action === 'share') {
       const call = bridge.shareFile
       if (typeof call !== 'function') return { ok: false, reason: 'unavailable' }
-      return readAnswer(this.safely(() => call(path, mime)))
+      return shareExternalFile({ shareFile: (p, m) => this.safely(() => call(p, m)) }, path)
     }
     return openExternalFile(bridge, path)
   }
