@@ -51,6 +51,11 @@ object VdisplayController {
    */
   private const val ACTIVITY_DISPLAY_PROBE =
     "dumpsys activity activities | grep -E '^ *Display #|ActivityRecord'"
+  private const val SHELL_PATH_PREFIX = "export PATH=/system/bin:/system/xbin:\$PATH; "
+  private val SU_PRE_DISPATCH_REFUSALS = setOf(
+    "no-su", "root-not-granted", "requesting", "empty-command", "root-grant-required",
+    "root-lease-evidence-unavailable", "authorize-denied",
+  )
   /** 随内容旋转：游戏等强制横屏应用在虚拟屏上真横屏运行（VIRTUAL_DISPLAY_FLAG_ROTATES_WITH_CONTENT）。 */
   private const val FLAG_ROTATES_WITH_CONTENT = 1 shl 7
 
@@ -296,8 +301,30 @@ object VdisplayController {
         .put("guidance", "虚拟屏幕 ${first.alias.removePrefix("virtual-")} 已激活（Android displayId=${first.displayId}）。")
     }
     if (privileged.optBoolean("ok")) {
+      val shizukuIsRoot = privileged.optInt("uid", -1) == RootGrant.ROOT_UID
+      if (shizukuIsRoot && !RootGrant.isGranted(appContext)) {
+        return out.put("ok", false).put("state", "blocked").put("code", "root-grant-required")
+          .put(
+            "guidance",
+            UiText.t(
+              context,
+              "Shizuku 正以 root（uid 0）运行，但「AI root 权限」未授权。请在设置页「手机控制」开启 AI root 权限，或改用无线调试（uid 2000）启动 Shizuku。",
+              "Shizuku is running as root (uid 0), but AI root access is not enabled. Enable AI root access in Settings > Phone Control, or restart Shizuku via wireless debugging (uid 2000).",
+            ),
+          )
+      }
+      if (shizukuIsRoot) {
+        return out.put("ok", true).put("state", "ready").put("code", "vdisplay-ready")
+          .put("transports", JSONArray(listOf("shizuku", "root")))
+          .put("guidance", UiText.t(context, "Shizuku（uid 0）与 AI root 权限已就绪；AI 可创建 1 块虚拟屏。", "Shizuku (uid 0) and AI root access are ready; the AI can create 1 virtual screen."))
+      }
       return out.put("ok", true).put("state", "ready").put("code", "vdisplay-ready")
         .put("guidance", UiText.t(context, "Shizuku 已授权且 shell UserService 已就绪；AI 可创建 1 块虚拟屏。", "Shizuku is granted and the shell UserService is ready; the AI can create 1 virtual screen."))
+    }
+    if (directSuReady(appContext)) {
+      return out.put("ok", true).put("state", "ready").put("code", "vdisplay-ready")
+        .put("transports", JSONArray(listOf("root")))
+        .put("guidance", UiText.t(context, "Root 通道已授权就绪；AI 可创建 1 块虚拟屏。", "The root channel is authorized and ready; the AI can create 1 virtual screen."))
     }
     return out.put("ok", false).put("state", "blocked")
       .put("code", privileged.optString("code", lastCode))
@@ -339,7 +366,12 @@ object VdisplayController {
   }
 
   /** Create one non-mirrored public display on a user gesture or controller operation. */
-  fun create(context: Context, args: JSONObject? = null, authorize: (() -> Boolean)? = null): JSONObject {
+  fun create(
+    context: Context,
+    args: JSONObject? = null,
+    authorize: (() -> Boolean)? = null,
+    backend: String? = null,
+  ): JSONObject {
     val appContext = context.applicationContext
     val session = args?.optString("session", "")?.takeIf { it.isNotBlank() }
     // 0.14.0 用户口径修正：**隔离「可见性/操作」，但共享「物理资源」**。
@@ -357,10 +389,39 @@ object VdisplayController {
     // 因此幂等判断回到「本机是否已有屏」——存在即复用，无论它当初由谁创建。
     val existing = synchronized(lock) { records.size }
     if (existing > 0) return if (authorize == null || authorize()) status(appContext) else nativeDenied()
-    val bound = ShizukuTransport.ensureBound(appContext)
-    if (!bound.optBoolean("ok")) return status(appContext)
-      .put("code", bound.optString("code", "shizuku-not-ready"))
-      .put("guidance", bound.optString("guidance", "Shizuku 未就绪。"))
+    when (backend) {
+      "root" -> {
+        if (!RootGrant.isGranted(appContext)) {
+          return status(appContext).put("ok", false).put("executed", "no")
+            .put("code", "root-grant-required")
+            .put("guidance", "AI root 权限未开启或当前版本的免责确认已失效。")
+        }
+        if (!directSuReady(appContext)) {
+          val bound = ShizukuTransport.ensureBound(appContext)
+          if (!bound.optBoolean("ok")) return status(appContext).put("ok", false).put("executed", "no")
+            .put("code", bound.optString("code", "shizuku-not-ready"))
+            .put("guidance", bound.optString("guidance", "Shizuku 未就绪。"))
+        }
+      }
+      "shizuku" -> {
+        val bound = ShizukuTransport.ensureBound(appContext)
+        if (!bound.optBoolean("ok")) return status(appContext).put("ok", false).put("executed", "no")
+          .put("code", bound.optString("code", "shizuku-not-ready"))
+          .put("guidance", bound.optString("guidance", "Shizuku 未就绪。"))
+      }
+      else -> {
+        if (!directSuReady(appContext)) {
+          val bound = ShizukuTransport.ensureBound(appContext)
+          if (!bound.optBoolean("ok")) return status(appContext).put("ok", false).put("executed", "no")
+            .put("code", bound.optString("code", "shizuku-not-ready"))
+            .put("guidance", bound.optString("guidance", "Shizuku 未就绪。"))
+          if (bound.optInt("uid", -1) == RootGrant.ROOT_UID && !RootGrant.isGranted(appContext)) {
+            return status(appContext).put("ok", false).put("executed", "no")
+              .put("code", "root-grant-required")
+          }
+        }
+      }
+    }
 
     // #520：旧版此处曾有 `existing >= MAX_VIRTUAL_DISPLAYS → vdisplay-limit` 分支，但它被上面的
     // 幂等复用早退（existing > 0 即 return）挡成死代码——MAX=1 时上限语义由「存在即复用」表达，
@@ -511,6 +572,7 @@ object VdisplayController {
     screenId: String,
     allowSelectFallback: Boolean = false,
     authorize: (() -> Boolean)? = null,
+    backend: String? = null,
   ): JSONObject {
     val appContext = context.applicationContext
     val alias = screenId.trim()
@@ -536,7 +598,7 @@ object VdisplayController {
             .put("screenId", alias).put("aliases", JSONArray(existing))
             .put("guidance", "可创建的虚拟屏别名与本计划的 " + alias + " 不一致；未创建第二块屏。")
         } else {
-          val created = create(appContext, args, authorize)
+          val created = create(appContext, args, authorize, backend)
           if (created.optString("executed") == "no") return created
           if (created.optJSONArray("aliases")?.let { array ->
               (0 until array.length()).any { array.optString(it) == alias }
@@ -550,8 +612,8 @@ object VdisplayController {
         }
       }
       "vdDestroy" -> destroy(appContext, JSONObject().put("target", alias), authorize)
-      "vdLaunch" -> launchSettingsProbe(appContext, JSONObject(args.toString()).put("target", alias), authorize)
-      "vdLaunchApp" -> launchApp(appContext, args.optString("pkg", ""), alias, authorize)
+      "vdLaunch" -> launchSettingsProbe(appContext, JSONObject(args.toString()).put("target", alias), authorize, backend)
+      "vdLaunchApp" -> launchApp(appContext, args.optString("pkg", ""), alias, authorize, backend)
       "vdInfo" -> if (authorize == null || authorize()) status(appContext) else nativeDenied()
       else -> JSONObject().put("ok", false).put("code", "platform-adapter-unavailable")
         .put("screenId", alias)
@@ -563,6 +625,67 @@ object VdisplayController {
 
   private fun nativeDenied(): JSONObject = JSONObject().put("ok", false)
     .put("code", "authorize-denied").put("executed", "no")
+
+  /** 单引号安全转义，用于把固定 argv 安全拼给 `su -c`。 */
+  internal fun shellQuote(raw: String): String = "'" + raw.replace("'", "'\\''") + "'"
+
+  /** 纯函数传输选择：显式 `shizuku` 计划绝不升级 root；显式 `root` 计划优先直连 su，否则走 uid 0 Shizuku。 */
+  internal fun resolveTransport(backend: String?, directSuReady: Boolean, shizukuOk: Boolean): String = when (backend) {
+    "shizuku" -> "shizuku"
+    "root" -> if (directSuReady) "su" else "shizuku-root"
+    else -> if (!shizukuOk && directSuReady) "su" else "shizuku"
+  }
+
+  private fun directSuReady(context: Context): Boolean =
+    RootGrant.isGranted(context) && RootAccess.isGranted(context) && RootAccess.suPath() != null
+
+  private fun runPrivilegedShell(context: Context, command: String, timeoutMs: Int, backend: String?): JSONObject {
+    val transport = resolveTransport(backend, directSuReady(context), ShizukuTransport.status(context).optBoolean("ok"))
+    return when (transport) {
+      "su" -> RootAccess.execRoot(context, SHELL_PATH_PREFIX + command, timeoutMs)
+      "shizuku-root" -> ShizukuTransport.runShell(context, command, timeoutMs, expectedUid = RootGrant.ROOT_UID)
+      else -> ShizukuTransport.runShell(
+        context, command, timeoutMs,
+        expectedUid = if (backend == "shizuku") 2000 else null,
+      )
+    }
+  }
+
+  private fun runPrivilegedArgv(
+    context: Context,
+    argv: Array<String>,
+    backend: String?,
+    authorize: (() -> Boolean)? = null,
+  ): JSONObject {
+    val transport = resolveTransport(backend, directSuReady(context), ShizukuTransport.status(context).optBoolean("ok"))
+    return when (transport) {
+      "su" -> {
+        val permitted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val gate: () -> Boolean = {
+          val ok = authorize?.invoke() ?: true
+          permitted.set(ok)
+          ok
+        }
+        val command = SHELL_PATH_PREFIX + argv.joinToString(" ") { shellQuote(it) }
+        val result = RootAccess.execRoot(context, command, 8_000, gate)
+        val complete = permitted.get() && RootAccess.suAcknowledgement(result) && !result.optBoolean("noReplay")
+        val preDispatchRefused = !result.has("exitCode") && result.optString("code") in SU_PRE_DISPATCH_REFUSALS
+        val executed = when {
+          complete -> "yes"
+          !permitted.get() || preDispatchRefused -> "no"
+          else -> "unknown"
+        }
+        result.put("ok", complete && result.optBoolean("ok")).put("executed", executed)
+      }
+      "shizuku-root" -> ShizukuTransport.runController(
+        context, argv, authorize = authorize, expectedUid = RootGrant.ROOT_UID,
+      )
+      else -> ShizukuTransport.runController(
+        context, argv, authorize = authorize,
+        expectedUid = if (backend == "shizuku") 2000 else null,
+      )
+    }
+  }
 
   /**
    * Select the controller-owned presentation target. The real screen is not mirrorable and is
@@ -685,18 +808,24 @@ object VdisplayController {
    * Minimal fixed-action proof: launch Android Settings onto the selected virtual display through
    * the shell UserService. This command contains no model/user supplied shell text.
    */
-  fun launchSettingsProbe(context: Context, args: JSONObject? = null, authorize: (() -> Boolean)? = null): JSONObject {
+  fun launchSettingsProbe(
+    context: Context,
+    args: JSONObject? = null,
+    authorize: (() -> Boolean)? = null,
+    backend: String? = null,
+  ): JSONObject {
     requireOwner("vdLaunch", args?.optString("session", "")?.takeIf { it.isNotBlank() })?.let { return it }
     val target = args?.optString("target", "").orEmpty().ifBlank { null }
-    if (authorize != null) return launchApp(context, "com.android.settings", target, authorize)
+    if (authorize != null) return launchApp(context, "com.android.settings", target, authorize, backend)
     val record = (if (target != null) recordOf(target) else selectedRecord())
       ?: return status(context.applicationContext).put("ok", false).put("code", "screen-not-ready")
         .put("guidance", "虚拟屏幕尚未创建，无法拉起测试应用。")
     touch(record.alias) // #671：往这块屏送任务 = 使用中。
     val id = record.displayId
-    val result = ShizukuTransport.runController(
+    val result = runPrivilegedArgv(
       context.applicationContext,
       arrayOf("am", "start", "--display", id.toString(), "-a", "android.settings.SETTINGS"),
+      backend = backend,
       authorize = authorize,
     )
     val out = status(context.applicationContext)
@@ -799,7 +928,13 @@ object VdisplayController {
    * @param target - 虚拟屏别名；缺省取当前选中/第一块。
    * @returns 结果对象（ok/code/guidance/screenId/displayId）。
    */
-  fun launchApp(context: Context, pkg: String, target: String? = null, authorize: (() -> Boolean)? = null): JSONObject {
+  fun launchApp(
+    context: Context,
+    pkg: String,
+    target: String? = null,
+    authorize: (() -> Boolean)? = null,
+    backend: String? = null,
+  ): JSONObject {
     val appContext = context.applicationContext
     if (!Regex("^[a-zA-Z][\\w.]*$").matches(pkg)) {
       return JSONObject().put("ok", false).put("code", "invalid-package")
@@ -811,7 +946,7 @@ object VdisplayController {
     touch(record.alias) // #671：往这块屏送任务 = 使用中。
     val id = record.displayId
     if (authorize != null) {
-      val before = ShizukuTransport.runShell(appContext, ACTIVITY_DISPLAY_PROBE, 8_000)
+      val before = runPrivilegedShell(appContext, ACTIVITY_DISPLAY_PROBE, 8_000, backend)
       if (!before.optBoolean("ok")) return JSONObject().put("ok", false)
         .put("code", "vd-launch-state-unavailable").put("executed", "no").put("screenId", record.alias)
       val priorDisplays = displaysRunning(pkg, before.optString("stdout"))
@@ -826,16 +961,17 @@ object VdisplayController {
     //   ③ 进程内 `ActivityOptions.setLaunchDisplayId`   → SecurityException: Permission Denial ... uid=10053
     //      （owner 本人也拒；SafeActivityOptions.checkPermissions 依据的是 START_ACTIVITIES_FROM_BACKGROUND
     //       等特权，普通应用没有）
-    //   ④ ✅ `am start --display <id> -n <component>` 经**特权 shell 通道**（Shizuku UserService）
+    //   ④ ✅ `am start --display <id> -n <component>` 经**特权 shell 通道**（Shizuku UserService 或独立授权 Root）
     //      → 实测成功：Settings 成为该 display 上的 task，a11y 也能看到它的窗口。
     //
     // 注意 ① 与 ④ 的区别不是「命令」而是**经由谁来执行**：同一台设备、同一个 uid=2000，
     // 经 UserService 的 binder 调用（`runController`）走的是特权路径，直接 adb shell 拼字符串则被拒。
-    // 因此这里用 `runController`（固定 argv，包名已白名单校验，模型可控内容不进 shell 文本）。
+    // 因此这里用 `runPrivilegedArgv`（固定 argv / 逐参数单引号包裹，包名已白名单校验，模型可控内容不进 shell 文本）。
     // 先解析 launcher 组件，再拉起——两步都是固定 argv。
-    val resolved = ShizukuTransport.runController(
+    val resolved = runPrivilegedArgv(
       appContext,
       arrayOf("cmd", "package", "resolve-activity", "--brief", "-c", "android.intent.category.LAUNCHER", pkg),
+      backend = backend,
     )
     val component = resolved.optString("stdout", "")
       .lineSequence().map { it.trim() }.lastOrNull { it.contains("/") } ?: ""
@@ -844,9 +980,10 @@ object VdisplayController {
         .put("displayId", id).put("screenId", record.alias)
         .put("guidance", "无法解析 " + pkg + " 的启动组件（可能未安装或无 launcher 入口）：" + component)
     }
-    val result = ShizukuTransport.runController(
+    val result = runPrivilegedArgv(
       appContext,
       arrayOf("am", "start", "--display", id.toString(), "-n", component),
+      backend = backend,
       authorize = authorize,
     )
     if (result.optString("executed") == "no") return result.put("screenId", record.alias)
@@ -869,7 +1006,7 @@ object VdisplayController {
     //   - 包在目标屏  → ok=true  vd-launched
     //   - 包只在别的屏 → ok=false vd-launch-denied（带 landedDisplayIds）
     //   - 读不到       → ok=true  vd-launched-unverified（明写「不构成落点证明」并给出复核手段）
-    val probe = ShizukuTransport.runShell(appContext, ACTIVITY_DISPLAY_PROBE, 15_000)
+    val probe = runPrivilegedShell(appContext, ACTIVITY_DISPLAY_PROBE, 15_000, backend)
     if (!probe.optBoolean("ok")) {
       return out.put("ok", true).put("code", "vd-launched-unverified")
         .put("guidance", "已请求把 " + pkg + " 拉起到 " + record.alias + "（displayId=" + id + "），但**落点回读不可用**"

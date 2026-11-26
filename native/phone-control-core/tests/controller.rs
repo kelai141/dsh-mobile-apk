@@ -290,6 +290,51 @@ fn virtual_tools_follow_native_permission_and_validate_their_own_geometry() {
 }
 
 #[test]
+fn virtual_tools_advertise_and_plan_with_root_shizuku_and_revoke_on_consent_loss() {
+    let mut core = controller();
+    let mut input = facts("virtual-only", 0, "no");
+    input["facts"]["shizuku"] = json!({
+        "installed":"yes","running":"yes","granted":"yes","bound":"yes","functionalReady":"yes",
+        "serverUid":{"kind":"root0"},
+        "supportedOps":{"state":"unknown"},
+        "displaySupport":{"state":"unknown"}
+    });
+    input["facts"]["root"] = json!({"authorization":"yes","consentValid":"yes","appSu":"yes"});
+    assert_eq!(call(&mut core, input.clone())["ok"], true);
+
+    let caps = call(&mut core, json!({"protocolVersion":1,"kind":"capabilities"}));
+    let ops = caps["operations"].as_array().unwrap();
+    for op in ["vdCreate", "vdDestroy", "vdLaunchApp", "vdInfo"] {
+        assert!(ops.contains(&json!(op)), "missing {op} in {caps}");
+    }
+    assert!(!ops.contains(&json!("shExec")), "shExec must not advertise on uid 0: {caps}");
+
+    let created = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","epoch":"900",
+        "callId":"root-vd-create","screenId":"virtual-1","operation":"vdCreate",
+        "args":{"width":900,"height":1600,"densityDpi":240,"session":"trusted"}}));
+    assert_eq!(created["code"], "prepared", "{created}");
+    assert_eq!(created["plan"]["backend"], "root", "{created}");
+
+    let launched = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","epoch":"900",
+        "callId":"root-vd-launch","screenId":"virtual-1","operation":"vdLaunchApp",
+        "args":{"pkg":"com.android.settings","session":"trusted"}}));
+    assert_eq!(launched["code"], "prepared", "{launched}");
+    assert_eq!(launched["plan"]["backend"], "root", "{launched}");
+
+    // Revoking AI root consent hides vd* ops and rejects in-flight commit.
+    input["facts"]["root"]["consentValid"] = json!("no");
+    assert_eq!(call(&mut core, input)["ok"], true);
+    let after = call(&mut core, json!({"protocolVersion":1,"kind":"capabilities"}));
+    let after_ops = after["operations"].as_array().unwrap();
+    for op in ["vdCreate", "vdDestroy", "vdLaunchApp", "vdInfo"] {
+        assert!(!after_ops.contains(&json!(op)), "{op} must disappear after root revoke: {after}");
+    }
+    let denied = call(&mut core, json!({"protocolVersion":1,"kind":"commit","callId":"root-vd-create"}));
+    assert_eq!(denied["executed"], "no", "{denied}");
+    assert_eq!(denied["code"], "authorization-changed", "{denied}");
+}
+
+#[test]
 fn focused_unicode_text_uses_the_observed_native_channel_without_an_ime() {
     let mut core = controller();
     let mut input = facts("real-only", 0, "no");

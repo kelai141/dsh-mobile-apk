@@ -592,3 +592,62 @@ fn unimplemented_wait_is_not_advertised_as_executable() {
     state.set_a11y_facts(a11y_ready(&["state"], &[]));
     assert_eq!(state.plan("state", TargetRequest::ControlMemory).unwrap().backend, Backend::A11y);
 }
+
+#[test]
+fn virtual_display_ops_allow_authorized_root_under_root_shizuku_or_su() {
+    let mut state = PolicyState::new(1);
+    state.set_scope(Scope::VirtualOnly);
+    // Shizuku running as uid 0, without independent AI root grant: must fail closed.
+    state.set_shizuku_facts(shizuku_ready(ServerUid::Root0, &["vdCreate", "vdInfo"], &[]));
+    assert_eq!(
+        state.plan("vdCreate", TargetRequest::NewVirtual("virtual-1".into())).unwrap_err().code(),
+        "root-authorization-required"
+    );
+
+    // Grant independent AI root authorization + valid consent: vd* routes to Backend::Root.
+    state.set_root_facts(RootFacts::granted());
+    assert!(state.root_only_available());
+    let create = state.plan("vdCreate", TargetRequest::NewVirtual("virtual-1".into())).unwrap();
+    assert_eq!(create.backend, Backend::Root);
+    assert_eq!(state.plan("vdInfo", TargetRequest::NewVirtual("virtual-1".into())).unwrap().backend, Backend::Root);
+    // shExec must still remain blocked on uid 0.
+    assert!(state.plan("shExec", TargetRequest::PrivilegedShell).is_err());
+
+    virtual_screen(&mut state, "virtual-1", 41);
+    for op in ["vdDestroy", "vdLaunch", "vdLaunchApp", "vdInput"] {
+        let plan = state.plan(op, TargetRequest::Virtual("virtual-1".into())).unwrap();
+        assert_eq!(plan.backend, Backend::Root, "{op} should route to Backend::Root");
+    }
+
+    // Scope isolation still holds under root.
+    state.set_scope(Scope::RealOnly);
+    assert_eq!(
+        state.plan("vdCreate", TargetRequest::NewVirtual("virtual-1".into())).unwrap_err().code(),
+        "screen-out-of-scope"
+    );
+    state.set_scope(Scope::VirtualOnly);
+
+    // Revoking root consent invalidates previously planned vdCreate.
+    let active_plan = state.plan("vdCreate", TargetRequest::NewVirtual("virtual-1".into())).unwrap();
+    state.set_root_facts(RootFacts { authorization: Tri::Yes, consent_valid: Tri::No, app_su: Tri::Yes });
+    assert_eq!(state.revalidate(&active_plan).unwrap_err().code(), "authorization-changed");
+
+    // Direct app su works even without Shizuku running.
+    let mut su_only = PolicyState::new(2);
+    su_only.set_scope(Scope::VirtualOnly);
+    su_only.set_root_facts(RootFacts { authorization: Tri::Yes, consent_valid: Tri::Yes, app_su: Tri::Yes });
+    assert_eq!(
+        su_only.plan("vdCreate", TargetRequest::NewVirtual("virtual-1".into())).unwrap().backend,
+        Backend::Root
+    );
+
+    // Least privilege: when both shell2000 Shizuku and authorized root are available, prefer Shizuku.
+    let mut both = PolicyState::new(3);
+    both.set_scope(Scope::VirtualOnly);
+    both.set_shizuku_facts(shizuku_ready(ServerUid::Shell2000, &["vdCreate"], &[]));
+    both.set_root_facts(RootFacts { authorization: Tri::Yes, consent_valid: Tri::Yes, app_su: Tri::Yes });
+    assert_eq!(
+        both.plan("vdCreate", TargetRequest::NewVirtual("virtual-1".into())).unwrap().backend,
+        Backend::Shizuku
+    );
+}

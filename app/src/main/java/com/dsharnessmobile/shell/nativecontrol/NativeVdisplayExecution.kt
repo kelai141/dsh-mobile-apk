@@ -20,14 +20,15 @@ internal class NativeVdisplayExecution(
     op: String,
     args: JSONObject,
     screenId: String,
+    backend: String,
     authorize: () -> Boolean,
-  ) -> JSONObject = { app, op, args, screenId, authorize ->
+  ) -> JSONObject = { app, op, args, screenId, backend, authorize ->
     if (app == null) JSONObject().put("ok", false).put("code", "vdisplay-host-unavailable")
-    else VdisplayController.executeAuthorized(app, op, args, screenId, authorize = authorize)
+    else VdisplayController.executeAuthorized(app, op, args, screenId, authorize = authorize, backend = backend)
   },
 ) : NativeControlDispatcher.Platform {
 
-  data class Binding(val operation: String, val screenId: String, val args: JSONObject)
+  data class Binding(val operation: String, val screenId: String, val args: JSONObject, val backend: String)
 
   override fun implements(plan: JSONObject): Boolean = binding(plan) != null
 
@@ -39,7 +40,7 @@ internal class NativeVdisplayExecution(
         // The controller consumes this guard at the Android side effect, after Binder preparation.
         val guard = { try { authorize() } catch (_: Exception) { false } }
         val receipt = try {
-          executeAuthorized(context(), bound.operation, bound.args, bound.screenId, guard)
+          executeAuthorized(context(), bound.operation, bound.args, bound.screenId, bound.backend, guard)
         } catch (_: Exception) {
           return@supplyAsync failure("vdisplay-result-unknown", "unknown", bound.screenId)
         }
@@ -55,8 +56,10 @@ internal class NativeVdisplayExecution(
    * vd* plan must be bound to an already registered display and its generation.
    */
   private fun binding(plan: JSONObject): Binding? {
-    // Rust emits backend=shizuku for vd*; never claim a plan that selected a different transport.
-    if (plan.optString("backend") != "shizuku") return null
+    // Rust emits backend=shizuku or backend=root (independently authorized) for vd*;
+    // never claim a plan that selected a different transport.
+    val backend = plan.optString("backend")
+    if (backend != "shizuku" && backend != "root") return null
     val operation = plan.optString("operation")
     if (operation !in operations) return null
     val screenId = plan.optString("screenId")
@@ -84,7 +87,7 @@ internal class NativeVdisplayExecution(
       if (args.has("densityDpi") && args.optInt("densityDpi", 0) !in 120..640) return null
     }
     if (operation == "vdLaunchApp" && !isPackage(args.optString("pkg"))) return null
-    return Binding(operation, screenId, JSONObject(args.toString()))
+    return Binding(operation, screenId, JSONObject(args.toString()), backend)
   }
 
   private fun settled(receipt: JSONObject, screenId: String): JSONObject {

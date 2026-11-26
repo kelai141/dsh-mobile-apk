@@ -337,6 +337,8 @@ pub enum BackendRequirement {
     A11yRequired,
     /// Shizuku 专属，不因 A11y 优先规则被误拦。
     ShizukuRequired,
+    /// Shizuku（uid 2000）优先；不可用或服务端为 uid 0 时，允许经独立授权的 Root 通道执行。
+    ShizukuOrRoot,
     RootRequired,
     TermuxHost,
     /// 壳内浏览器工作台。
@@ -415,12 +417,12 @@ pub static OPERATIONS: &[OperationSpec] = &[
     spec("browserTabs", TargetDomain::BrowserWorkspace, BackendRequirement::BrowserHost, ScopePolicy::NotScreenScoped, false),
     spec("browserFollowTab", TargetDomain::BrowserWorkspace, BackendRequirement::BrowserHost, ScopePolicy::NotScreenScoped, false),
     spec("browserCloseTab", TargetDomain::BrowserWorkspace, BackendRequirement::BrowserHost, ScopePolicy::NotScreenScoped, false),
-    spec("vdCreate", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::VirtualNamespace, false),
-    spec("vdDestroy", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::RegisteredVirtual, false),
-    spec("vdLaunch", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::RegisteredVirtual, false),
-    spec("vdLaunchApp", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::RegisteredVirtual, false),
-    spec("vdInput", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::RegisteredVirtual, false),
-    spec("vdInfo", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::VirtualNamespace, false),
+    spec("vdCreate", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::VirtualNamespace, false),
+    spec("vdDestroy", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::RegisteredVirtual, false),
+    spec("vdLaunch", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::RegisteredVirtual, false),
+    spec("vdLaunchApp", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::RegisteredVirtual, false),
+    spec("vdInput", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::RegisteredVirtual, false),
+    spec("vdInfo", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::VirtualNamespace, false),
     spec("vdMoveTask", TargetDomain::VirtualDisplay, BackendRequirement::Unsupported, ScopePolicy::RegisteredVirtual, false),
     spec("shExec", TargetDomain::PrivilegedShell, BackendRequirement::ShizukuRequired, ScopePolicy::NotScreenScoped, false),
     spec("rootExec", TargetDomain::PrivilegedShell, BackendRequirement::RootRequired, ScopePolicy::NotScreenScoped, false),
@@ -779,6 +781,7 @@ impl PolicyState {
             BackendRequirement::A11yPreferred
             | BackendRequirement::A11yRequired
             | BackendRequirement::ShizukuRequired
+            | BackendRequirement::ShizukuOrRoot
             | BackendRequirement::RootRequired
             | BackendRequirement::TermuxHost => Some(self.authorization_generation),
             _ => None,
@@ -1036,6 +1039,20 @@ impl PolicyState {
                 Tri::No => self.select_shizuku(spec, target),
             },
             BackendRequirement::ShizukuRequired => self.select_shizuku(spec, target),
+            BackendRequirement::ShizukuOrRoot => match self.select_shizuku(spec, target) {
+                Ok(backend) => Ok(backend),
+                Err(_) if self.root_only_available() => Ok(Backend::Root),
+                Err(error) => {
+                    if self.shizuku.server_uid == ServerUid::Root0 || self.root.app_su.is_yes() {
+                        Err(PolicyError::new(
+                            "root-authorization-required",
+                            "no verified and independently authorized Root channel",
+                        ))
+                    } else {
+                        Err(error)
+                    }
+                }
+            },
             BackendRequirement::RootRequired if self.root_only_available() => Ok(Backend::Root),
             BackendRequirement::RootRequired => Err(PolicyError::new("root-authorization-required", "no verified and independently authorized Root channel")),
         }

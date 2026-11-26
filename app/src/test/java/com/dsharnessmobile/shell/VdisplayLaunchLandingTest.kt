@@ -95,4 +95,16 @@ class VdisplayLaunchLandingTest {
     )
     assertTrue(VdisplayController.displaysRunning("", onlyOnVirtual).isEmpty())
   }
+
+  @Test
+  fun transportSelectionKeepsShizukuIsolatedAndRoutesRootPlans() {
+    assertEquals("shizuku", VdisplayController.resolveTransport("shizuku", directSuReady = true, shizukuOk = true))
+    assertEquals("shizuku", VdisplayController.resolveTransport("shizuku", directSuReady = true, shizukuOk = false))
+    assertEquals("su", VdisplayController.resolveTransport("root", directSuReady = true, shizukuOk = true))
+    assertEquals("shizuku-root", VdisplayController.resolveTransport("root", directSuReady = false, shizukuOk = true))
+    assertEquals("shizuku", VdisplayController.resolveTransport(null, directSuReady = true, shizukuOk = true))
+    assertEquals("su", VdisplayController.resolveTransport(null, directSuReady = true, shizukuOk = false))
+    assertEquals("'com.example.app/.Main'", VdisplayController.shellQuote("com.example.app/.Main"))
+    assertEquals("'a'\\''b'", VdisplayController.shellQuote("a'b"))
+  }
 }

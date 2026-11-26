@@ -19,7 +19,7 @@ const catalog = [
   { name: 'snapshot', targetDomain: 'AndroidDisplay', backend: 'A11yPreferred', scope: 'ScreenContent', readsDisplay: true },
   { name: 'browserCaps', targetDomain: 'BrowserWorkspace', backend: 'BrowserHost', scope: 'NotScreenScoped', readsDisplay: false },
   { name: 'rootExec', targetDomain: 'PrivilegedShell', backend: 'RootRequired', scope: 'NotScreenScoped', readsDisplay: false },
-  { name: 'vdCreate', targetDomain: 'VirtualDisplay', backend: 'ShizukuRequired', scope: 'VirtualNamespace', readsDisplay: false },
+  { name: 'vdCreate', targetDomain: 'VirtualDisplay', backend: 'ShizukuOrRoot', scope: 'VirtualNamespace', readsDisplay: false },
 ]
 
 const base = {
@@ -27,7 +27,7 @@ const base = {
   phoneOps: ['snapshot', 'rootExec'],
   sharedBrowserOps: ['browserCaps'],
   kotlinImplements: ['snapshot', 'browserCaps', 'rootExec', 'vdCreate'],
-  backendCoverage: { A11yPreferred: true, BrowserHost: true, RootRequired: true, ShizukuRequired: true },
+  backendCoverage: { A11yPreferred: true, BrowserHost: true, RootRequired: true, ShizukuRequired: true, ShizukuOrRoot: true },
   privilegedOps: ['rootExec', 'shExec', 'termuxExec'],
   toolOperations: ['snapshot'],
   vdisplayOps: ['vdCreate'],

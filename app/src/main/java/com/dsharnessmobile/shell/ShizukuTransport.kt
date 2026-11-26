@@ -880,14 +880,24 @@ object ShizukuTransport {
   }
 
   /** Native-only fixed argv execution. Never pass user/model-controlled shell text here. */
-  fun runController(context: Context, argv: Array<String>, authorize: (() -> Boolean)? = null): JSONObject = RootExecutionFence.command(context) {
-    runControllerInternal(context, argv, authorize)
+  fun runController(
+    context: Context,
+    argv: Array<String>,
+    authorize: (() -> Boolean)? = null,
+    expectedUid: Int? = null,
+  ): JSONObject = RootExecutionFence.command(context) {
+    runControllerInternal(context, argv, authorize, expectedUid)
   }
 
-  private fun runControllerInternal(context: Context, argv: Array<String>, authorize: (() -> Boolean)? = null): JSONObject {
+  private fun runControllerInternal(
+    context: Context,
+    argv: Array<String>,
+    authorize: (() -> Boolean)? = null,
+    expectedUid: Int? = null,
+  ): JSONObject {
     val (remote, refusal) = readyService(context)
     if (remote == null) return (refusal ?: unavailableShell()).put("executed", "no")
-    val lease = RpcLease(context, "shizuku-controller")
+    val lease = RpcLease(context, "shizuku-controller", expectedUid = expectedUid)
     return try {
       lease.beforeRpc(remote)?.let { return it.put("executed", "no") }
       if (authorize != null && !authorize()) {
@@ -989,8 +999,14 @@ object ShizukuTransport {
    * 或 AIDL 的 argv 数组），**绝不把 command 拼进被包装的 shell 字符串里**——否则模型可用引号
    * 逃出包装、以包装者的身份执行（issue 已实测该逃逸）。
    */
-  fun runShell(context: Context, command: String, timeoutMs: Int = SHELL_TIMEOUT_MS, capture: Boolean = false): JSONObject = RootExecutionFence.command(context) {
-    runShellInternal(context, command, timeoutMs, capture)
+  fun runShell(
+    context: Context,
+    command: String,
+    timeoutMs: Int = SHELL_TIMEOUT_MS,
+    capture: Boolean = false,
+    expectedUid: Int? = null,
+  ): JSONObject = RootExecutionFence.command(context) {
+    runShellInternal(context, command, timeoutMs, capture, expectedUid = expectedUid)
   }
 
   internal fun runNativeDiagnostic(context: Context, command: String, expectedUid: Int, authorize: () -> Boolean): JSONObject =
