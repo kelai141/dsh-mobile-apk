@@ -241,7 +241,7 @@ AI 工具（dsh-android-phone-control）
    └─ 读 capabilities（epoch、scope、每屏 op；不读旧队列状态）
         ├─ a11y 在线 → 语义与点手势计划
         ├─ shizuku 就绪 → 固定 argv 的屏幕/按键/只读查询
-        ├─ root 独立授权 → rootExec（RootExecutionFence + RootMaintenanceLease）及虚拟屏 vd*（ShizukuOrRoot）
+        ├─ root 独立授权 → rootExec（RootExecutionFence + RootMaintenanceLease）、虚拟屏 vd* 及真实屏 launchApp / 全屏 keyEvent（ShizukuOrRoot）
         └─ termux 就绪 → termuxExec（应用 UID，NativeAppShell）
 ```
 

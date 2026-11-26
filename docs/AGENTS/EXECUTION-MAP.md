@@ -938,7 +938,7 @@ app/src/main/java/com/dsharnessmobile/shell/MainWebImeLayout.kt
 
 - **一句话**：模型或侧栏请求由 NativeVdisplayExecution 接收 Rust 计划，再调用 VdisplayController.executeAuthorized 建屏、销毁、输入或拉起应用；viewer Surface 仍由 VdisplayHost 与 VdisplayFloat 按仲裁交接。旧虚拟屏分发入口与控制队列已删除。
 - **入口/触发**：
-  - 模型：phone-control 的 vd 工具 → 原生 socket → Rust 计划 `backend=shizuku` 或独立授权 `backend=root`（`ShizukuOrRoot`）→ `NativeVdisplayExecution`；计划必须带 `virtual-N` 与已注册屏的 `generation`，创建与信息查询例外。
+  - 模型：phone-control 的 vd 工具 → 原生 socket → Rust 计划 `backend=shizuku` 或独立授权 `backend=root`（`ShizukuOrRoot`）→ `NativeVdisplayExecution`；计划必须带 `virtual-N` 与已注册屏的 `generation`，创建与信息查询例外。`launchApp`（display 0）与 `keyEvent`（真实屏 / 已注册虚拟屏）同样采用 `ShizukuOrRoot`，`backend=root` 由 `NativeShizukuExecution` 经 `VdisplayController` 直连 `su` / uid 0 通道执行。
   - 侧栏与设置页：`window.androidBridge.vdisplayStatus/vdisplayCreate/vdisplayDestroy/vdisplaySelect/vdisplayBounds/forceDestroyVdisplay...` 仍经 `MainActivity` 直调控制器。
   - Activity 生命周期与 reaper：`onStart` 回挂侧栏、`onStop` 交浮窗、`onDestroy` 拆除；每 2 分钟 `reclaimIdle` 回收空闲屏。
 - **运行顺序**：计划先把操作、别名与参数严格绑定；授权在调用控制器的 worker 内立即复查，拒绝或异常都不得伪装成已执行。建屏仍走 Shizuku 绑定与五 flag；呈现仍走两阶段 bounds 与 Surface 仲裁；输入与拉起使用固定 argv，而不是模型拼出的 shell。

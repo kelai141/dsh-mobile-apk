@@ -1133,6 +1133,105 @@ object VdisplayController {
     Log.i(TAG, "force-destroyed ${aliases.size} display(s) generation=$generation")
     status(context.applicationContext)
   }
+
+  /**
+   * 独立授权 Root 通道下的固定按键派发（`input -d <displayId> keyevent <code>`）。
+   * 仅接受 [com.dsharnessmobile.shell.nativecontrol.NativeShizukuMotion.keycodeFor] 的 11 个键名，
+   * 优先直连 su，不依赖 Shizuku。
+   */
+  internal fun keyEventViaRoot(
+    context: Context,
+    displayId: Int,
+    screenId: String,
+    key: String,
+    authorize: (() -> Boolean)? = null,
+  ): JSONObject {
+    val appContext = context.applicationContext
+    if (!RootGrant.isGranted(appContext)) {
+      return JSONObject().put("ok", false).put("code", "root-grant-required")
+        .put("executed", "no").put("screenId", screenId)
+    }
+    val validTarget = (displayId == Display.DEFAULT_DISPLAY && screenId == ScreenTargets.REAL) ||
+      (displayId > 0 && displayIdForAlias(screenId) == displayId)
+    if (!validTarget) {
+      return JSONObject().put("ok", false).put("code", "invalid-display")
+        .put("executed", "no").put("screenId", screenId)
+    }
+    val code = com.dsharnessmobile.shell.nativecontrol.NativeShizukuMotion.keycodeFor(key)
+      ?: return JSONObject().put("ok", false).put("code", "invalid-key")
+        .put("executed", "no").put("screenId", screenId)
+    val result = runPrivilegedArgv(
+      appContext,
+      arrayOf("/system/bin/input", "-d", displayId.toString(), "keyevent", code.toString()),
+      backend = "root",
+      authorize = authorize,
+    )
+    if (result.optString("executed") == "no") return result.put("screenId", screenId)
+    return if (result.optBoolean("ok") && result.optString("stdout", "").isBlank()) {
+      JSONObject().put("ok", true).put("code", "key-event-accepted").put("executed", "yes").put("screenId", screenId)
+    } else {
+      JSONObject().put("ok", false).put("code", "motion-unconfirmed").put("executed", "unknown").put("screenId", screenId)
+    }
+  }
+
+  /**
+   * 独立授权 Root 通道下的真实屏应用启动（display 0），优先直连 su，不依赖 Shizuku。
+   * 解析 launcher 组件 → `am start --display 0 -n <component>` → 回读 ActivityRecord 落点。
+   */
+  internal fun launchRealAppViaRoot(
+    context: Context,
+    pkg: String,
+    authorize: (() -> Boolean)? = null,
+  ): JSONObject {
+    val appContext = context.applicationContext
+    if (!RootGrant.isGranted(appContext)) {
+      return JSONObject().put("ok", false).put("code", "root-grant-required")
+        .put("executed", "no").put("screenId", ScreenTargets.REAL)
+    }
+    if (!com.dsharnessmobile.shell.nativecontrol.NativeShizukuMotion.validPackage(pkg)) {
+      return JSONObject().put("ok", false).put("code", "invalid-package")
+        .put("executed", "no").put("screenId", ScreenTargets.REAL)
+    }
+    val resolved = runPrivilegedArgv(
+      appContext,
+      arrayOf("/system/bin/cmd", "package", "resolve-activity", "--brief", "-c", "android.intent.category.LAUNCHER", pkg),
+      backend = "root",
+    )
+    val component = if (resolved.optBoolean("ok")) {
+      com.dsharnessmobile.shell.nativecontrol.NativeShizukuMotion.parseComponent(pkg, resolved.optString("stdout", ""))
+    } else null
+    if (component == null) {
+      return JSONObject().put("ok", false).put("code", "launch-unresolved")
+        .put("executed", "no").put("screenId", ScreenTargets.REAL)
+    }
+    val started = runPrivilegedArgv(
+      appContext,
+      arrayOf("/system/bin/am", "start", "--display", "0", "-n", component),
+      backend = "root",
+      authorize = authorize,
+    )
+    if (started.optString("executed") == "no") return started.put("screenId", ScreenTargets.REAL)
+    if (!started.optBoolean("ok") ||
+      com.dsharnessmobile.shell.nativecontrol.NativeShizukuMotion.reportsError(started.optString("stdout", ""))
+    ) {
+      return JSONObject().put("ok", false).put("code", "launch-unconfirmed")
+        .put("executed", "unknown").put("screenId", ScreenTargets.REAL)
+    }
+    val probe = runPrivilegedShell(appContext, ACTIVITY_DISPLAY_PROBE, 15_000, backend = "root")
+    if (!probe.optBoolean("ok")) {
+      return JSONObject().put("ok", false).put("code", "launch-readback-unavailable")
+        .put("executed", "unknown").put("screenId", ScreenTargets.REAL)
+    }
+    val landed = displaysRunning(pkg, probe.optString("stdout", ""))
+    return when {
+      landed.contains(Display.DEFAULT_DISPLAY) -> JSONObject().put("ok", true).put("code", "launch-confirmed")
+        .put("executed", "yes").put("screenId", ScreenTargets.REAL)
+      landed.isNotEmpty() -> JSONObject().put("ok", false).put("code", "launch-wrong-display")
+        .put("executed", "unknown").put("screenId", ScreenTargets.REAL)
+      else -> JSONObject().put("ok", false).put("code", "launch-unverified")
+        .put("executed", "unknown").put("screenId", ScreenTargets.REAL)
+    }
+  }
 }
 
 /** 虚拟屏分辨率档位（0.5 / 0.75 / 1.0，默认 0.75；densityDpi 同比例缩放）与退后台浮窗开关。

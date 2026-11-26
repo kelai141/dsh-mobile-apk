@@ -335,6 +335,45 @@ fn virtual_tools_advertise_and_plan_with_root_shizuku_and_revoke_on_consent_loss
 }
 
 #[test]
+fn su_only_root_advertises_and_plans_launch_app_and_key_event_without_shizuku() {
+    let mut core = controller();
+    let mut input = facts("all", 0, "no");
+    input["facts"]["screens"]["real"] = json!({"displayId":0,"width":1080,"height":2400,"rotation":0});
+    input["facts"]["shizuku"] = json!({
+        "installed":"no","running":"no","granted":"no","bound":"no","functionalReady":"no",
+        "serverUid":{"kind":"unknown"},
+        "supportedOps":{"state":"unknown"},
+        "displaySupport":{"state":"unknown"}
+    });
+    input["facts"]["root"] = json!({"authorization":"yes","consentValid":"yes","appSu":"yes"});
+    assert_eq!(call(&mut core, input.clone())["ok"], true);
+
+    let caps = call(&mut core, json!({"protocolVersion":1,"kind":"capabilities"}));
+    let ops = caps["operations"].as_array().unwrap();
+    for op in ["launchApp", "keyEvent", "vdCreate", "vdDestroy", "vdLaunchApp", "vdInfo"] {
+        assert!(ops.contains(&json!(op)), "missing {op} in {caps}");
+    }
+
+    let launch_real = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","epoch":"900",
+        "callId":"su-launch-real","screenId":"real","operation":"launchApp",
+        "args":{"pkg":"com.android.settings"}}));
+    assert_eq!(launch_real["code"], "prepared", "{launch_real}");
+    assert_eq!(launch_real["plan"]["backend"], "root", "{launch_real}");
+
+    let key_virtual = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","epoch":"900",
+        "callId":"su-key-virtual","screenId":"virtual-1","operation":"keyEvent",
+        "args":{"key":"enter"}}));
+    assert_eq!(key_virtual["code"], "prepared", "{key_virtual}");
+    assert_eq!(key_virtual["plan"]["backend"], "root", "{key_virtual}");
+
+    let launch_virtual = call(&mut core, json!({"protocolVersion":1,"kind":"prepare","epoch":"900",
+        "callId":"su-launch-virtual","screenId":"virtual-1","operation":"launchApp",
+        "args":{"pkg":"com.android.settings"}}));
+    assert_eq!(launch_virtual["ok"], false, "{launch_virtual}");
+    assert_eq!(launch_virtual["code"], "target-unsupported", "{launch_virtual}");
+}
+
+#[test]
 fn focused_unicode_text_uses_the_observed_native_channel_without_an_ime() {
     let mut core = controller();
     let mut input = facts("real-only", 0, "no");

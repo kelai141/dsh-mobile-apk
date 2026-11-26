@@ -387,14 +387,14 @@ const fn spec(
 
 /// 原生 op 语义单源目录。这里只描述原生语义与后端要求，不定义模型工具 schema。
 pub static OPERATIONS: &[OperationSpec] = &[
-    spec("launchApp", TargetDomain::AndroidDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::ScreenContent, false),
+    spec("launchApp", TargetDomain::AndroidDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::ScreenContent, false),
     spec("snapshot", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("click", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("longClick", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("setText", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("scroll", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("swipe", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
-    spec("keyEvent", TargetDomain::AndroidDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::ScreenContent, false),
+    spec("keyEvent", TargetDomain::AndroidDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::ScreenContent, false),
     spec("global", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("screenshot", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("nodeText", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
@@ -1039,20 +1039,30 @@ impl PolicyState {
                 Tri::No => self.select_shizuku(spec, target),
             },
             BackendRequirement::ShizukuRequired => self.select_shizuku(spec, target),
-            BackendRequirement::ShizukuOrRoot => match self.select_shizuku(spec, target) {
-                Ok(backend) => Ok(backend),
-                Err(_) if self.root_only_available() => Ok(Backend::Root),
-                Err(error) => {
-                    if self.shizuku.server_uid == ServerUid::Root0 || self.root.app_su.is_yes() {
-                        Err(PolicyError::new(
-                            "root-authorization-required",
-                            "no verified and independently authorized Root channel",
-                        ))
-                    } else {
-                        Err(error)
+            BackendRequirement::ShizukuOrRoot => {
+                if spec.name == "launchApp"
+                    && target.screen().is_some_and(|screen| screen.display_id != REAL_DISPLAY_ID)
+                {
+                    return Err(PolicyError::new(
+                        "target-unsupported",
+                        "launchApp only targets the real display; use vdLaunchApp for virtual displays",
+                    ));
+                }
+                match self.select_shizuku(spec, target) {
+                    Ok(backend) => Ok(backend),
+                    Err(_) if self.root_only_available() => Ok(Backend::Root),
+                    Err(error) => {
+                        if self.shizuku.server_uid == ServerUid::Root0 || self.root.app_su.is_yes() {
+                            Err(PolicyError::new(
+                                "root-authorization-required",
+                                "no verified and independently authorized Root channel",
+                            ))
+                        } else {
+                            Err(error)
+                        }
                     }
                 }
-            },
+            }
             BackendRequirement::RootRequired if self.root_only_available() => Ok(Backend::Root),
             BackendRequirement::RootRequired => Err(PolicyError::new("root-authorization-required", "no verified and independently authorized Root channel")),
         }

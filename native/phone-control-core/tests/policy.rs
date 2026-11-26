@@ -651,3 +651,44 @@ fn virtual_display_ops_allow_authorized_root_under_root_shizuku_or_su() {
         Backend::Shizuku
     );
 }
+
+#[test]
+fn launch_app_and_key_event_support_root_without_shizuku_and_keep_display_bounds() {
+    let mut su_only = PolicyState::new(10);
+    su_only.set_scope(Scope::All);
+    real_screen(&mut su_only);
+    virtual_screen(&mut su_only, "virtual-1", 12);
+
+    // Without independent root grant, app_su alone must be rejected.
+    su_only.set_root_facts(RootFacts { authorization: Tri::No, consent_valid: Tri::No, app_su: Tri::Yes });
+    assert_eq!(su_only.plan("launchApp", TargetRequest::Real).unwrap_err().code(), "root-authorization-required");
+    assert_eq!(su_only.plan("keyEvent", TargetRequest::Real).unwrap_err().code(), "root-authorization-required");
+    assert_eq!(
+        su_only.plan("keyEvent", TargetRequest::Virtual("virtual-1".into())).unwrap_err().code(),
+        "root-authorization-required"
+    );
+
+    // With independent root grant + direct su (no Shizuku), real launchApp and real/virtual keyEvent use Root.
+    su_only.set_root_facts(RootFacts { authorization: Tri::Yes, consent_valid: Tri::Yes, app_su: Tri::Yes });
+    assert_eq!(su_only.plan("launchApp", TargetRequest::Real).unwrap().backend, Backend::Root);
+    assert_eq!(su_only.plan("keyEvent", TargetRequest::Real).unwrap().backend, Backend::Root);
+    assert_eq!(
+        su_only.plan("keyEvent", TargetRequest::Virtual("virtual-1".into())).unwrap().backend,
+        Backend::Root
+    );
+
+    // launchApp remains real-display only; virtual displays must use vdLaunchApp.
+    assert_eq!(
+        su_only.plan("launchApp", TargetRequest::Virtual("virtual-1".into())).unwrap_err().code(),
+        "target-unsupported"
+    );
+
+    // Least privilege: prefer Shizuku uid 2000 when both are available.
+    su_only.set_shizuku_facts(shizuku_ready(ServerUid::Shell2000, &["launchApp", "keyEvent"], &[(0, true), (12, true)]));
+    assert_eq!(su_only.plan("launchApp", TargetRequest::Real).unwrap().backend, Backend::Shizuku);
+    assert_eq!(su_only.plan("keyEvent", TargetRequest::Real).unwrap().backend, Backend::Shizuku);
+    assert_eq!(
+        su_only.plan("keyEvent", TargetRequest::Virtual("virtual-1".into())).unwrap().backend,
+        Backend::Shizuku
+    );
+}
