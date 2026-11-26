@@ -1,6 +1,7 @@
 package com.dsharnessmobile.shell
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -106,5 +107,15 @@ class VdisplayLaunchLandingTest {
     assertEquals("su", VdisplayController.resolveTransport(null, directSuReady = true, shizukuOk = false))
     assertEquals("'com.example.app/.Main'", VdisplayController.shellQuote("com.example.app/.Main"))
     assertEquals("'a'\\''b'", VdisplayController.shellQuote("a'b"))
+  }
+
+  @Test fun overlayDisplaySettingDetectionDistinguishesActiveFromClearedValues() {
+    assertFalse(VdisplayController.isOverlayDisplaySettingActive(null))
+    assertFalse(VdisplayController.isOverlayDisplaySettingActive(""))
+    assertFalse(VdisplayController.isOverlayDisplaySettingActive("   "))
+    assertFalse(VdisplayController.isOverlayDisplaySettingActive("null"))
+    assertFalse(VdisplayController.isOverlayDisplaySettingActive("None"))
+    assertTrue(VdisplayController.isOverlayDisplaySettingActive("720x1600/240"))
+    assertTrue(VdisplayController.isOverlayDisplaySettingActive("1280x720/213;1920x1080/320"))
   }
 }

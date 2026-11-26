@@ -1115,23 +1115,91 @@ object VdisplayController {
     return VdisplayLetterbox.chooseLiveOrSnapshot(live?.first, live?.second, record.width, record.height)
   }
 
-  /** 设置页「强制销毁」：无视会话归属销毁全部虚拟屏（用户三连点确认后调用）。 */
-  fun forceDestroy(context: Context): JSONObject = synchronized(lock) {
-    val aliases = records.keys.toList()
-    for (alias in aliases) {
-      val record = records.remove(alias) ?: continue
-      runCatching { record.display.release() }
-      runCatching { record.reader.close() }
-      runCatching { record.thread.quitSafely() }
-      record.viewerId?.let { viewerBounds.remove(it) }
+  /** 设置页「强制销毁」：无视会话归属销毁全部虚拟屏，并清理系统叠加显示设备（overlay_display_devices）。 */
+  fun forceDestroy(context: Context): JSONObject {
+    val appContext = context.applicationContext
+    val destroyedCount = synchronized(lock) {
+      val aliases = records.keys.toList()
+      for (alias in aliases) {
+        val record = records.remove(alias) ?: continue
+        runCatching { record.display.surface = null }
+        runCatching { record.display.release() }
+        runCatching { record.reader.close() }
+        runCatching { record.thread.quitSafely() }
+        record.viewerId?.let { viewerBounds.remove(it) }
+      }
+      selectedAlias = null
+      ownerSessionId = null
+      generation += 1
+      lastCode = "vdisplay-destroyed"
+      lastGuidance = "已强制销毁全部虚拟屏（无归属限制）。"
+      Log.i(TAG, "force-destroyed ${aliases.size} display(s) generation=$generation")
+      aliases.size
     }
-    selectedAlias = null
-    ownerSessionId = null
-    generation += 1
-    lastCode = "vdisplay-destroyed"
-    lastGuidance = "已强制销毁全部虚拟屏（无归属限制）。"
-    Log.i(TAG, "force-destroyed ${aliases.size} display(s) generation=$generation")
-    status(context.applicationContext)
+    val overlay = clearSystemOverlayDisplays(appContext)
+    val out = status(appContext)
+      .put("destroyedCount", destroyedCount)
+      .put("overlayCleared", overlay.cleared)
+    if (overlay.remained) {
+      return out.put("ok", false)
+        .put("code", "overlay-display-clear-failed")
+        .put(
+          "guidance",
+          UiText.t(
+            appContext,
+            "已清理应用内虚拟屏，但系统「模拟辅助显示设备」（overlay_display_devices）仍在运行且当前无特权通道可关闭；请在系统「开发者选项 → 模拟辅助显示设备」选「无」，或授权 Root / Shizuku 后重试。",
+            "App virtual displays were destroyed, but Android's developer overlay display (overlay_display_devices) is still active and could not be cleared without root or Shizuku. Set Developer options > Simulate secondary displays to None, or grant root/Shizuku and retry.",
+          ),
+        )
+    }
+    return out.put("ok", true)
+      .put("code", "vdisplay-destroyed")
+      .put(
+        "guidance",
+        if (overlay.cleared) {
+          UiText.t(appContext, "已强制销毁全部虚拟屏（含系统叠加显示设备）。", "All virtual displays (including system overlay displays) were destroyed.")
+        } else {
+          lastGuidance
+        },
+      )
+  }
+
+  internal data class OverlayClearResult(val hadOverlay: Boolean, val cleared: Boolean, val remained: Boolean)
+
+  /** 判断 `settings global overlay_display_devices` 是否处于激活态（非空且非 null/none）。 */
+  internal fun isOverlayDisplaySettingActive(raw: String?): Boolean {
+    val trimmed = raw?.trim().orEmpty()
+    return trimmed.isNotEmpty() &&
+      !trimmed.equals("null", ignoreCase = true) &&
+      !trimmed.equals("none", ignoreCase = true)
+  }
+
+  /** 若存在系统叠加虚拟屏（如 `叠加视图 #1`），在用户触发强制销毁时通过可用特权通道一并关闭。 */
+  private fun clearSystemOverlayDisplays(appContext: Context): OverlayClearResult {
+    val before = runCatching {
+      android.provider.Settings.Global.getString(appContext.contentResolver, "overlay_display_devices")
+    }.getOrNull()
+    if (!isOverlayDisplaySettingActive(before)) {
+      return OverlayClearResult(hadOverlay = false, cleared = false, remained = false)
+    }
+    val attempted = when {
+      RootAccess.isGranted(appContext) && RootAccess.suPath() != null -> {
+        RootAccess.execRoot(appContext, SHELL_PATH_PREFIX + "/system/bin/settings delete global overlay_display_devices", 8_000)
+        true
+      }
+      ShizukuTransport.status(appContext).optBoolean("ok") -> {
+        ShizukuTransport.runController(appContext, arrayOf("/system/bin/settings", "delete", "global", "overlay_display_devices"))
+        true
+      }
+      else -> false
+    }
+    val after = runCatching {
+      android.provider.Settings.Global.getString(appContext.contentResolver, "overlay_display_devices")
+    }.getOrNull()
+    val cleared = attempted && !isOverlayDisplaySettingActive(after)
+    if (cleared) Log.i(TAG, "cleared system overlay_display_devices (was=$before)")
+    else Log.w(TAG, "system overlay_display_devices remained active (before=$before after=$after attempted=$attempted)")
+    return OverlayClearResult(hadOverlay = true, cleared = cleared, remained = isOverlayDisplaySettingActive(after))
   }
 
   /**
