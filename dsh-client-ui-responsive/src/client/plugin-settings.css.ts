@@ -81,13 +81,19 @@ ${WEB_SEARCH} > [class*="_detailMain"] > :is([class*="_detailDesc"], [class*="_d
 ${WEB_SEARCH} > [class*="_detailSections"] {
   margin-block-start: 20px;
 }
-body > [role="menu"][data-anchor-side][data-dsh-plugin-select-menu] {
-  inset: var(--dsh-select-top) auto var(--dsh-select-bottom) var(--dsh-select-left);
-  width: var(--dsh-select-width);
-  min-width: 0;
-  max-width: var(--dsh-select-width);
-  max-height: var(--dsh-select-height);
-  align-self: auto;
-  justify-self: auto;
+@supports not (top: anchor(bottom)) {
+  body > [role="menu"][data-anchor-side][data-dsh-plugin-select-menu] {
+    inset: var(--dsh-select-top) auto var(--dsh-select-bottom) var(--dsh-select-left);
+    width: var(--dsh-select-width);
+    min-width: 0;
+    max-width: var(--dsh-select-width);
+    max-height: var(--dsh-select-height);
+    align-self: auto;
+    justify-self: auto;
+  }
+}
+body[data-ds-dark-theme] > [role="menu"][data-dsh-plugin-select-menu][data-match-anchor-width][data-menu-material="translucent"] > :first-child[aria-hidden="true"] {
+  background-color: #303136;
+  backdrop-filter: none;
 }
 `

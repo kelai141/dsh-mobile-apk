@@ -9,14 +9,15 @@ const MENU_MARKER = 'data-dsh-plugin-select-menu'
 const GAP = 4
 const MARGIN = 12
 
-// The upstream menu is portaled to body. A scoped fallback keeps its focus,
-// selection and dismissal behavior intact on WebViews without CSS anchors.
+// Mark the body portal for scoped styling and supply geometry only when
+// the WebView lacks CSS anchors.
 export function installPluginMenuPosition(): () => void {
-  if (globalThis.CSS?.supports?.('top', 'anchor(bottom)')) return () => {}
+  const needsAnchorFallback = !globalThis.CSS?.supports?.('top', 'anchor(bottom)')
 
   let releaseActive: (() => void) | undefined
   const mount = (trigger: HTMLElement): void => {
     const isAddMenu = trigger.matches(ADD_TRIGGER)
+    if (isAddMenu && !needsAnchorFallback) return
     const group = isAddMenu ? trigger.closest('[role="group"]') : null
     const portalSelector = ':scope > ' + (isAddMenu ? ADD_MENU : SELECT_MENU)
     releaseActive?.()
@@ -41,12 +42,14 @@ export function installPluginMenuPosition(): () => void {
           .filter(candidate => !existing.has(candidate))
         if (candidates.length !== 1) return
         menu = candidates[0]
+        menu.setAttribute(MENU_MARKER, '')
         window.clearTimeout(timeout)
       } else if (!menu.isConnected) {
         cleanup()
         return
       }
 
+      if (!needsAnchorFallback) return
       const bounds = visibleViewport()
       if (bounds === null) return
       const anchor = (group ?? trigger).getBoundingClientRect()
@@ -64,7 +67,6 @@ export function installPluginMenuPosition(): () => void {
       const width = Math.max(1, Math.min(isAddMenu ? ADD_MENU_WIDTH : anchor.width, safeRight - safeLeft))
       const preferredLeft = isAddMenu ? anchor.right - width : anchor.left
       const left = Math.max(safeLeft, Math.min(preferredLeft, safeRight - width))
-      menu.setAttribute(MENU_MARKER, '')
       menu.style.setProperty('--dsh-select-left', left + 'px')
       menu.style.setProperty('--dsh-select-width', width + 'px')
       menu.style.setProperty('--dsh-select-top', openDown ? startBelow + 'px' : 'auto')
@@ -98,10 +100,12 @@ export function installPluginMenuPosition(): () => void {
     releaseActive = cleanup
     observer.observe(trigger, { attributes: true, attributeFilter: ['aria-expanded'] })
     observer.observe(document.body, { childList: true })
-    window.addEventListener('scroll', queue, true)
-    window.addEventListener('resize', queue)
-    viewport?.addEventListener('scroll', queue)
-    viewport?.addEventListener('resize', queue)
+    if (needsAnchorFallback) {
+      window.addEventListener('scroll', queue, true)
+      window.addEventListener('resize', queue)
+      viewport?.addEventListener('scroll', queue)
+      viewport?.addEventListener('resize', queue)
+    }
     timeout = window.setTimeout(cleanup, 1000)
     queue()
   }

@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { installPluginMenuPosition } from '../src/client/plugin-menu-position.ts'
+import { PLUGIN_SETTINGS_CSS } from '../src/client/plugin-settings.css.ts'
 
 function rect(left: number, top: number, width: number, height: number): DOMRect {
   return { left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }
@@ -85,10 +86,50 @@ describe('Android plugin select positioning', () => {
     expect(menu.style.getPropertyValue('--dsh-select-top')).toBe('84px')
   })
 
-  it('leaves browsers with native CSS anchors alone', async () => {
+  it('marks the select material without writing fallback geometry when CSS anchors are supported', async () => {
     vi.stubGlobal('CSS', { supports: () => true })
     dispose = installPluginMenuPosition()
     await open()
+    expect(menu.hasAttribute('data-dsh-plugin-select-menu')).toBe(true)
+    expect(menu.style.length).toBe(0)
+
+    dispose()
     expect(menu.hasAttribute('data-dsh-plugin-select-menu')).toBe(false)
+  })
+})
+
+describe('Android plugin select material', () => {
+  it('uses solid charcoal only on the background of a dark plugin select menu', () => {
+    const rule = /^(body\[data-ds-dark-theme\][^{]+)\{([^}]+)\}/m.exec(PLUGIN_SETTINGS_CSS)
+    expect(rule).not.toBeNull()
+    const [, selector, declarations] = rule!
+    expect(declarations).toContain('background-color: #303136')
+    expect(declarations).toContain('backdrop-filter: none')
+
+    const menu = document.createElement('div')
+    menu.setAttribute('role', 'menu')
+    menu.setAttribute('data-menu-material', 'translucent')
+    menu.setAttribute('data-match-anchor-width', '')
+    menu.innerHTML = '<div aria-hidden="true"></div><button role="menuitem">Automatic</button>'
+    const [background, option] = menu.children
+    document.body.append(menu)
+    try {
+      document.body.setAttribute('data-ds-dark-theme', '')
+      expect(background.matches(selector)).toBe(false)
+
+      menu.setAttribute('data-dsh-plugin-select-menu', '')
+      expect(background.matches(selector)).toBe(true)
+      expect(option.matches(selector)).toBe(false)
+
+      document.body.removeAttribute('data-ds-dark-theme')
+      expect(background.matches(selector)).toBe(false)
+
+      document.body.setAttribute('data-ds-dark-theme', '')
+      menu.removeAttribute('data-match-anchor-width')
+      expect(background.matches(selector)).toBe(false)
+    } finally {
+      document.body.removeAttribute('data-ds-dark-theme')
+      menu.remove()
+    }
   })
 })

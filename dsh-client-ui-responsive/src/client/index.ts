@@ -1064,7 +1064,7 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => injectStyle('hidden-bundles', HIDDEN_BUNDLES_CSS), 'ui-responsive: hide Android-unusable plugin bundles')
 
   ctx.effect(() => injectStyle('plugin-settings', PLUGIN_SETTINGS_CSS), 'ui-responsive: plugin settings layout')
-  ctx.effect(installPluginMenuPosition, 'ui-responsive: plugin menu anchor fallback')
+  ctx.effect(installPluginMenuPosition, 'ui-responsive: plugin menu styling and anchor fallback')
 
   // ── Bridges ─────────────────────────────────────────────────────────────
 
