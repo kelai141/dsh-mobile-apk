@@ -481,14 +481,25 @@ export const DEV_SECTION_CSS: string = `
 }
 
 /* 0.14.1 块J FIX-4：通知设置块（前台抑制 + 五类分类开关）。 */
-.dsh-dev-notify {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid var(--dsw-alias-border-l3);
-  border-radius: 12px;
-  background: var(--dsw-alias-bg-layer-2);
+.dsh-notify-group > h3 {
+  margin: 18px 0 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.dsh-notify-diagnostics > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.dsh-notify-diagnostics > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dsh-notify-diagnostics[open] > summary > svg {
+  transform: rotate(90deg);
 }
 
 /* #43 深色兜底（2026-08-18 首修 / 2026-09-25 二次修）。
@@ -522,15 +533,90 @@ body[data-ds-dark-theme] .dsh-dev-error {
   }
 }
 
-/* 通知自检面（批 4）：每渠道一行「系统实际状态 + 直达系统设置」——此前这条信息零调用点。 */
+/* Keep the result heading and its controls together as the column narrows. */
 .dsh-dev-notify-check {
   display: grid;
+  gap: 12px;
+  padding-block: 12px 4px;
+}
+
+.dsh-notify-check-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.dsh-notify-check-copy {
+  flex: 1 1 112px;
+}
+
+.dsh-notify-check-copy h4 {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.dsh-notify-check-copy > p {
+  margin-block-start: 2px;
+}
+
+.dsh-notify-check-actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: 4px;
-  margin-top: 8px;
+  max-width: 100%;
+}
+
+.dsh-notify-check-actions > button {
+  min-height: 40px;
+}
+
+.dsh-notify-channels {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dsh-notify-channels li + li {
+  border-block-start: 0.5px solid var(--dsw-alias-border-l2);
 }
 
 .dsh-dev-check-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 14px;
   align-items: center;
   gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 14px;
+  text-align: start;
+}
+
+button.dsh-dev-check-row {
+  cursor: pointer;
+}
+
+button.dsh-dev-check-row:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, currentColor);
+  outline-offset: -2px;
+}
+
+.dsh-dev-check-row > svg,
+.dsh-notify-channel-status {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsh-notify-channel-status {
+  font-size: 12px;
+  text-align: end;
 }
 `

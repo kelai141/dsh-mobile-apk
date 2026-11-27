@@ -204,7 +204,7 @@ tier-2（`isolationTier=process-suffix`）把浏览器视图放在 `:browser` �
 | 页面 → 壳 | `notifySelfCheck()` | AndroidBridge（默认实现读 `ShellAppContext`）→ `NotifyCenter.selfCheck` | 每渠道**系统实际状态**（enabled/importance/是否被降级）JSON。默认实现钉在真源上、不依赖 MainActivity 传参（漏接线这一失效形态从结构上消失） |
 | 页面 → 壳 | `openNotifyAppSettings()` | AndroidBridge → MainActivity → `NotifyCenter.appSettingsIntent` | 系统「本应用通知设置」深链；返回 boolean，false = 该 ROM 无此页（页面如实提示，不假装拉起过） |
 | 页面 → 壳 | `openNotifyChannelSettings(channelId)` | AndroidBridge → MainActivity → `NotifyCenter.channelSettingsIntent` | 渠道级深链；channelId 来自 `notifySelfCheck` 回执 |
-| 同上（页面消费） | — | `src/client/dev-section/notify-settings.tsx` | 「通知自检」+「系统通知设置」两枚入口 + 每渠道一行「系统实际状态 + 打开该渠道设置」；五类开关各配一句「关掉会怎样」（提问/授权两类写明「关闭 = 不弹窗，仍可作答」） |
+| Page → shell | `getNotifySetting("")` | `NotifyCenter.settingsSnapshot` → `notify-settings.tsx` | The snapshot includes `notificationsEnabled` and `permissionGranted`. The settings page reads both on entry and foreground return. Older shells lacking either field show an unavailable status unless a returned flag explicitly denies notifications. Channel diagnostics remain behind the troubleshooting section. |
 | 壳侧语义变更 | — | `NotifyCenter.Face.interactive` | 交互类（question/approval）类别关闭 ⇒ **降级为静默渠道**（不弹窗不响铃、仍投递、仍可作答），不再 `return DISABLED`；非交互类（report/todo/silent）才允许丢弃 |
 | 壳侧载荷修正 | `dsh.notify.*` extras | `NotifyCenter.EXTRA_KIND / EXTRA_TARGET_SESSION / EXTRA_TARGET_AGENT` | 旧实现把 `sessionId` 与 `agentId` **依次写进同一个 key**（后写覆盖先写）。现按键语义拆开，读取者 = `MainActivity.consumeNotifyRoute` / `onNewIntent` |
 

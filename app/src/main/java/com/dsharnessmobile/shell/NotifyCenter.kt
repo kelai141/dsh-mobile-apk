@@ -306,6 +306,9 @@ object NotifyCenter {
     out.put("ok", true)
     out.put("suppressForeground", suppressForeground(app))
     out.put("suppressForegroundDefault", DEFAULT_SUPPRESS_FOREGROUND)
+    val manager = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    out.put("notificationsEnabled", manager.areNotificationsEnabled())
+    out.put("permissionGranted", hasPermission(app))
     val cats = JSONObject()
     for (face in Face.values()) cats.put(face.category, enabled(app, face.category))
     out.put("categories", cats)
