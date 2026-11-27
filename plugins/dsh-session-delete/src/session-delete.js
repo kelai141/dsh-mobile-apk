@@ -20,7 +20,7 @@
 import { lstatSync } from 'node:fs'
 import { lstat, mkdir, open, readdir, readFile, rename, rm, stat, unlink } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { zstdDecompressSync } from 'node:zlib'
+import { createZstdDecompress } from 'node:zlib'
 
 /** Session ids are the storage unit name; anything else is a path-injection attempt. */
 export const SESSION_ID_PATTERN = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -260,6 +260,105 @@ async function deleteResolvedSessionDir({ sessionId, dir, log, removeDir, afterR
 }
 
 /**
+ * 一次遍历 `<home>/sessions`：工作区会话、`.corrupt` 条目与删除残留一起读完。
+ *
+ * 启动阶段以前对同一棵树跑三遍（墓地清扫、隔离件清点、孤立投影核对），每遍都重读
+ * `sessions/` 与每个工作区的 `.corrupt/`。这里把「读到什么」与「拿它做什么」拆开：
+ * 每个消费者只拿这份快照，单轮只枚举一次目录。
+ *
+ * 快照同时服务于三类判据：可清理的墓地、可清点的隔离件、投影缓存必须保留的
+ * 会话 id（正常目录 / 隔离副本 / 墓地）。取消探针在每个目录边界检查；被取消的
+ * 快照 `cancelled: true`，调用方不得拿它执行删除。
+ *
+ * @param {string} home - 绝对 `DSH_HOME`。
+ * @param {{ shouldStop?: () => boolean }} [options] - 取消探针。
+ * @returns {Promise<{
+ *   cancelled: boolean,
+ *   incomplete: boolean,
+ *   problems: string[],
+ *   quarantineEntries: string[],
+ *   graveyardTargets: string[],
+ *   liveDirsById: Map<string, string>,
+ *   protectedIds: Set<string>,
+ * }>} 扫描快照。
+ */
+async function scanStoredStorage(home, options = {}) {
+  const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false
+  const snapshot = {
+    cancelled: false,
+    incomplete: false,
+    problems: [],
+    quarantineEntries: [],
+    graveyardTargets: [],
+    liveDirsById: new Map(),
+    protectedIds: new Set(),
+  }
+  if (typeof home !== 'string' || home === '') return snapshot
+  const root = sessionsRoot(home)
+  let workspaces
+  try {
+    workspaces = await readdir(root, { withFileTypes: true })
+  } catch (error) {
+    // 没有 sessions/ 是正常初态（投影核对据此把缓存全判为孤儿）；其它错误一律 fail-closed。
+    if (error?.code !== 'ENOENT') {
+      snapshot.incomplete = true
+      snapshot.problems.push('sessions root unreadable: ' + root + ' (' + String(error?.message ?? error) + ')')
+    }
+    return snapshot
+  }
+  for (const workspace of workspaces) {
+    if (shouldStop()) { snapshot.cancelled = true; return snapshot }
+    if (!workspace.isDirectory()) continue
+    const workspaceDir = join(root, workspace.name)
+    let entries
+    try {
+      entries = await readdir(workspaceDir, { withFileTypes: true })
+    } catch (error) {
+      // 工作区读不动：墓地清扫/清点跳过它；投影核对必须中止，否则会漏掉受保护的副本。
+      snapshot.incomplete = true
+      snapshot.problems.push('workspace unreadable: ' + workspaceDir + ' (' + String(error?.message ?? error) + ')')
+      continue
+    }
+    for (const entry of entries) {
+      if (shouldStop()) { snapshot.cancelled = true; return snapshot }
+      if (!entry.isDirectory()) continue
+      if (entry.name === QUARANTINE_DIR) {
+        const trash = join(workspaceDir, QUARANTINE_DIR)
+        let quarantined
+        try {
+          quarantined = await readdir(trash, { withFileTypes: true })
+        } catch (error) {
+          // 与旧核对一致：隔离区读不动就不能断言「缓存是孤儿」。
+          snapshot.incomplete = true
+          snapshot.problems.push('quarantine dir unreadable: ' + trash + ' (' + String(error?.message ?? error) + ')')
+          continue
+        }
+        for (const candidate of quarantined) {
+          const dot = candidate.name.indexOf('.')
+          const id = dot > 0 ? candidate.name.slice(0, dot) : candidate.name
+          // 保护判据覆盖**所有**条目（链接/文件也算）：宁可多留一份缓存，也不误删可恢复数据。
+          if (SESSION_ID_PATTERN.test(id)) snapshot.protectedIds.add(id)
+          if (!candidate.isDirectory()) continue
+          const target = join(trash, candidate.name)
+          snapshot.quarantineEntries.push(target)
+          // 只有「明确删除留下的」隔离墓地参与清扫；可恢复隔离件永不过期（issue #1587）。
+          if (QUARANTINED_GRAVEYARD_PATTERN.test(candidate.name)) snapshot.graveyardTargets.push(target)
+        }
+        continue
+      }
+      if (GRAVEYARD_PATTERN.test(entry.name)) {
+        const dot = entry.name.indexOf('.deleting-')
+        const id = dot > 0 ? entry.name.slice(0, dot) : ''
+        if (SESSION_ID_PATTERN.test(id)) snapshot.protectedIds.add(id)
+      }
+      if (entry.name.includes('.deleting-')) snapshot.graveyardTargets.push(join(workspaceDir, entry.name))
+      if (SESSION_ID_PATTERN.test(entry.name)) snapshot.liveDirsById.set(entry.name, join(workspaceDir, entry.name))
+    }
+  }
+  return snapshot
+}
+
+/**
  * Sweep graveyard directories left behind by failed deletions.
  *
  * `deleteStoredSession` renames the session directory to
@@ -277,45 +376,13 @@ async function deleteResolvedSessionDir({ sessionId, dir, log, removeDir, afterR
 export async function sweepGraveyards(home) {
   const removed = []
   if (typeof home !== 'string' || home === '') return removed
-  const root = sessionsRoot(home)
-  let workspaces
-  try {
-    workspaces = await readdir(root, { withFileTypes: true })
-  } catch {
-    return removed // no sessions directory yet: nothing to sweep
-  }
-  for (const workspace of workspaces) {
-    if (!workspace.isDirectory()) continue
-    let entries
+  const snapshot = await scanStoredStorage(home)
+  for (const target of snapshot.graveyardTargets) {
     try {
-      entries = await readdir(join(root, workspace.name), { withFileTypes: true })
+      await rm(target, { recursive: true, force: true })
+      removed.push(target)
     } catch {
-      continue
-    }
-    // 隔离件本身不自动过期（可恢复承诺）；只扫用户已明确删除留下的 graveyard。
-    const quarantine = entries.find((entry) => entry.name === QUARANTINE_DIR && entry.isDirectory())
-    if (quarantine) {
-      try {
-        const trash = join(root, workspace.name, QUARANTINE_DIR)
-        for (const entry of await readdir(trash, { withFileTypes: true })) {
-          if (!entry.isDirectory() || !QUARANTINED_GRAVEYARD_PATTERN.test(entry.name)) continue
-          const target = join(trash, entry.name)
-          try {
-            await rm(target, { recursive: true, force: true })
-            removed.push(target)
-          } catch { /* retry on the next startup */ }
-        }
-      } catch { /* best effort, as with the workspace sweep */ }
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory() || !entry.name.includes('.deleting-')) continue
-      const target = join(root, workspace.name, entry.name)
-      try {
-        await rm(target, { recursive: true, force: true })
-        removed.push(target)
-      } catch {
-        /* busy or unreadable: leave it for the next sweep */
-      }
+      /* busy or unreadable: leave it for the next sweep */
     }
   }
   return removed
@@ -331,7 +398,7 @@ const QUARANTINED_GRAVEYARD_PATTERN = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]
  * 隔离件可以无限累积：每份是一整个会话目录，而被隔离的会话已不在列表里，
  * 用户没有任何入口看到「.corrupt/ 已经吃掉多少空间」。自动过期是**不做**的
  * （隔离承诺可恢复，删了就是替用户删历史，见 sweepGraveyards 与 #912），
- * 但「看不见的增长」得能看见：启动时把条数与字节数写进 engine.log，
+ * 但「看不见的增长」得能看见：首屏之后把条数与字节数写进 engine.log，
  * 用户报「存储被吃掉」时有一条可查的事实。
  *
  * @param {string} home - 绝对 `DSH_HOME`。
@@ -340,38 +407,41 @@ const QUARANTINED_GRAVEYARD_PATTERN = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]
 export async function inspectQuarantine(home) {
   const empty = { count: 0, bytes: 0, dirs: [] }
   if (typeof home !== 'string' || home === '') return empty
-  const root = sessionsRoot(home)
-  let workspaces
-  try { workspaces = await readdir(root, { withFileTypes: true }) } catch { return empty }
-  const dirs = []
+  const snapshot = await scanStoredStorage(home)
+  const occupancy = await countQuarantine(snapshot, () => false)
+  return { count: occupancy.count, bytes: occupancy.bytes, dirs: occupancy.dirs }
+}
+
+/**
+ * 清点快照里的隔离件（只读；不删除任何东西）。
+ * @param {{ quarantineEntries: string[] }} snapshot - scanStoredStorage 的快照。
+ * @param {() => boolean} shouldStop - 取消探针。
+ * @returns {Promise<{ count: number, bytes: number, dirs: string[], cancelled: boolean }>} 清点结果。
+ */
+async function countQuarantine(snapshot, shouldStop) {
+  const dirs = snapshot.quarantineEntries.slice().sort()
   let bytes = 0
-  for (const workspace of workspaces) {
-    if (!workspace.isDirectory()) continue
-    const trash = join(root, workspace.name, QUARANTINE_DIR)
-    let entries
-    try { entries = await readdir(trash, { withFileTypes: true }) } catch { continue }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      const target = join(trash, entry.name)
-      dirs.push(target)
-      bytes += await directoryBytes(target)
-    }
+  for (const dir of dirs) {
+    if (shouldStop()) return { count: dirs.length, bytes, dirs, cancelled: true }
+    bytes += await directoryBytes(dir, shouldStop)
   }
-  return { count: dirs.length, bytes, dirs: dirs.sort() }
+  return { count: dirs.length, bytes, dirs, cancelled: false }
 }
 
 /**
  * Recursive byte size of a directory (best effort: unreadable entries count as 0).
  * @param {string} dir - absolute directory.
+ * @param {() => boolean} [shouldStop] - cancellation probe checked between entries.
  * @returns {Promise<number>} total bytes.
  */
-async function directoryBytes(dir) {
+async function directoryBytes(dir, shouldStop = () => false) {
   let total = 0
   let entries
   try { entries = await readdir(dir, { withFileTypes: true }) } catch { return 0 }
   for (const entry of entries) {
+    if (shouldStop()) return total
     const target = join(dir, entry.name)
-    if (entry.isDirectory()) { total += await directoryBytes(target); continue }
+    if (entry.isDirectory()) { total += await directoryBytes(target, shouldStop); continue }
     try { total += (await stat(target)).size } catch { /* vanished mid-scan */ }
   }
   return total
@@ -631,6 +701,83 @@ export async function removeSessionProjectionCacheFile(home, sessionId, logger) 
 
 const LOG_NAME_RE = /^session(?:\.v([1-9][0-9]*))?\.jsonl(\.zstd)?$/
 
+/** 首行身份最多解析 8 KiB（与未压缩日志的首块上限一致）。 */
+const SESSION_LOG_HEADER_MAX_BYTES = 8 * 1024
+/** 每次只喂给解压器 64 KiB 压缩数据。 */
+const SESSION_LOG_HEADER_CHUNK_BYTES = 64 * 1024
+/** 压缩日志最多读取 1 MiB：首行身份只可能落在文件开头，读更多没有意义。 */
+const SESSION_LOG_HEADER_MAX_INPUT_BYTES = 1024 * 1024
+
+/**
+ * 有界读取 zstd 日志的首行，只为投影核对取身份。
+ *
+ * 旧实现 `readFile` 整份日志再同步 `zstdDecompressSync`：日志动辄几十上百 MB，
+ * 启动核对却只要一行身份。引擎格式保证**第一个 zstd frame 就是单独的一行身份头**
+ * （`assertIndependentHeaderFrame`），所以这里流式解压，喂到首行出现为止：
+ * 压缩输入上限 1 MiB、解压后首行上限 8 KiB，主线程不做整份同步解压。
+ *
+ * 取不到可判定的首行（损坏 / 截断 / 超过上限 / 解码错误）返回 null —— 调用方
+ * 据此**保留**缓存，绝不把「不知道」当成「身份不同」。
+ *
+ * @param {string} filePath - zstd 日志绝对路径。
+ * @returns {Promise<string|null>} 首行文本；无法有界确定时为 null。
+ */
+async function readZstdFirstLine(filePath) {
+  const handle = await open(filePath, 'r')
+  let decoder
+  const chunks = []
+  let length = 0
+  let done = false
+  let text = null
+  let settle
+  const firstLine = new Promise((resolve) => { settle = resolve })
+  const finish = (value) => {
+    if (done) return
+    done = true
+    text = value
+    settle()
+  }
+  try {
+    decoder = createZstdDecompress()
+  } catch (error) {
+    await handle.close()
+    throw error
+  }
+  decoder.on('data', (chunk) => {
+    if (done) return
+    const newline = chunk.indexOf(10)
+    const line = newline === -1 ? chunk : chunk.subarray(0, newline)
+    if (length + line.length > SESSION_LOG_HEADER_MAX_BYTES) { finish(null); return }
+    if (line.length > 0) {
+      chunks.push(Buffer.from(line))
+      length += line.length
+    }
+    if (newline !== -1) finish(Buffer.concat(chunks, length).toString('utf8'))
+  })
+  decoder.on('error', () => finish(null))
+  decoder.on('end', () => finish(null))
+  try {
+    const buffer = Buffer.allocUnsafe(SESSION_LOG_HEADER_CHUNK_BYTES)
+    let position = 0
+    while (!done && position < SESSION_LOG_HEADER_MAX_INPUT_BYTES) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position)
+      if (bytesRead <= 0) break
+      position += bytesRead
+      // 必须复制：解码在 libuv 线程池异步消费，复用同一个读缓冲会把它改坏。
+      decoder.write(Buffer.from(buffer.subarray(0, bytesRead)))
+    }
+    if (!done) {
+      // 输入读完（或到上限）仍没有首行：等解码器收尾，由 data/error/end 落定。
+      decoder.end()
+      await firstLine
+    }
+    return done ? text : null
+  } finally {
+    decoder?.destroy()
+    await handle.close()
+  }
+}
+
 /** Read the header line identity `{ createdAt, formatVersion }` from a session's active log file. */
 async function readSessionLogIdentity(sessionDir) {
   let entries
@@ -656,7 +803,7 @@ async function readSessionLogIdentity(sessionDir) {
       if (!candidate.zstd) {
         const handle = await open(filePath, 'r')
         try {
-          const buf = Buffer.allocUnsafe(8192)
+          const buf = Buffer.allocUnsafe(SESSION_LOG_HEADER_MAX_BYTES)
           const { bytesRead } = await handle.read(buf, 0, buf.length, 0)
           if (bytesRead <= 0) continue
           const slice = buf.subarray(0, bytesRead)
@@ -666,10 +813,9 @@ async function readSessionLogIdentity(sessionDir) {
           await handle.close()
         }
       } else {
-        const raw = await readFile(filePath)
-        const plain = zstdDecompressSync(raw)
-        const nl = plain.indexOf(10)
-        headerText = (nl >= 0 ? plain.subarray(0, nl) : plain).toString('utf8')
+        headerText = await readZstdFirstLine(filePath)
+        // 取不到首行 = 身份未知：原样交给调用方保留缓存（fail-closed）。
+        if (headerText === null) return null
       }
       const header = JSON.parse(headerText)
       if (header && typeof header === 'object' && !Array.isArray(header)) {
@@ -686,90 +832,55 @@ async function readSessionLogIdentity(sessionDir) {
 }
 
 /**
- * Reconcile `<home>/storages/session_projcache/sessions/*.json` against stored sessions.
- * Preserves all live sessions with matching/unproven identity and all quarantined/graveyard sessions.
- * Fail-closed if the sessions tree cannot be scanned completely.
+ * 用一份目录快照核对孤立投影缓存：保留有身份证据的、隔离/墓地里的缓存，只删
+ * 「会话已不存在」或「同一 id 已被重建、身份不再匹配」的那些。
+ *
+ * fail-closed：快照不完整（有工作区/隔离区读不动）或身份读不出来时一律保留。
+ * @param {string} home - 绝对 `DSH_HOME`。
+ * @param {object} snapshot - `scanStoredStorage` 的快照。
+ * @param {(level: 'info'|'warn'|'error', message: string, extra?: object) => void} log - 日志。
+ * @param {{ shouldStop?: () => boolean }} [options] - 取消探针。
+ * @returns {Promise<{ scanned: number, removed: string[], kept: number, aborted: boolean, cancelled: boolean }>} 结果。
  */
-export async function sweepOrphanProjectionCaches(home, logger) {
-  const log = typeof logger === 'function' ? logger : () => {}
-  if (typeof home !== 'string' || home === '') return { scanned: 0, removed: [], kept: 0, aborted: false }
+async function reconcileProjectionCaches(home, snapshot, log, options = {}) {
+  const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false
+  const empty = { scanned: 0, removed: [], kept: 0, aborted: false, cancelled: false }
   const cacheDir = projectionCacheSessionsDir(home)
   let cacheEntries
   try {
     cacheEntries = await readdir(cacheDir, { withFileTypes: true })
   } catch (error) {
-    if (error?.code === 'ENOENT') return { scanned: 0, removed: [], kept: 0, aborted: false }
-    return { scanned: 0, removed: [], kept: 0, aborted: true }
+    if (error?.code === 'ENOENT') return empty
+    log('warn', 'projection cache sweep aborted: cache directory unreadable', {
+      cacheDir, error: String(error?.message ?? error),
+    })
+    return { ...empty, aborted: true }
   }
   const jsonEntries = cacheEntries.filter((e) => e.isFile() && !e.isSymbolicLink() && e.name.endsWith('.json'))
-  if (jsonEntries.length === 0) return { scanned: 0, removed: [], kept: 0, aborted: false }
-
-  const root = sessionsRoot(home)
-  const liveDirsById = new Map()
-  const protectedIds = new Set()
-  let workspaces
-  try {
-    workspaces = await readdir(root, { withFileTypes: true })
-  } catch (error) {
-    if (error?.code !== 'ENOENT') {
-      log('warn', 'projection cache sweep aborted: sessions root unreadable', { root, error: String(error?.message ?? error) })
-      return { scanned: jsonEntries.length, removed: [], kept: jsonEntries.length, aborted: true }
-    }
-    workspaces = []
+  if (jsonEntries.length === 0) return empty
+  const scanned = jsonEntries.length
+  if (snapshot.incomplete) {
+    log('warn', 'projection cache sweep aborted: session storage scan incomplete', {
+      root: sessionsRoot(home), problem: snapshot.problems[0] ?? 'unknown',
+    })
+    return { scanned, removed: [], kept: scanned, aborted: true, cancelled: false }
   }
-
-  for (const workspace of workspaces) {
-    if (!workspace.isDirectory() || workspace.isSymbolicLink()) continue
-    const wsDir = join(root, workspace.name)
-    let wsEntries
-    try {
-      wsEntries = await readdir(wsDir, { withFileTypes: true })
-    } catch (error) {
-      log('warn', 'projection cache sweep aborted: workspace unreadable', { wsDir, error: String(error?.message ?? error) })
-      return { scanned: jsonEntries.length, removed: [], kept: jsonEntries.length, aborted: true }
-    }
-    for (const entry of wsEntries) {
-      if (!entry.isDirectory()) continue
-      if (entry.name === QUARANTINE_DIR) {
-        let qEntries
-        try {
-          qEntries = await readdir(join(wsDir, QUARANTINE_DIR), { withFileTypes: true })
-        } catch (error) {
-          log('warn', 'projection cache sweep aborted: quarantine dir unreadable', { wsDir, error: String(error?.message ?? error) })
-          return { scanned: jsonEntries.length, removed: [], kept: jsonEntries.length, aborted: true }
-        }
-        for (const q of qEntries) {
-          const dot = q.name.indexOf('.')
-          const id = dot > 0 ? q.name.slice(0, dot) : q.name
-          if (SESSION_ID_PATTERN.test(id)) protectedIds.add(id)
-        }
-        continue
-      }
-      if (GRAVEYARD_PATTERN.test(entry.name)) {
-        const dot = entry.name.indexOf('.deleting-')
-        const id = dot > 0 ? entry.name.slice(0, dot) : ''
-        if (SESSION_ID_PATTERN.test(id)) protectedIds.add(id)
-        continue
-      }
-      if (SESSION_ID_PATTERN.test(entry.name)) {
-        liveDirsById.set(entry.name, join(wsDir, entry.name))
-      }
-    }
-  }
+  if (snapshot.cancelled || shouldStop()) return { scanned, removed: [], kept: scanned, aborted: false, cancelled: true }
 
   const removed = []
   let kept = 0
   for (const entry of jsonEntries) {
+    if (shouldStop()) return { scanned, removed, kept, aborted: false, cancelled: true }
     const id = entry.name.slice(0, -5)
     if (!SESSION_ID_PATTERN.test(id)) {
       kept += 1
       continue
     }
-    if (protectedIds.has(id)) {
+    if (snapshot.protectedIds.has(id)) {
       kept += 1
       continue
     }
-    const liveDir = liveDirsById.get(id)
+    const liveDir = snapshot.liveDirsById.get(id)
     let shouldRemove = false
     if (liveDir === undefined) {
       shouldRemove = true
@@ -779,6 +890,7 @@ export async function sweepOrphanProjectionCaches(home, logger) {
         const cachedIdentity = parsed?.record?.identity
         if (cachedIdentity && typeof cachedIdentity.createdAt === 'number') {
           const liveIdentity = await readSessionLogIdentity(liveDir)
+          // 身份无法确定（损坏/截断/超限）→ 保留缓存：绝不把「不知道」当成「不是同一个会话」。
           if (liveIdentity !== null) {
             if (liveIdentity.createdAt !== undefined && liveIdentity.createdAt !== cachedIdentity.createdAt) {
               shouldRemove = true
@@ -799,6 +911,7 @@ export async function sweepOrphanProjectionCaches(home, logger) {
       kept += 1
       continue
     }
+    if (shouldStop()) return { scanned, removed, kept, aborted: false, cancelled: true }
     const target = join(cacheDir, entry.name)
     try {
       await unlink(target)
@@ -810,6 +923,7 @@ export async function sweepOrphanProjectionCaches(home, logger) {
     const bakPrefix = `${entry.name}.bak.`
     for (const sibling of cacheEntries) {
       if (!sibling.isFile() || sibling.isSymbolicLink() || !sibling.name.startsWith(bakPrefix)) continue
+      if (shouldStop()) break
       try {
         const bakPath = join(cacheDir, sibling.name)
         await unlink(bakPath)
@@ -820,5 +934,60 @@ export async function sweepOrphanProjectionCaches(home, logger) {
   if (removed.length > 0) {
     log('info', 'swept orphan session projection cache entries', { count: removed.length, kept })
   }
-  return { scanned: jsonEntries.length, removed, kept, aborted: false }
+  return { scanned, removed, kept, aborted: false, cancelled: false }
+}
+
+/**
+ * Reconcile `<home>/storages/session_projcache/sessions/*.json` against stored sessions.
+ * Preserves all live sessions with matching/unproven identity and all quarantined/graveyard sessions.
+ * Fail-closed if the sessions tree cannot be scanned completely.
+ */
+export async function sweepOrphanProjectionCaches(home, logger) {
+  const log = typeof logger === 'function' ? logger : () => {}
+  if (typeof home !== 'string' || home === '') return { scanned: 0, removed: [], kept: 0, aborted: false, cancelled: false }
+  const snapshot = await scanStoredStorage(home)
+  return reconcileProjectionCaches(home, snapshot, log)
+}
+
+/**
+ * 首屏之后才跑的存储维护：隔离件容量统计 + 孤立投影核对。
+ *
+ * 两者共用**同一份**目录快照，不再各自枚举 `sessions/` 与每个 `.corrupt/`。
+ * 调用方（host apply）用延后定时器把它挪出启动首屏窗口；dispose/HMR 时通过
+ * `shouldStop` 在下一个目录边界取消，尚未开始的删除一律不发生。
+ *
+ * @param {string} home - 绝对 `DSH_HOME`。
+ * @param {(level: 'info'|'warn'|'error', message: string, extra?: object) => void} [logger] - 日志。
+ * @param {{ shouldStop?: () => boolean }} [options] - 取消探针。
+ * @returns {Promise<{
+ *   cancelled: boolean,
+ *   quarantine: { count: number, bytes: number, dirs: string[] },
+ *   projection: { scanned: number, removed: string[], kept: number, aborted: boolean, cancelled: boolean },
+ * }>} 清点与核对结果；取消时两者都是部分结果且不执行删除。
+ */
+export async function runDeferredStorageMaintenance(home, logger, options = {}) {
+  const log = typeof logger === 'function' ? logger : () => {}
+  const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false
+  const result = {
+    cancelled: false,
+    quarantine: { count: 0, bytes: 0, dirs: [] },
+    projection: { scanned: 0, removed: [], kept: 0, aborted: false, cancelled: false },
+  }
+  if (typeof home !== 'string' || home === '') return result
+  const snapshot = await scanStoredStorage(home, { shouldStop })
+  if (snapshot.cancelled || shouldStop()) {
+    result.cancelled = true
+    return result
+  }
+  const occupancy = await countQuarantine(snapshot, shouldStop)
+  if (occupancy.cancelled || shouldStop()) {
+    result.cancelled = true
+    return result
+  }
+  result.quarantine = { count: occupancy.count, bytes: occupancy.bytes, dirs: occupancy.dirs }
+  // 清点是只读的：先写进 engine.log，再做会删文件的核对。
+  if (occupancy.count > 0) log('info', 'quarantine occupancy', { count: occupancy.count, bytes: occupancy.bytes })
+  result.projection = await reconcileProjectionCaches(home, snapshot, log, { shouldStop })
+  if (result.projection.cancelled) result.cancelled = true
+  return result
 }
