@@ -22,7 +22,8 @@ const HANDLED = 'data-dsh-about-source'
 const ENTRY = 'data-dsh-about-entry'
 
 /** Recognize the upstream version label before inserting the entry. */
-const VERSION = /\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?/
+const VERSION_LABEL = /^(?:当前版本|current version)\s*[:：]\s*\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/i
+const GENERAL_ITEM_ROW = '[data-slot="settings.general.item"] > div'
 
 /**
  * 是否已经成功接管过（内联入口插进去过一次）。
@@ -118,47 +119,25 @@ export function installAboutEntry(): () => void {
     const panel = document.querySelector('[data-dsh-settings-dialog]')
     if (panel === null) return
     const scope: ParentNode = panel
-    const leaves = [...scope.querySelectorAll<HTMLElement>('div, p, span')]
+    const versionRows = [...scope.querySelectorAll<HTMLElement>(GENERAL_ITEM_ROW)]
       .filter((node) => node.children.length === 0)
 
     syncNavRow(scope)
 
     // 第一步：修已处理节点。React 重渲染会把 style 写回原值，只认标记不认样式的话
     // 上游版本行会「复活」，界面上就变成版本行 + 关于入口同时出现。
-    for (const node of leaves) {
+    for (const node of versionRows) {
       if (!node.hasAttribute(HANDLED)) continue
       ensureEntry(node)
     }
     syncNavRow(scope)
 
-    // 第二步：只认「当前版本 / Current version」这条精确文案。
-    //
-    // 不能保留「含版本 + x.y.z」的宽松兜底：其它分区里只要有一行短文案写着
-    // 「版本 1.2.3」（插件/模型的信息行就有），松匹配会把它隐藏并插上「关于」入口——
-    // 这是本轮审查实测到的真 bug。精确文案找不到时**什么都不做**：导航里那条「关于」
-    // 仍可见，用户依然进得去，属于安全失败。
-    const fresh = leaves.filter((node) => !node.hasAttribute(HANDLED))
-    const preferred = fresh.find((node) => /当前版本|current version/i.test(node.textContent ?? ''))
-    const candidates = preferred === undefined ? [] : [preferred]
-
-    for (const node of candidates) {
-      // 绝不能把我们自己「关于」页里的版本行当成上游那一行：那会导致版本行被隐藏、
-      // 各自再插一个「关于」入口（真机实测：页面上出现两个「关于」、版本消失）。
-      if (node.closest('[data-plugin="android-about"]') !== null) continue
-      if (node.closest('[data-dsh-about-entry]') !== null) continue
-      const text = (node.textContent ?? '').trim()
-      if (text.length === 0 || text.length > 60) continue
-      if (!/当前版本|current version/i.test(text)) continue
-      // 带我们标签的版本行不是上游那行（上游只写「当前版本：x.y.z」）。
-      if (/DeepCode|DeepSeek/i.test(text)) continue
-      if (!VERSION.test(text)) continue
-
-      node.setAttribute(HANDLED, '')
-      ensureEntry(node)
-      // 同一轮就收起导航行：只靠下一轮 observer 的话，页面若不再变化就不会执行。
-      syncNavRow(scope)
-      return
-    }
+    // App Updates may use the same label. Only the General item slot owns this insertion point.
+    const fresh = versionRows.find(node => !node.hasAttribute(HANDLED) && VERSION_LABEL.test(node.textContent?.trim() ?? ''))
+    if (fresh === undefined) return
+    fresh.setAttribute(HANDLED, '')
+    ensureEntry(fresh)
+    syncNavRow(scope)
   }
 
   // 文档级捕获：按钮被 React 重建后依然有效。

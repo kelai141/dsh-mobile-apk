@@ -39,7 +39,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('隐藏版本行并在其后插入「关于」，同时收起导航里的同名行', async () => {
-    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div><nav><button id="nav-about">关于</button></nav>')
+    const host = seed('<div data-slot="settings.general.item"><div id="v">当前版本：0.2.1-rc.2</div></div><nav><button id="nav-about">关于</button></nav>')
     cleanup = installAboutEntry()
     await tick()
     expect(host.querySelector<HTMLElement>('#v')!.style.display).toBe('none')
@@ -50,7 +50,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('点入口会用导航行切换分区（不是弹层）', async () => {
-    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div><nav><button id="nav-about">关于</button></nav>')
+    const host = seed('<div data-slot="settings.general.item"><div id="v">当前版本：0.2.1-rc.2</div></div><nav><button id="nav-about">关于</button></nav>')
     const click = vi.fn()
     host.querySelector('#nav-about')!.addEventListener('click', click)
     cleanup = installAboutEntry()
@@ -67,7 +67,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('关于页：图标 + 名称 + 版本 + 两条可点链接', async () => {
-    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div>')
+    const host = seed('<div data-slot="settings.general.item"><div id="v">当前版本：0.2.1-rc.2</div></div>')
     cleanup = installAboutEntry()
     await tick()
     const mount = document.createElement('div')
@@ -102,7 +102,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('关于页隐藏顶部「关于」标题条（图标+名称已承担标题）', async () => {
-    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div>')
+    const host = seed('<div data-slot="settings.general.item"><div id="v">当前版本：0.2.1-rc.2</div></div>')
     const bar = document.createElement('span')
     bar.setAttribute('data-dsh-settings-bar-title', '')
     bar.textContent = '关于'
@@ -122,7 +122,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('React 把版本行的 display 写回后，观察器要重新隐藏它', async () => {
-    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div>')
+    const host = seed('<div data-slot="settings.general.item"><div id="v">当前版本：0.2.1-rc.2</div></div>')
     cleanup = installAboutEntry()
     await tick()
     const node = host.querySelector<HTMLElement>('#v')!
@@ -136,7 +136,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('关于页自己的版本行不会被当成上游版本行（否则版本消失、多出两个入口）', async () => {
-    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div>')
+    const host = seed('<div data-slot="settings.general.item"><div id="v">当前版本：0.2.1-rc.2</div></div>')
     cleanup = installAboutEntry()
     await tick()
     const mount = document.createElement('div')
@@ -167,7 +167,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('精确文案存在时仍然正常接管', async () => {
-    const host = seed('<div id="decoy">版本 1.2.3</div><div id="real">当前版本：0.2.1-rc.2</div>')
+    const host = seed('<div id="decoy">版本 1.2.3</div><div data-slot="settings.general.item"><div id="real">当前版本：0.2.1-rc.2</div></div>')
     cleanup = installAboutEntry()
     await tick()
     expect(host.querySelector<HTMLElement>('#real')!.style.display).toBe('none')
@@ -176,7 +176,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('导航行被重建后仍保持收起（不会冒出第二个关于）', async () => {
-    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div><nav><button id="nav-about">关于</button></nav>')
+    const host = seed('<div data-slot="settings.general.item"><div id="v">当前版本：0.2.1-rc.2</div></div><nav><button id="nav-about">关于</button></nav>')
     cleanup = installAboutEntry()
     await tick()
     const first = host.querySelector<HTMLElement>('#nav-about')!
@@ -190,7 +190,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('回到一级列表（入口不在 DOM 里）时导航行仍然收起', async () => {
-    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div><nav><button id="nav-about">关于</button></nav>')
+    const host = seed('<div data-slot="settings.general.item"><div id="v">当前版本：0.2.1-rc.2</div></div><nav><button id="nav-about">关于</button></nav>')
     cleanup = installAboutEntry()
     await tick()
     // 模拟离开分区：分区内容（含内联入口）被 React 卸载，只剩导航
@@ -201,7 +201,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('重复安装（插件重载）不会把导航行放出来，也不会多出入口', async () => {
-    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div><nav><button id="nav-about">关于</button></nav>')
+    const host = seed('<div data-slot="settings.general.item"><div id="v">当前版本：0.2.1-rc.2</div></div><nav><button id="nav-about">关于</button></nav>')
     const first = installAboutEntry()
     await tick()
     expect(host.querySelector<HTMLElement>('#nav-about')!.style.display).toBe('none')
@@ -219,6 +219,20 @@ describe('关于入口（独立页面）', () => {
     expect(clicked.length, '点击应仍然触发分区切换').toBe(1)
   })
 
+  it('leaves App Updates version markup alone and installs the entry inside General settings', async () => {
+    const host = seed(
+      '<section data-slot="settings.section" data-plugin="dev-apk-update">' +
+      '<div id="apk">当前版本：0.15.0</div></section>' +
+      '<div data-slot="settings.general.item"><div id="engine">Current version: 0.2.2-rc.3</div></div>',
+    )
+    cleanup = installAboutEntry()
+    await tick()
+    expect(host.querySelector<HTMLElement>('#apk')?.style.display).toBe('')
+    expect(host.querySelector('#apk')?.hasAttribute('data-dsh-about-source')).toBe(false)
+    expect(host.querySelector<HTMLElement>('#engine')?.style.display).toBe('none')
+    expect(host.querySelector('#engine')?.nextElementSibling?.hasAttribute('data-dsh-about-entry')).toBe(true)
+  })
+
   it('从未接管成功时导航行保留（兜底入口）', async () => {
     // 「是否接管过」是模块级状态：这里要一份全新的模块实例，否则会被前面用例污染。
     vi.resetModules()
@@ -230,7 +244,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('restores a removed entry beside an already handled version row', async () => {
-    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div><nav><button id="nav-about">关于</button></nav>')
+    const host = seed('<div data-slot="settings.general.item"><div id="v">当前版本：0.2.1-rc.2</div></div><nav><button id="nav-about">关于</button></nav>')
     cleanup = installAboutEntry()
     await tick()
     host.querySelector('[data-dsh-about-entry]')!.remove()
@@ -243,7 +257,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('recovers the handled navigation entry in a fresh module instance', async () => {
-    const host = seed('<div id="v" data-dsh-about-source style="display:none">当前版本：0.2.1-rc.3</div><nav><button id="nav-about">关于</button></nav>')
+    const host = seed('<div data-slot="settings.general.item"><div id="v" data-dsh-about-source style="display:none">当前版本：0.2.1-rc.3</div></div><nav><button id="nav-about">关于</button></nav>')
     vi.resetModules()
     const fresh = await import('../src/client/mobile/about-entry.ts')
     cleanup = fresh.installAboutEntry()
@@ -253,7 +267,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('does not rescan settings for unrelated chat mutations', async () => {
-    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div>')
+    const host = seed('<div data-slot="settings.general.item"><div id="v">当前版本：0.2.1-rc.2</div></div>')
     cleanup = installAboutEntry()
     await tick()
     const scan = vi.spyOn(host, 'querySelectorAll')
@@ -267,7 +281,7 @@ describe('关于入口（独立页面）', () => {
   })
 
   it('重复渲染不会插入第二个入口', async () => {
-    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div>')
+    const host = seed('<div data-slot="settings.general.item"><div id="v">当前版本：0.2.1-rc.2</div></div>')
     cleanup = installAboutEntry()
     await tick()
     host.appendChild(document.createElement('div'))
