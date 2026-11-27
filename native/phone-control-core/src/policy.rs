@@ -337,6 +337,8 @@ pub enum BackendRequirement {
     A11yRequired,
     /// Shizuku 专属，不因 A11y 优先规则被误拦。
     ShizukuRequired,
+    /// Shizuku（uid 2000）优先；不可用或服务端为 uid 0 时，允许经独立授权的 Root 通道执行。
+    ShizukuOrRoot,
     RootRequired,
     TermuxHost,
     /// 壳内浏览器工作台。
@@ -385,14 +387,14 @@ const fn spec(
 
 /// 原生 op 语义单源目录。这里只描述原生语义与后端要求，不定义模型工具 schema。
 pub static OPERATIONS: &[OperationSpec] = &[
-    spec("launchApp", TargetDomain::AndroidDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::ScreenContent, false),
+    spec("launchApp", TargetDomain::AndroidDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::ScreenContent, false),
     spec("snapshot", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("click", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("longClick", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("setText", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("scroll", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("swipe", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
-    spec("keyEvent", TargetDomain::AndroidDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::ScreenContent, false),
+    spec("keyEvent", TargetDomain::AndroidDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::ScreenContent, false),
     spec("global", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("screenshot", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
     spec("nodeText", TargetDomain::AndroidDisplay, BackendRequirement::A11yPreferred, ScopePolicy::ScreenContent, true),
@@ -415,12 +417,12 @@ pub static OPERATIONS: &[OperationSpec] = &[
     spec("browserTabs", TargetDomain::BrowserWorkspace, BackendRequirement::BrowserHost, ScopePolicy::NotScreenScoped, false),
     spec("browserFollowTab", TargetDomain::BrowserWorkspace, BackendRequirement::BrowserHost, ScopePolicy::NotScreenScoped, false),
     spec("browserCloseTab", TargetDomain::BrowserWorkspace, BackendRequirement::BrowserHost, ScopePolicy::NotScreenScoped, false),
-    spec("vdCreate", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::VirtualNamespace, false),
-    spec("vdDestroy", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::RegisteredVirtual, false),
-    spec("vdLaunch", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::RegisteredVirtual, false),
-    spec("vdLaunchApp", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::RegisteredVirtual, false),
-    spec("vdInput", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::RegisteredVirtual, false),
-    spec("vdInfo", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuRequired, ScopePolicy::VirtualNamespace, false),
+    spec("vdCreate", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::VirtualNamespace, false),
+    spec("vdDestroy", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::RegisteredVirtual, false),
+    spec("vdLaunch", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::RegisteredVirtual, false),
+    spec("vdLaunchApp", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::RegisteredVirtual, false),
+    spec("vdInput", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::RegisteredVirtual, false),
+    spec("vdInfo", TargetDomain::VirtualDisplay, BackendRequirement::ShizukuOrRoot, ScopePolicy::VirtualNamespace, false),
     spec("vdMoveTask", TargetDomain::VirtualDisplay, BackendRequirement::Unsupported, ScopePolicy::RegisteredVirtual, false),
     spec("shExec", TargetDomain::PrivilegedShell, BackendRequirement::ShizukuRequired, ScopePolicy::NotScreenScoped, false),
     spec("rootExec", TargetDomain::PrivilegedShell, BackendRequirement::RootRequired, ScopePolicy::NotScreenScoped, false),
@@ -779,6 +781,7 @@ impl PolicyState {
             BackendRequirement::A11yPreferred
             | BackendRequirement::A11yRequired
             | BackendRequirement::ShizukuRequired
+            | BackendRequirement::ShizukuOrRoot
             | BackendRequirement::RootRequired
             | BackendRequirement::TermuxHost => Some(self.authorization_generation),
             _ => None,
@@ -815,6 +818,47 @@ impl PolicyState {
         if let Some(authorization_generation) = plan.authorization_generation {
             if authorization_generation != self.authorization_generation {
                 return Err(PolicyError::new("authorization-changed", "channel or root authorization changed after planning"));
+            }
+        }
+        Ok(())
+    }
+
+    /// 虚拟屏生命周期变更（vdCreate / vdDestroy）落盘后的结算重验。
+    ///
+    /// 建屏/毁屏本身必然改变屏幕注册表与 A11y 的 displaySupport/displayOperations
+    /// （从而推进 `authorization_generation` 或移出被销毁的屏幕），因此结算阶段不以
+    /// 变更前的屏幕代次或 A11y 增量否决已成功的生命周期动作；但 epoch、scope 与所选
+    /// 通道授权仍必须持续有效。
+    pub fn revalidate_after_vdisplay_lifecycle(&self, plan: &DispatchPlan) -> Result<(), PolicyError> {
+        let spec = OperationSpec::for_name(plan.op)
+            .ok_or_else(|| PolicyError::new("op-unknown", format!("operation {} is not registered", plan.op)))?;
+        if plan.epoch != self.epoch {
+            return Err(PolicyError::new("epoch-mismatch", "plan belongs to another native session"));
+        }
+        if let Some(scope_generation) = plan.scope_generation {
+            if scope_generation != self.scope_generation {
+                return Err(PolicyError::new("scope-generation-mismatch", "screen scope changed after planning"));
+            }
+        }
+        if !matches!(self.scope, Scope::VirtualOnly | Scope::All) {
+            return Err(PolicyError::new(
+                "screen-out-of-scope",
+                format!("scope {} no longer allows virtual displays", self.scope.wire()),
+            ));
+        }
+        match plan.backend {
+            Backend::Root => {
+                if !self.root_only_available() {
+                    return Err(PolicyError::new("authorization-changed", "root authorization changed after planning"));
+                }
+            }
+            Backend::Shizuku => {
+                self.select_shizuku(spec, &plan.target).map_err(|_| {
+                    PolicyError::new("authorization-changed", "Shizuku channel authorization changed after planning")
+                })?;
+            }
+            _ => {
+                return Err(PolicyError::new("authorization-changed", "unexpected backend for virtual display lifecycle"));
             }
         }
         Ok(())
@@ -1036,6 +1080,30 @@ impl PolicyState {
                 Tri::No => self.select_shizuku(spec, target),
             },
             BackendRequirement::ShizukuRequired => self.select_shizuku(spec, target),
+            BackendRequirement::ShizukuOrRoot => {
+                if spec.name == "launchApp"
+                    && target.screen().is_some_and(|screen| screen.display_id != REAL_DISPLAY_ID)
+                {
+                    return Err(PolicyError::new(
+                        "target-unsupported",
+                        "launchApp only targets the real display; use vdLaunchApp for virtual displays",
+                    ));
+                }
+                match self.select_shizuku(spec, target) {
+                    Ok(backend) => Ok(backend),
+                    Err(_) if self.root_only_available() => Ok(Backend::Root),
+                    Err(error) => {
+                        if self.shizuku.server_uid == ServerUid::Root0 || self.root.app_su.is_yes() {
+                            Err(PolicyError::new(
+                                "root-authorization-required",
+                                "no verified and independently authorized Root channel",
+                            ))
+                        } else {
+                            Err(error)
+                        }
+                    }
+                }
+            }
             BackendRequirement::RootRequired if self.root_only_available() => Ok(Backend::Root),
             BackendRequirement::RootRequired => Err(PolicyError::new("root-authorization-required", "no verified and independently authorized Root channel")),
         }

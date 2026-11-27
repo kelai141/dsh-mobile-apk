@@ -40,7 +40,7 @@ const PHONE_REL = 'plugins/dsh-android-phone-control/src'
 const SHARED_REL = 'plugins/dsh-android-bridge/src'
 
 const TARGETS = new Set(['AndroidDisplay', 'VirtualDisplay', 'BrowserWorkspace', 'AppWebView', 'ControlMemory', 'PrivilegedShell'])
-const BACKENDS = new Set(['A11yPreferred', 'A11yRequired', 'ShizukuRequired', 'RootRequired', 'TermuxHost', 'BrowserHost', 'WebViewHost', 'LocalOnly', 'Unsupported'])
+const BACKENDS = new Set(['A11yPreferred', 'A11yRequired', 'ShizukuRequired', 'ShizukuOrRoot', 'RootRequired', 'TermuxHost', 'BrowserHost', 'WebViewHost', 'LocalOnly', 'Unsupported'])
 const SCOPES = new Set(['ScreenContent', 'VirtualNamespace', 'RegisteredVirtual', 'NotScreenScoped'])
 const BROWSER_OPS = new Set(['browserCaps', 'browserShow', 'browserHide', 'browserClose', 'browserOpen', 'browserJs', 'browserInput', 'browserShot', 'browserState', 'browserSetUa', 'browserViewport', 'browserTabs', 'browserFollowTab', 'browserCloseTab'])
 const NON_OP_NAMES = new Set(['tools', 'up', 'down', 'left', 'right', 'real'])
@@ -441,6 +441,8 @@ const backendCoverage = {
   A11yPreferred: /"a11y"\s*&&/.test(stripComments(kotlinFiles['NativeA11yExecution.kt'] ?? '')),
   A11yRequired: /"a11y"\s*&&/.test(stripComments(kotlinFiles['NativeA11yExecution.kt'] ?? '')),
   ShizukuRequired: /"backend"\)\s*==\s*"shizuku"/.test(stripComments(kotlinFiles['NativeShizukuExecution.kt'] ?? '')),
+  ShizukuOrRoot: /"shizuku"/.test(stripComments(kotlinFiles['NativeVdisplayExecution.kt'] ?? ''))
+    && /"root"/.test(stripComments(kotlinFiles['NativeVdisplayExecution.kt'] ?? '')),
   RootRequired: /"rootExec"[^\n]*"root"/.test(privilegeText),
   TermuxHost: /NativeAppShell\.execute/.test(privilegeText),
   BrowserHost: /browserHost/.test(stripComments(kotlinFiles['NativeSharedHostExecution.kt'] ?? '')),

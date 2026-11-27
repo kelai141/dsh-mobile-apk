@@ -388,7 +388,10 @@ internal object NativeShizukuMotion {
       else unknown("motion-unconfirmed")
   }
 
-  private fun parseComponent(pkg: String, output: String): String? {
+  /** 固定 11 键映射查表，供 Shizuku 与 Root 执行面共用单一真源。 */
+  internal fun keycodeFor(key: String): Int? = KEYCODES[key]
+
+  internal fun parseComponent(pkg: String, output: String): String? {
     val line = output.lineSequence().map { it.trim() }.lastOrNull { it.startsWith("$pkg/") }
       ?: return null
     if (line.length > 512 || line.any { it.isWhitespace() || it.isISOControl() }) return null
@@ -418,11 +421,11 @@ internal object NativeShizukuMotion {
     return out
   }
 
-  private fun validPackage(pkg: String): Boolean =
+  internal fun validPackage(pkg: String): Boolean =
     pkg.isNotEmpty() && pkg.length <= 255 && pkg.all { !it.isWhitespace() && !it.isISOControl() } &&
       PACKAGE.matches(pkg)
 
-  private fun reportsError(output: String): Boolean = output.lineSequence().any { line ->
+  internal fun reportsError(output: String): Boolean = output.lineSequence().any { line ->
     line.contains("Error:", ignoreCase = true) || line.contains("Exception", ignoreCase = true)
   }
 

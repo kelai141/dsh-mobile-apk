@@ -1919,7 +1919,7 @@ class MainActivity : ComponentActivity() {
         onSetVdisplayScale = { value -> VdisplayPrefs.setScale(this, value); VdisplayPrefs.scale(this) },
         onGetVdisplayFloat = { VdisplayPrefs.floatEnabled(this) },
         onSetVdisplayFloat = { enable -> VdisplayPrefs.setFloatEnabled(this, enable); VdisplayPrefs.floatEnabled(this) },
-        onForceDestroyVdisplay = { VdisplayController.forceDestroy(this).toString() },
+        onForceDestroyVdisplay = { forceDestroyVdisplayAndClearUi() },
         // 0.13.5 W4：无障碍控制通道（状态 + 系统设置引导 + Android 13 受限设置一键解锁）。
         onA11yStatus = { DeviceControlService.statusJson(this) },
         onOpenA11ySettings = { openAccessibilitySettings() },
@@ -2580,6 +2580,16 @@ class MainActivity : ComponentActivity() {
       context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         .edit().putBoolean(KEY_DEV_LOG, enabled).apply()
     }
+  }
+
+  /** 强制销毁全部虚拟屏并同步收起浮窗与侧栏画面。 */
+  private fun forceDestroyVdisplayAndClearUi(): String {
+    val reply = VdisplayController.forceDestroy(this)
+    runOnUiThread {
+      vdisplayFloat.hide()
+      vdisplayHost.clearPresentation()
+    }
+    return reply.toString()
   }
 
   internal fun notifyLegacyStorageResult() {

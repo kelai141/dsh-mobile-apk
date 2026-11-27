@@ -293,7 +293,7 @@
 | `ShellUiAutomation.kt` | shell 侧 `UiAutomation` 连接 | 为真实屏节点读写与输入提供 `UiAutomation` 句柄，只在 Shizuku shell 进程内使用。 |
 | `nativecontrol/NativeShizukuMotion.kt` | 固定 argv 的动作执行 | `execute` / `advertisedOps` 只接受枚举过的长按、滚动、全局动作与拉起应用，按 `exactKeys` 与截止时间校验参数。 |
 | `nativecontrol/NativeShizukuExecution.kt` | Shizuku 计划适配 | `execute` 按 `backend=shizuku` 分派节点、输入、帧与动作；工作队列满时回 `shizuku-native-input-busy`，不重放已派发请求。 |
-| `nativecontrol/NativeVdisplayExecution.kt` | 虚拟屏计划适配 | `execute` 绑定 `virtual-N`、generation 与参数后调 `VdisplayController.executeAuthorized`，覆盖建屏、销毁、输入与拉起。 |
+| `nativecontrol/NativeVdisplayExecution.kt` | 虚拟屏计划适配 | `execute` 接受 `backend=shizuku` 或独立授权的 `backend=root`，绑定 `virtual-N`、generation 与参数后调 `VdisplayController.executeAuthorized`，覆盖建屏、销毁与拉起。 |
 | `nativecontrol/NativeAppWebViewExecution.kt` | 自有 WebView 的计划执行 | 读取壳侧 WebView 的 DOM，不当作设备屏 op，也不经无障碍服务分支。 |
 | `nativecontrol/NativeSharedHostExecution.kt` | 平台适配的分发层 | 按计划把 browser op 交给共享桥、vd op 交给虚拟屏适配、其余交给 a11y/Shizuku；`implements` 只表示本适配能执行，不覆盖 Rust 授权。 |
 | `nativecontrol/NativeControlHost.kt` / `NativeControlSocketServer.kt` / `NativeControlFrames.kt` | 私有 socket 宿主与帧协议 | `open` 建私有目录、校验身份并起 socket；帧是 4 字节大端长度前缀的 UTF-8 JSON，字段逐方法白名单。 |
