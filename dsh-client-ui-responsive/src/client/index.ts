@@ -107,6 +107,8 @@ import { zh as bubblesZh, en as bubblesEn } from './mobile/sidebar-bubbles.local
 import { MAIN_PANEL_BACK_CSS } from './mobile/main-panel-back.css.ts'
 import { HIDDEN_BUNDLES_CSS } from './mobile/hidden-bundles.css.ts'
 import { MainPanelBackMount } from './mobile/main-panel-back.ts'
+import { PLUGIN_SETTINGS_CSS } from './plugin-settings.css.ts'
+import { installPluginMenuPosition } from './plugin-menu-position.ts'
 import { PanelNavDrawer } from './mobile/panel-nav-drawer.ts'
 import { MobileSidebarGestures } from './mobile/sidebar-gestures.ts'
 import { SidebarDragPreview } from './mobile/sidebar-drag-preview.ts'
@@ -1062,6 +1064,9 @@ export function apply(ctx: ClientContext): void {
   // this is a stylesheet override keyed on the page's own data attributes, scoped to
   // `html[data-dsh-mobile-form]` - the desktop and web forms keep both entries.
   ctx.effect(() => injectStyle('hidden-bundles', HIDDEN_BUNDLES_CSS), 'ui-responsive: hide Android-unusable plugin bundles')
+
+  ctx.effect(() => injectStyle('plugin-settings', PLUGIN_SETTINGS_CSS), 'ui-responsive: plugin settings layout')
+  ctx.effect(installPluginMenuPosition, 'ui-responsive: plugin menu styling and anchor fallback')
 
   // ── Bridges ─────────────────────────────────────────────────────────────
 
