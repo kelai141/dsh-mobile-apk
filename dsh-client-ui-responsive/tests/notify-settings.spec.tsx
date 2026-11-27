@@ -229,7 +229,7 @@ describe('NotifySettingsRow（块J FIX-4 设置页入口）', () => {
     expect(switchByLabel(el, '前台暂缓工作汇报').checked).toBe(false)
   })
 
-  it('自检：系统把渠道降级时必须说「已降级」，不得显示「未降级任何渠道」', async () => {
+  it('自检：渠道降级时用简短状态，并保留壳侧档位说明', async () => {
     const { bridge } = makeBridge({
       selfCheck: () => shellSelfCheck({
         channels: [
@@ -241,24 +241,19 @@ describe('NotifySettingsRow（块J FIX-4 设置页入口）', () => {
     const el = await render()
     await act(async () => { buttonByText(el, '通知自检').click() })
 
-    expect(el.textContent).toContain('系统已降级以下通知')
-    expect(el.textContent).toContain('提问')
-    expect(el.textContent, '降级时不得再声称未降级').not.toContain('系统未降级任何通知渠道')
-    // 档位取壳侧人话，不印数字（旧页面印的是「（重要性 4）」）。
-    expect(el.textContent).toContain('低（只在通知栏提示，不响铃）')
-    expect(el.textContent).not.toContain('重要性 2')
+    const row = el.querySelector('.dsh-dev-check-row')
+    expect(row?.textContent).toBe('提问已静默')
+    expect(row?.getAttribute('title')).toBe('低（只在通知栏提示，不响铃）')
   })
 
-  it('自检：未被降级时明确说「未降级任何渠道」（与上一条互为正反）', async () => {
+  it('自检：正常渠道显示实际提醒方式，不重复列出总体状态', async () => {
     const { bridge } = makeBridge({ selfCheck: () => shellSelfCheck() })
     setBridge(bridge)
     const el = await render()
     await act(async () => { buttonByText(el, '通知自检').click() })
-    expect(el.textContent).toContain('系统未降级任何通知渠道')
-    expect(el.textContent).not.toContain('系统已降级以下通知')
-    // 总开关与权限也要可见（任务不提醒时用户能看出是哪一层被关）。
-    expect(el.textContent).toContain('应用通知总开关')
-    expect(el.textContent).toContain('已授予')
+    const row = el.querySelector('.dsh-dev-check-row')
+    expect(row?.textContent).toBe('工作汇报弹窗并响铃')
+    expect(el.querySelector('.dsh-dev-notify-check')?.textContent).not.toContain('系统未允许通知')
   })
 
   it('自检：渠道设置深链用的是壳侧给的 selected 渠道 id', async () => {
@@ -271,8 +266,8 @@ describe('NotifySettingsRow（块J FIX-4 设置页入口）', () => {
     setBridge(bridge)
     const el = await render()
     await act(async () => { buttonByText(el, '通知自检').click() })
-    const link = el.querySelector<HTMLButtonElement>('button[aria-label="打开工作汇报的渠道设置"]')
-    expect(link?.textContent, '自检行显示短标签并保留渠道深链').toBe('设置')
+    const link = el.querySelector<HTMLButtonElement>('button[aria-label="工作汇报，弹窗并响铃，打开渠道设置"]')
+    expect(link?.textContent, '整行包含渠道名称与状态').toBe('工作汇报弹窗并响铃')
     await act(async () => { (link as HTMLButtonElement).click() })
     expect(opened).toEqual(['dsh-report'])
   })

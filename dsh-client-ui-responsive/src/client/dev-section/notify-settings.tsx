@@ -90,11 +90,24 @@ interface NotifyChannelRow {
   guidance?: string
 }
 
+function channelStatus(channel: NotifyChannelRow): string {
+  if (channel.degraded === true) return tr('已静默', 'Muted')
+  if (channel.exists === false) return tr('未创建', 'Not created')
+  switch (channel.importance) {
+    case 5:
+    case 4: return tr('弹窗并响铃', 'Pop-up and sound')
+    case 3: return tr('响铃', 'Sound')
+    case 2: return tr('仅通知栏', 'Notification shade')
+    case 1: return tr('静默显示', 'Silent')
+    case 0: return tr('已关闭', 'Off')
+    default: return tr('状态未知', 'Unknown')
+  }
+}
+
 interface NotifySelfCheck {
   ok?: boolean
   notificationsEnabled?: boolean
   permissionGranted?: boolean
-  permissionLabel?: string
   channels?: ReadonlyArray<NotifyChannelRow>
 }
 
@@ -190,7 +203,6 @@ export function NotifySettingsRow() {
       ? tr('已允许', 'Allowed')
       : tr('状态不可用', 'Status unavailable')
   const channelRows: ReadonlyArray<NotifyChannelRow> = selfCheck?.channels ?? []
-  const degradedRows = channelRows.filter((row) => row.degraded === true)
   /** 渠道档位文本：壳侧人话优先，缺失才回退到页面侧的数值翻译（快照可能比 APK 新）。 */
   const importanceTextOf = (row: NotifyChannelRow): string =>
     row.importanceLabel !== undefined && row.importanceLabel !== ''
@@ -287,39 +299,31 @@ export function NotifySettingsRow() {
         )}
         {selfCheck !== null && (
           <div className="dsh-dev-notify-check">
-            {/* 总开关与权限：任务完成却不提醒时，用户至少能在这里看到是哪一层被关了。 */}
-            <p className="dsh-dev-hint">
-              {tr('应用通知总开关：', 'App notifications: ')}{selfCheck.notificationsEnabled === false ? tr('系统已关闭', 'off in system') : tr('已开启', 'on')}
-              {tr('；', '; ')}{tr('通知权限：', 'permission: ')}{selfCheck.permissionLabel ?? (selfCheck.permissionGranted === true ? tr('已授予', 'granted') : tr('未授予（任务完成不会提醒）', 'not granted (no alerts)'))}
-            </p>
-            {degradedRows.length > 0 ? (
-              <p className="dsh-dev-warn">
-                {tr('系统已降级以下通知：', 'The system muted these channels: ')}{degradedRows.map((row) => row.label ?? row.category ?? tr('未知渠道', 'unknown channel')).join(tr('、', ', '))}{tr('。应用无法调回，需在系统设置里恢复（可从右侧按钮进入）。', '. The app cannot undo this; restore it in system settings (use the button on the right).')}
-              </p>
-            ) : (
-              <p className="dsh-dev-hint">{tr('系统未降级任何通知渠道。', 'No notification channel is muted by the system.')}</p>
+            <h4>{tr('通知渠道', 'Notification channels')}</h4>
+            {(selfCheck.notificationsEnabled === false || selfCheck.permissionGranted === false) && (
+              <p className="dsh-dev-hint">{tr('系统未允许通知，以下是各渠道的设置。', 'Android is blocking notifications. These are the channel settings.')}</p>
             )}
-            {channelRows.map((channel) => {
-              const label = channel.label ?? channel.category ?? tr('未知渠道', 'Unknown channel')
-              const channelId = channel.selected ?? ''
-              const importance = importanceTextOf(channel)
-              const status = channel.degraded === true
-                ? tr('系统已降级', 'Muted by system')
-                : channel.exists === false ? tr('渠道不存在', 'Channel missing') : tr('正常', 'Normal')
-              return (
-                <div key={channel.category ?? channelId} className="dsh-gs-row dsh-dev-check-row">
-                  <div className="dsh-gs-text">
-                    <div className="dsh-gs-title">{label}</div>
-                    <div className="dsh-gs-desc">
-                      {channel.degraded === true && importance !== '' ? status + ' · ' + importance
-                        : channel.exists === false || importance === '' ? status : importance}
-                    </div>
-                  </div>
-                  {channelId !== '' && (
-                    <div className="dsh-gs-control">
-                      <Button
-                        size="sm"
-                        aria-label={tr('打开' + label + '的渠道设置', 'Open ' + label + ' channel settings')}
+            <ul className="dsh-notify-channels">
+              {channelRows.map((channel) => {
+                const label = channel.label ?? channel.category ?? tr('未知渠道', 'Unknown channel')
+                const channelId = channel.selected ?? ''
+                const status = channelStatus(channel)
+                const contents = (
+                  <>
+                    <span>{label}</span>
+                    <span className="dsh-notify-channel-status">{status}</span>
+                  </>
+                )
+                return (
+                  <li key={channel.category ?? channelId}>
+                    {channelId === '' ? (
+                      <div className="dsh-dev-check-row" title={importanceTextOf(channel)}>{contents}</div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="dsh-dev-check-row"
+                        title={importanceTextOf(channel)}
+                        aria-label={tr(label + '，' + status + '，打开渠道设置', label + ', ' + status + ', open channel settings')}
                         onClick={() => {
                           let opened = false
                           try {
@@ -330,13 +334,14 @@ export function NotifySettingsRow() {
                           if (!opened) setMessage({ diagnostics: true, text: tr('无法打开该渠道的系统设置页，请在系统设置里手动查找。', 'The channel settings page did not open. Find it in system settings.') })
                         }}
                       >
-                        {tr('设置', 'Settings')}
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              )
-            })}
+                        {contents}
+                        <IconChevronRightOutlineMedium size={14} aria-hidden="true" />
+                      </button>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
           </div>
         )}
         {message?.diagnostics && (

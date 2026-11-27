@@ -523,15 +523,61 @@ body[data-ds-dark-theme] .dsh-dev-error {
   }
 }
 
-/* 通知自检面（批 4）：每渠道一行「系统实际状态 + 直达系统设置」——此前这条信息零调用点。 */
+/* Diagnostic rows use the same type scale and dividers as settings. */
 .dsh-dev-notify-check {
-  display: grid;
-  gap: 4px;
-  margin-top: 8px;
+  margin-block-start: 12px;
 }
 
-[data-plugin='dev-notify-settings'] .dsh-dev-check-row {
-  padding-block: 8px;
-  gap: 12px;
+.dsh-dev-notify-check h4 {
+  margin: 0 0 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.dsh-notify-channels {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dsh-notify-channels li + li {
+  border-block-start: 0.5px solid var(--dsw-alias-border-l2);
+}
+
+.dsh-dev-check-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 14px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 14px;
+  text-align: start;
+}
+
+button.dsh-dev-check-row {
+  cursor: pointer;
+}
+
+button.dsh-dev-check-row:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, currentColor);
+  outline-offset: -2px;
+}
+
+.dsh-dev-check-row > svg,
+.dsh-notify-channel-status {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsh-notify-channel-status {
+  font-size: 12px;
+  text-align: end;
 }
 `
