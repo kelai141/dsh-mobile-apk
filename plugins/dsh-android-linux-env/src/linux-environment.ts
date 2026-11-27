@@ -414,16 +414,17 @@ export function normalizeLinuxStatus(status: BootstrapStatus) {
  * Start the opted-in check after the installed runtime has been restored.
  * The bootstrap owns the persisted time-based cooldown.
  */
-export async function checkLinuxEnvironmentOnStartup(bootstrap: LinuxBootstrap): Promise<void> {
-  const status = await bootstrap.status()
+export async function checkLinuxEnvironmentOnStartup(
+  bootstrap: LinuxBootstrap,
+  initialStatus?: BootstrapStatus | PromiseLike<BootstrapStatus>,
+): Promise<void> {
+  const status = await (initialStatus ?? bootstrap.status())
   const installed = status.installed ?? Boolean(status.installedLinuxVersion)
   if (!installed) return
   if (status.operation && status.operation !== 'idle') return
-  if (status.autoStart !== undefined) {
-    await bootstrap.checkForUpdates({ source: 'startup' })
-  } else if ((status.autoUpdate ?? status.autoUpdateEnabled) === true && status.injectionActivated !== false && status.enabled !== false) {
-    await bootstrap.checkForUpdates({ source: 'automatic' })
-  }
+  if ((status.autoUpdate ?? status.autoUpdateEnabled) !== true) return
+  if (status.injectionActivated === false || status.enabled === false) return
+  await bootstrap.checkForUpdates({ source: status.autoStart !== undefined ? 'startup' : 'automatic' })
 }
 
 const ROUTES = [

@@ -28,10 +28,10 @@ export function createLinuxLifecycle() {
   }
   return {
     snapshot: () => ({ phase, ready: phase === 'ready', engine: 'dsh' as const, message: detail }),
-    async attach(bootstrap: LinuxBootstrap) {
+    async attach(bootstrap: LinuxBootstrap, initialStatus?: BootstrapStatus | PromiseLike<BootstrapStatus>) {
       if (terminal()) return
       // status() can wait for restore; never await it from the parent apply or a tool call.
-      update(await bootstrap.status())
+      update(await (initialStatus ?? bootstrap.status()))
       if (!terminal()) {
         activeBootstrap = bootstrap
         unsubscribe = bootstrap.subscribe?.(update)
