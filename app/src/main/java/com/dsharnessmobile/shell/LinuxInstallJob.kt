@@ -99,9 +99,15 @@ internal object LinuxInstallJob {
     val assets = job.getJSONArray("assets")
     val index = job.getInt("index")
     val spec = assets.optJSONObject(index)
+    val currentProgress = if (spec?.optString("sha256") == progress.optString("sha256")) progress else JSONObject()
+    val totalBytes = (0 until assets.length()).sumOf { assets.getJSONObject(it).getLong("size") }
+    val preparedBytes = (0 until index.coerceIn(0, assets.length())).sumOf { assets.getJSONObject(it).getLong("size") }
+    val currentBytes = currentProgress.optLong("bytes").coerceIn(0L, spec?.optLong("size") ?: 0L)
     JSONObject().put("state", job.optString("state")).put("error", job.optString("error"))
+      .put("runtimeId", job.optString("runtimeId")).put("version", job.optString("version"))
+      .put("totalBytes", totalBytes).put("availableBytes", preparedBytes + currentBytes)
       .put("index", index + 1).put("total", assets.length()).put("kind", spec?.optString("kind"))
-      .put("progress", if (spec?.optString("sha256") == progress.optString("sha256")) progress else JSONObject())
+      .put("progress", currentProgress)
       .toString()
   }
 

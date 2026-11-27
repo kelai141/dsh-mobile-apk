@@ -18,6 +18,7 @@ import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { BROWSER_PENDING_ATTR } from './browser-auto-place.ts'
 import css from './MobileChrome.module.css'
 import { tr } from '../i18n.ts'
+import { LinuxDownloadButton } from '../linux-environment/LinuxDownloadButton.tsx'
 
 /** Copy follows the active UI language (see i18n.ts). */
 const toggleLabel = (open: boolean): string => (open ? tr('关闭导航', 'Close navigation') : tr('打开导航', 'Open navigation'))
@@ -26,6 +27,7 @@ const toggleLabel = (open: boolean): string => (open ? tr('关闭导航', 'Close
 export interface SidebarToggleInjected {
   /** Toggle the frame's left sidebar (upstream ctx.layout.toggleSidebar). */
   toggleSidebar(): void
+  openDownloads?(): void
 }
 
 /** Full props: the header-leading runtime share plus the injected toggle. */
@@ -98,7 +100,7 @@ function useBrowserPending(): boolean {
  * @param props - runtime share and the injected toggle.
  * @returns the toggle button, with the pending-browser badge when one is waiting.
  */
-export function SidebarToggle({ toggleSidebar }: SidebarToggleProps) {
+export function SidebarToggle({ toggleSidebar, openDownloads }: SidebarToggleProps) {
   const open = useSidebarOpen()
   const browserPending = useBrowserPending()
   useEffect(() => {
@@ -132,6 +134,7 @@ export function SidebarToggle({ toggleSidebar }: SidebarToggleProps) {
         {tr('有浏览器标签待展开', 'A browser tab is ready')}
       </span>
     )}
+    {openDownloads && <LinuxDownloadButton open={openDownloads} />}
     </>
   )
 }

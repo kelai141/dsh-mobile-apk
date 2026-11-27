@@ -4,9 +4,14 @@ import { SUBLAYER_POP_EVENT } from '../mobile/back-stack.ts'
  * 终端与工具链是子页，返回只退出子页。终端会话由引擎持有。
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  Button, IconChevronDownOutlineMedium, IconChevronLeftOutlineMedium, IconChevronRightOutlineMedium,
+  IconCodeOutlineMedium, Modal, Switch,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import { LinuxTerminal } from './LinuxTerminal.tsx'
 import { LinuxToolchains } from './LinuxToolchains.tsx'
+import { downloadStatus, LinuxDownloadProgress } from './LinuxDownloadButton.tsx'
+import { acknowledgeInstallJob, formatBytes, refreshInstallJob, useLinuxInstallJob } from './install-job.ts'
 import { tr } from '../i18n.ts'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '../android-bridge.ts'
@@ -29,7 +34,6 @@ import {
   uninstallEnvironment,
   type AssetProgress,
   type LinuxStatus,
-  type InstallJob,
 } from './transport.ts'
 
 /** 轮询间隔（页面可见时才轮询）。 */
@@ -70,14 +74,6 @@ interface ProgressState {
   bytes?: number
   size?: number
   speed?: number
-}
-
-/** 字节数（下载体量提示）。 */
-function fmtBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024 * 1024) return (bytes / 1024 / 1024 / 1024).toFixed(1) + ' GB'
-  if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB'
-  if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB'
-  return bytes + ' B'
 }
 
 /** 资产字段 → 用户看得懂的名字。 */
@@ -164,7 +160,7 @@ function primaryState(installed: boolean, status: LinuxStatus | null): PrimarySt
 /** 主按钮文案（含可更新版本号，便于确认要装到哪一版）。 */
 function primaryLabel(state: PrimaryState, status: LinuxStatus | null): string {
   switch (state) {
-    case 'install': return tr('一键下载并安装', 'Download and install')
+    case 'install': return tr('下载并安装', 'Download and install')
     case 'current': return tr('已是最新版本', 'Up to date')
     case 'blocked': return tr('已阻止降级', 'Downgrade blocked')
     case 'update':
@@ -179,6 +175,7 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
   const [advanced, setAdvanced] = useState(false)
+  const [confirmUninstall, setConfirmUninstall] = useState(false)
   const [source, setSource] = useState(savedSource)
   const [status, setStatus] = useState<LinuxStatus | null>(null)
   const [statusError, setStatusError] = useState('')
@@ -188,7 +185,8 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
   const [phase, setPhase] = useState<Phase>('idle')
   const [autoCheckState, setAutoCheckState] = useState<AutoCheckState>('idle')
   const [autoCheckError, setAutoCheckError] = useState('')
-  const [job, setJob] = useState<InstallJob | undefined>(installJobStatus)
+  const job = useLinuxInstallJob()
+  const [firstDownloadBytes, setFirstDownloadBytes] = useState<number>()
   const sectionRef = useRef<HTMLElement>(null)
   const autoCheckStartedRef = useRef(false)
   const statusRevision = useRef({ issued: 0, applied: 0 })
@@ -258,7 +256,6 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
       reading = true
       const currentJob = installJobStatus()
       let busy = inFlight || ['queued', 'paused', 'installing'].includes(currentJob?.state ?? '')
-      setJob(currentJob)
       const revision = ++statusRevision.current.issued
       try {
         const next = await fetchStatus()
@@ -304,17 +301,26 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
       : (status?.defaultRuntimeId ?? runtimes[0]?.id ?? ''))
 
   const installed = status?.installed === true
+  useEffect(() => {
+    if (installed || autoCheckState === 'checking') return
+    let active = true
+    setFirstDownloadBytes(undefined)
+    void fetchManifest().then(manifest => {
+      const { runtime, specs } = assetsFor(manifest, {
+        runtimeId: selectedRuntime || undefined,
+        architecture: status?.architecture,
+      })
+      if (active && runtime && specs.length) setFirstDownloadBytes(totalBytes(specs))
+    }).catch(() => { /* The install action refreshes the release if the cached manifest is missing. */ })
+    return () => { active = false }
+  }, [installed, selectedRuntime, status?.architecture, status?.latestReleaseVersion, autoCheckState])
+
   const primary = primaryState(installed, status)
   // A finished or failed attempt is not busy: the retry/back buttons must stay
   // reachable (a failed update on an installed environment still needs a way
   // back to the conversation).
   const jobWorking = job?.state === 'queued' || job?.state === 'paused' || job?.state === 'installing'
-  const progress = localProgress ?? (jobWorking && job ? {
-    stage: job.state === 'installing' ? 'installing' : 'assets',
-    index: job.index, total: job.total, field: job.kind ?? '',
-    phase: job.state === 'paused' ? 'paused' : job.progress?.stage ?? 'starting',
-    size: job.progress?.size, bytes: job.progress?.bytes, speed: job.progress?.speed,
-  } as ProgressState : null)
+  const progress = localProgress
   const attempting = jobWorking || (phase !== 'idle' && phase !== 'done' && phase !== 'failed')
   const busy = status?.busy === true || attempting
   // 已确认没有新版本（或已阻止降级）时不提供更新动作：引擎会把同版本 install 当成
@@ -323,6 +329,15 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
   const primaryDisabled = busy || primary === 'current' || primary === 'blocked'
   // 安装失败时，状态文案和控件反映当前操作。
   const ready = installed && status?.injectionActivated !== false && status?.runtime?.healthy !== false
+  const healthy = ready && status?.runtime?.healthy === true
+  const canOfferInstall = !installed && !attempting && job?.state !== 'failed' && phase !== 'failed'
+  const showTransfer = !!job && (jobWorking || job.state === 'failed')
+  const showTransferDetails = showTransfer && (!sidebar || job?.state === 'failed')
+  const canUpdate = installed && (primary === 'update' || primary === 'unknown')
+  const openTerminal = () => {
+    acknowledgeInstallJob()
+    setTerminalOpen(true)
+  }
   const selectSource = (value: string) => {
     setSource(value)
     try { localStorage.setItem(SOURCE_KEY, value) } catch { /* The source remains selected for this page. */ }
@@ -365,8 +380,9 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
         }
         if (window.androidBridge?.linuxInstallJob && manifest.version) {
           startInstallJob(manifest.version, runtime.id, specs, source, runtime.sharedNodeReuse === true)
-          setJob(installJobStatus())
+          refreshInstallJob()
           setPhase('idle')
+          if (sidebar && current?.installed !== true && !installed) close()
           return
         }
         next = await installRuntimeAssets(runtime, specs, current, assets => {
@@ -441,11 +457,6 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
 
   const operation = operationText(status?.operation)
   const pauseDownload = () => {
-    if (jobWorking && window.androidBridge?.linuxInstallJob) {
-      window.androidBridge.linuxInstallJob(progress?.phase === 'paused' ? 'retry' : 'pause', null)
-      setJob(installJobStatus())
-      return
-    }
     if (progress?.phase === 'paused') window.androidBridge?.linuxAssetResume?.()
     else window.androidBridge?.linuxAssetPause?.()
   }
@@ -461,19 +472,74 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
       aria-label={tr('Linux环境', 'Linux environment')}
     >
       {sidebar && <header className="dsh-linux-panel-header">
-        <Button size="sm" variant="outline" data-dsh-linux-back="" onClick={() => {
+        <button type="button" className="dsh-resource-back" data-dsh-linux-back=""
+          aria-label={tr('返回', 'Back')} onClick={() => {
           const result = window.__dshNavigationBack?.('control')
           if (result !== undefined && result !== 'root') return
           if (terminalOpen) setTerminalOpen(false)
           else if (toolsOpen) setToolsOpen(false)
           else close()
-        }}>{tr('返回', 'Back')}</Button>
+        }}><IconChevronLeftOutlineMedium size={18} /></button>
         <h1>{terminalOpen ? tr('终端', 'Terminal') : toolsOpen
-          ? tr('工具链', 'Toolchains') : tr('Linux 环境', 'Linux environment')}</h1>
+          ? tr('工具链', 'Toolchains') : tr('可选资源', 'Optional resources')}</h1>
       </header>}
       {terminalOpen ? <LinuxTerminal onBack={sidebar ? undefined : () => setTerminalOpen(false)} /> :
         toolsOpen ? <LinuxToolchains onBack={sidebar ? undefined : () => setToolsOpen(false)} /> : <>
-      {(!installed || status?.updateAvailable === true || advanced) && <>
+      <div className="dsh-resource-row" data-dsh-resource-card="linux">
+        <span className="dsh-resource-glyph" aria-hidden="true"><IconCodeOutlineMedium size={18} /></span>
+        <div className="dsh-resource-copy">
+          <h2>{tr('Linux 工作环境', 'Linux workspace')}</h2>
+          {showTransfer && job && !showTransferDetails ? <p role="status">{downloadStatus(job)}</p> :
+            healthy ? <p role="status">{tr('已就绪', 'Ready')}</p> :
+            !installed && !showTransfer && <p>
+              {tr('在手机上使用终端和开发工具。', 'Use a terminal and development tools on your phone.')}
+            </p>}
+          {canOfferInstall && firstDownloadBytes !== undefined && <p className="dsh-resource-size" data-dsh-resource-size="">
+            {tr('约 ', 'About ') + formatBytes(firstDownloadBytes)}
+          </p>}
+        </div>
+        {!showTransfer && (installed ?
+          <Button variant="primary" className="dsh-resource-primary" data-linux-action="terminal"
+            disabled={!ready} onClick={openTerminal}>
+            {tr('打开终端', 'Open terminal')}
+          </Button> : canOfferInstall &&
+          <Button variant="primary" className="dsh-resource-primary" data-linux-action="install"
+            data-linux-primary="install" disabled={primaryDisabled} onClick={() => { void install() }}>
+            {primaryLabel(primary, status)}
+          </Button>)}
+      </div>
+      {showTransferDetails && job && <div className="dsh-resource-section-transfer"><LinuxDownloadProgress job={job} /></div>}
+      {installed && sidebar && <h2 className="dsh-resource-group-title">{tr('管理', 'Manage')}</h2>}
+      {!installed && !attempting && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
+        data-linux-action="settings" aria-expanded={advanced} onClick={() => setAdvanced(value => !value)}>
+        <span>{tr('下载设置', 'Download settings')}</span>
+        {advanced ? <IconChevronDownOutlineMedium size={14} /> : <IconChevronRightOutlineMedium size={14} />}
+      </button>}
+      <p className="dsh-linux-env-status" role="status" aria-live="polite"
+        hidden={statusError === '' && !advanced && (!installed || healthy)}
+        data-linux-status="summary"
+        data-linux-ready={ready && phase !== 'failed' ? 'true' : undefined}
+        data-linux-auto-check={installed && autoCheckState === 'done' && status?.updateAvailable === true ? 'update-available' : undefined}>
+        {statusError !== '' ? tr('状态暂不可读：', 'Status unavailable: ') + statusError : statusText(status)}
+      </p>
+      {installed && status?.autoStart !== undefined && (advanced || !ready) && <div className="dsh-linux-env-row">
+        <span>{tr('运行 Linux', 'Run Linux')}</span>
+        <Switch label={tr('运行 Linux', 'Run Linux')} disabled={busy} checked={status.injectionActivated === true}
+          onChange={enabled => {
+            if (!enabled && !window.confirm(tr('停止 Linux 会结束正在运行的终端和任务。', 'Stopping Linux ends active terminals and jobs.'))) return
+            void run(() => setRuntimePreference({ enabled }), 'idle')
+          }} />
+      </div>}
+      {installed && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
+        data-linux-action="toolchains" disabled={!ready || busy} onClick={() => setToolsOpen(true)}>
+        <span>{tr('工具链与存储', 'Toolchains and storage')}</span><IconChevronRightOutlineMedium size={14} />
+      </button>}
+      {installed && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
+        data-linux-action="settings" aria-expanded={advanced} onClick={() => setAdvanced(value => !value)}>
+        <span>{tr('Linux 设置', 'Linux settings')}</span>
+        {advanced ? <IconChevronDownOutlineMedium size={14} /> : <IconChevronRightOutlineMedium size={14} />}
+      </button>}
+      {advanced && <>
         <label className="dsh-linux-env-row">
           <span>{tr('下载来源', 'Download source')}</span>
           <select value={source === 'official' ? 'official' : 'mirror'} disabled={busy}
@@ -489,50 +555,24 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
           </select>
         </label>}
       </>}
-
-      <p className="dsh-linux-env-status" role="status" aria-live="polite" data-linux-status="summary"
-        data-linux-ready={ready && phase !== 'failed' ? 'true' : undefined}
-        data-linux-auto-check={installed && autoCheckState === 'done' && status?.updateAvailable === true ? 'update-available' : undefined}>
-        {statusError !== '' ? tr('状态暂不可读：', 'Status unavailable: ') + statusError : statusText(status)}
-      </p>
-      {installed && status?.autoStart !== undefined && <div className="dsh-linux-env-row">
-        <span>{tr('运行 Linux', 'Run Linux')}</span>
-        <Switch label={tr('运行 Linux', 'Run Linux')} disabled={busy} checked={status.injectionActivated === true}
-          onChange={enabled => {
-            if (!enabled && !window.confirm(tr('停止 Linux 会结束正在运行的终端和任务。', 'Stopping Linux ends active terminals and jobs.'))) return
-            void run(() => setRuntimePreference({ enabled }), 'idle')
-          }} />
-      </div>}
-      {installed && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
-        data-linux-action="terminal" disabled={!ready} onClick={() => setTerminalOpen(true)}>
-        <span>{tr('终端', 'Terminal')}</span><span aria-hidden="true">›</span>
-      </button>}
-      {installed && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
-        data-linux-action="toolchains" disabled={!ready || busy} onClick={() => setToolsOpen(true)}>
-        <span>{tr('工具链与存储', 'Toolchains and storage')}</span><span aria-hidden="true">›</span>
-      </button>}
-      {installed && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
-        data-linux-action="settings" aria-expanded={advanced} onClick={() => setAdvanced(value => !value)}>
-        <span>{tr('Linux 设置', 'Linux settings')}</span><span aria-hidden="true">{advanced ? '−' : '›'}</span>
-      </button>}
-      {autoCheckState === 'checking' && !attempting && phase !== 'failed' && (
+      {advanced && autoCheckState === 'checking' && !attempting && phase !== 'failed' && (
         <p className="dsh-linux-env-hint" role="status" data-linux-auto-check="checking">
           {tr('正在自动查询上游最新版本…', 'Checking upstream for the latest version…')}
         </p>
       )}
-      {autoCheckState === 'done' && !installed && !attempting && phase !== 'failed' && status?.updateAvailable === true && status?.availableVersion && (
+      {advanced && autoCheckState === 'done' && !installed && !attempting && phase !== 'failed' && status?.updateAvailable === true && status?.availableVersion && (
         <p className="dsh-linux-env-hint" data-linux-auto-check="update-available">
           {tr('可安装版本 ', 'Available version ') + status.availableVersion}
         </p>
       )}
-      {autoCheckState === 'done' && !attempting && phase !== 'failed' && installed && status?.updateAvailable === false && status?.updateBlocked !== true && (
+      {(!sidebar || advanced) && autoCheckState === 'done' && !attempting && phase !== 'failed' && installed && status?.updateAvailable === false && status?.updateBlocked !== true && (
         <p className="dsh-linux-env-hint" data-linux-auto-check="up-to-date">
           {status.latestReleaseVersion
             ? tr('已安装上游最新版本 ' + status.latestReleaseVersion + '。', 'Latest upstream release ' + status.latestReleaseVersion + ' is installed.')
             : tr('已查询上游最新版本：当前已是最新。', 'Checked upstream: already up to date.')}
         </p>
       )}
-      {autoCheckState === 'failed' && autoCheckError !== '' && !attempting && phase !== 'failed' && (
+      {(!sidebar || advanced) && autoCheckState === 'failed' && autoCheckError !== '' && !attempting && phase !== 'failed' && (
         <p className="dsh-linux-env-hint" data-linux-auto-check="failed">
           {tr('自动查询上游更新失败（不影响现有环境与重装/卸载）：', 'Automatic update check failed (existing environment, reinstall, and removal remain available): ') + autoCheckError}
         </p>
@@ -541,7 +581,7 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
         <p className="dsh-linux-env-hint" role="status" data-linux-operation={status?.operation}>{operation}</p>
       )}
 
-      {runtimes.length > 1 && (
+      {advanced && runtimes.length > 1 && (
         <label className="dsh-linux-env-row">
           <span>{tr('Linux 运行时', 'Linux runtime')}</span>
           <select
@@ -594,7 +634,7 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
         </dl>
       </details>}
 
-      {progress !== null && (
+      {!showTransfer && progress !== null && (
         <div className="dsh-linux-env-progress" data-linux-progress={progress.stage}>
           <p role="status">{progress.stage === 'manifest'
             ? tr('正在读取发布清单…', 'Reading the release manifest…')
@@ -602,7 +642,7 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
               ? tr('正在安装并初始化…', 'Installing and initializing…')
               : (progress.index === undefined || progress.index === 0
                 ? tr('正在准备下载 ', 'Preparing ') + String(progress.total ?? 0) + tr(' 个资产', ' assets')
-                  + (progress.bytes !== undefined && progress.bytes > 0 ? tr('（约 ', ' (about ') + fmtBytes(progress.bytes) + '）' : '')
+                   + (progress.bytes !== undefined && progress.bytes > 0 ? tr('（约 ', ' (about ') + formatBytes(progress.bytes) + '）' : '')
                 : fieldLabel(progress.field ?? '') + ' ' + String(progress.index) + '/' + String(progress.total ?? 0) + tr('：', ': ')
                   + (progress.phase === 'staged'
                     ? tr('已就绪', 'ready')
@@ -613,10 +653,10 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
           {progress.stage === 'assets' && (progress.size ?? 0) > 0 && <>
             <progress aria-label={tr('下载进度', 'Download progress')} max={progress.size} value={progress.bytes ?? 0} />
             <div className="dsh-linux-env-row">
-              <span>{fmtBytes(Math.max(0, (progress.size ?? 0) - (progress.bytes ?? 0)))} {tr('剩余', 'remaining')}
-                {(progress.speed ?? 0) > 0 && ' · ' + fmtBytes(progress.speed!) + '/s'}</span>
+              <span>{tr('剩余 ', 'Remaining ') + formatBytes(Math.max(0, progress.size! - (progress.bytes ?? 0)))}
+                {(progress.speed ?? 0) > 0 && ' · ' + formatBytes(progress.speed!) + '/s'}</span>
               {(progress.phase === 'paused' || progress.phase === 'downloading') &&
-                (window.androidBridge?.linuxInstallJob || window.androidBridge?.linuxAssetPause) &&
+                window.androidBridge?.linuxAssetPause &&
                 <Button size="sm" variant="outline" onClick={pauseDownload}>
                   {progress.phase === 'paused' ? tr('继续', 'Resume') : tr('暂停', 'Pause')}
                 </Button>}
@@ -625,50 +665,34 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
         </div>
       )}
 
-      <div className="dsh-linux-env-actions">
-        {(!installed || primary === 'update' || primary === 'unknown') && <button
-          type="button"
-          className="dsh-dev-btn dsh-linux-env-primary"
-          data-linux-action={installed ? 'update' : 'install'}
+      {(advanced || (canUpdate && !sidebar)) && <div className="dsh-linux-env-actions">
+        {canUpdate && <Button size="sm" variant="outline"
+          data-linux-action="update"
           data-linux-primary={primary}
           disabled={primaryDisabled}
           onClick={() => { void install() }}
         >
           {primaryLabel(primary, status)}
-        </button>}
-        <button
-          type="button"
-          className="dsh-dev-btn"
+        </Button>}
+        {advanced && <Button size="sm" variant="outline"
           data-linux-action="check"
           disabled={busy}
           onClick={() => { void run(queryLatestRelease, 'checking') }}
         >
           {tr('检查更新', 'Check for updates')}
-        </button>
-        {installed && advanced && <button
-          type="button"
-          className="dsh-dev-btn"
+        </Button>}
+        {installed && advanced && <Button size="sm" variant="outline"
           data-linux-action="reinstall"
-          disabled={busy || !installed}
+          disabled={busy}
           onClick={() => { void install({ reinstall: true }) }}
         >
           {tr('重新安装', 'Reinstall')}
-        </button>}
-        {installed && advanced && <button
-          type="button"
-          className="dsh-dev-btn dsh-dev-danger"
-          data-linux-action="uninstall"
-          disabled={busy || !installed}
-          onClick={() => {
-            if (window.confirm(tr('卸载 Linux 环境及其根文件系统？', 'Remove Linux and its root filesystem?'))) {
-              void run(() => uninstallEnvironment(), 'uninstalling')
-            }
-          }}
-        >
-          {tr('卸载 Linux 环境', 'Remove Linux environment')}
-        </button>}
-
-      </div>
+        </Button>}
+      </div>}
+      {installed && advanced && <button type="button" className="dsh-linux-env-row dsh-linux-env-link"
+        data-linux-action="uninstall" disabled={busy} onClick={() => setConfirmUninstall(true)}>
+        <span>{tr('卸载 Linux 环境', 'Remove Linux environment')}</span><IconChevronRightOutlineMedium size={14} />
+      </button>}
 
       {phase === 'failed' && error !== '' && (
         <div className="dsh-linux-env-error" role="alert" data-linux-error="true">
@@ -684,16 +708,35 @@ export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): v
           </button>
         </div>
       )}
-      {job?.state === 'failed' && <div className="dsh-linux-env-error" role="alert">
-        <p>{tr('安装任务中断。继续后将复用已经下载的文件。', 'Installation stopped. Retrying will reuse the downloaded files.')}</p>
-        {job.error && <small>{job.error}</small>}
-        <Button size="sm" variant="outline" onClick={() => {
-          window.androidBridge?.linuxInstallJob?.('retry', null)
-          setJob(installJobStatus())
-        }}>{tr('继续安装', 'Resume installation')}</Button>
-      </div>}
+      {job?.state === 'failed' && job.error && <details className="dsh-linux-diagnostics">
+        <summary className="dsh-linux-env-row dsh-linux-env-link">{tr('查看失败原因', 'View failure details')}</summary>
+        <p className="dsh-linux-env-hint">{job.error}</p>
+      </details>}
 
       </>}
+      <Modal
+        open={confirmUninstall}
+        onClose={() => setConfirmUninstall(false)}
+        title={tr('卸载 Linux 环境？', 'Remove the Linux environment?')}
+        className="dsh-linux-uninstall-dialog"
+        backdropBlur={false}
+        headless
+      >
+        <h2>{tr('卸载 Linux 环境？', 'Remove the Linux environment?')}</h2>
+        <p>{tr('这会删除 Linux 根文件系统及其中的软件包。', 'This removes the Linux root filesystem and its installed packages.')}</p>
+        <div className="dsh-linux-uninstall-actions">
+          <Button data-modal-autofocus="" data-linux-uninstall="cancel" onClick={() => setConfirmUninstall(false)}>
+            {tr('取消', 'Cancel')}
+          </Button>
+          <Button variant="outline" className="dsh-resource-danger" data-linux-uninstall="confirm"
+            disabled={busy || !installed} onClick={() => {
+              setConfirmUninstall(false)
+              void run(uninstallEnvironment, 'uninstalling')
+            }}>
+            {tr('卸载', 'Remove')}
+          </Button>
+        </div>
+      </Modal>
     </section>
   )
 }
