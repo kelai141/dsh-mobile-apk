@@ -16,16 +16,13 @@
 import { tr } from '../i18n.ts'
 import { forwardControlClick } from './activation-guard.ts'
 
-/** 已处理的原节点标记（值 = 抓到的引擎版本）。 */
+/** Marks the upstream version row as an insertion point for About. */
 const HANDLED = 'data-dsh-about-source'
 /** 我们插入的入口标记，避免重复插入。 */
 const ENTRY = 'data-dsh-about-entry'
 
-/** 从文案里抓版本号：0.2.1-rc.2 / 0.14.9 都吃。 */
+/** Recognize the upstream version label before inserting the entry. */
 const VERSION = /\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?/
-
-/** 抓到的引擎版本；供「关于」页面读取（空 = 尚未抓到）。 */
-let engineVersion = ''
 
 /**
  * 是否已经成功接管过（内联入口插进去过一次）。
@@ -35,34 +32,6 @@ let engineVersion = ''
  * 一级列表里」。只有从未接管成功（精确文案没找到）时才保留导航行作为兜底入口。
  */
 let entryInstalled = false
-
-/**
- * 当前已知的引擎版本；空串表示还没从上游那行抓到。
- *
- * 兜底：内存值会随模块重载（热推 / 页面重载 / 插件重新装配）丢掉，而 `data-dsh-about-source`
- * 是写在 DOM 上的、跨实例存活的同一份事实。空值时回读一次并缓存——否则「先接管过、之后
- * 重载模块、再进关于页」会显示 `—`，看起来像引擎版本取不到。
- *
- * @returns 引擎版本号；真拿不到时为空串（调用方如实显示占位符）。
- */
-export function getEngineVersion(): string {
-  if (engineVersion !== '') return engineVersion
-  const marked = document.querySelector('[data-dsh-about-source]')
-  const fromDom = marked?.getAttribute(HANDLED)?.trim() ?? ''
-  if (fromDom !== '') engineVersion = fromDom
-  return engineVersion
-}
-
-/** 读取壳（APK）版本名；桥缺席返回空串。 */
-export function getShellVersion(): string {
-  const bridge = (window as unknown as { androidBridge?: { version?: () => string } }).androidBridge
-  if (typeof bridge?.version !== 'function') return ''
-  try {
-    return String(bridge.version() ?? '').trim()
-  } catch {
-    return ''
-  }
-}
 
 /** 信息圆环图标（与行内其它图标同一线宽）。 */
 function infoIcon(): SVGSVGElement {
@@ -111,7 +80,6 @@ function ensureEntry(node: HTMLElement): void {
     button.appendChild(label)
     node.insertAdjacentElement('afterend', button)
   }
-  engineVersion = node.getAttribute(HANDLED) ?? engineVersion
   entryInstalled = true
   if (node.style.display !== 'none') node.style.display = 'none'
 }
@@ -183,11 +151,9 @@ export function installAboutEntry(): () => void {
       if (!/当前版本|current version/i.test(text)) continue
       // 带我们标签的版本行不是上游那行（上游只写「当前版本：x.y.z」）。
       if (/DeepCode|DeepSeek/i.test(text)) continue
-      const found = VERSION.exec(text)
-      if (found === null) continue
+      if (!VERSION.test(text)) continue
 
-      engineVersion = found[0]
-      node.setAttribute(HANDLED, engineVersion)
+      node.setAttribute(HANDLED, '')
       ensureEntry(node)
       // 同一轮就收起导航行：只靠下一轮 observer 的话，页面若不再变化就不会执行。
       syncNavRow(scope)
@@ -230,6 +196,6 @@ export function installAboutEntry(): () => void {
     observer.disconnect()
     document.removeEventListener('click', onClick, true)
     // 不归零：同一模块实例生命周期内「接管过」不会因为 dispose 而变得不成立。
-    // A fresh module recovers the handled row and version through ensureEntry on installation.
+    // A fresh module recovers the handled row through ensureEntry on installation.
   }
 }

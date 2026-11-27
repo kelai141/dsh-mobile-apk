@@ -8,13 +8,13 @@
  *
  * 版本来源：
  *  - 壳（DeepCode）：壳桥 `androidBridge.version()`（BuildConfig.VERSION_NAME）；
- *  - 引擎（DeepSeek​Harness）：由 about-entry 在被替换的那行原文里抓到，经 getEngineVersion() 取。
+ *  - DeepSeek Harness: the running Host's release identity from its boot graph.
  */
 import { useEffect, useRef } from 'react'
 import { tr } from '../i18n.ts'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { ABOUT_LOGO_DATA_URL } from './about-logo.ts'
-import { getEngineVersion, getShellVersion } from './about-entry.ts'
+import { getEngineVersion, getShellVersion } from './release-info.ts'
 
 /** 仓库地址。 */
 const REPO_URL = 'https://github.com/kelai141/dsh-mobile-apk'

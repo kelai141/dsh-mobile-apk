@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act } from 'react'
 import { createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { installAboutEntry, getEngineVersion } from '../src/client/mobile/about-entry.ts'
+import { installAboutEntry } from '../src/client/mobile/about-entry.ts'
 import { AboutSection } from '../src/client/mobile/about-section.tsx'
 import { ActivationGuard } from '../src/client/mobile/activation-guard.ts'
 
@@ -28,10 +28,12 @@ async function tick(): Promise<void> {
 describe('关于入口（独立页面）', () => {
   beforeEach(() => {
     ;(window as unknown as { androidBridge?: unknown }).androidBridge = { version: () => '0.14.9' }
+    vi.stubGlobal('__DSH_BOOT__', { release: { version: '0.2.1-rc.2' } })
   })
   afterEach(() => {
     cleanup?.()
     cleanup = undefined
+    vi.unstubAllGlobals()
     delete (window as unknown as { androidBridge?: unknown }).androidBridge
     document.body.innerHTML = ''
   })
@@ -44,7 +46,7 @@ describe('关于入口（独立页面）', () => {
     expect(host.querySelector('[data-dsh-about-entry]')!.textContent).toContain('关于')
     const navRow = host.querySelector<HTMLElement>('#nav-about')!
     expect(navRow.style.display, '导航行应收起').toBe('none')
-    expect(getEngineVersion()).toBe('0.2.1-rc.2')
+    expect(host.querySelector('#v')?.getAttribute('data-dsh-about-source')).toBe('')
   })
 
   it('点入口会用导航行切换分区（不是弹层）', async () => {
@@ -240,13 +242,12 @@ describe('关于入口（独立页面）', () => {
     expect(clicked).toEqual(['about'])
   })
 
-  it('recovers handled DOM and engine version in a fresh module instance', async () => {
-    const host = seed('<div id="v" data-dsh-about-source="0.2.1-rc.3" style="display:none">当前版本：0.2.1-rc.3</div><nav><button id="nav-about">关于</button></nav>')
+  it('recovers the handled navigation entry in a fresh module instance', async () => {
+    const host = seed('<div id="v" data-dsh-about-source style="display:none">当前版本：0.2.1-rc.3</div><nav><button id="nav-about">关于</button></nav>')
     vi.resetModules()
     const fresh = await import('../src/client/mobile/about-entry.ts')
     cleanup = fresh.installAboutEntry()
     await tick()
-    expect(fresh.getEngineVersion()).toBe('0.2.1-rc.3')
     expect(host.querySelectorAll('[data-dsh-about-entry]')).toHaveLength(1)
     expect(host.querySelector<HTMLElement>('#nav-about')!.style.display).toBe('none')
   })
