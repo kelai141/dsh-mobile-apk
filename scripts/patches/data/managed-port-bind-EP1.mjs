@@ -11,7 +11,7 @@ const before = '\t\t\tawait new Promise((resolve, reject) => {\n'
   + '\t\t\t\t});\n'
   + '\t\t\t});'
 
-export const MANAGED_LISTEN_BLOCK = `/* ${MANAGED_PORT_MARKER} */
+const originalManagedListenBlock = `/* ${MANAGED_PORT_MARKER} */
 await new Promise((resolve, reject) => {
   const managed = process.env.DSH_MOBILE_MANAGED_ENGINE === "1" && this.config.host === "127.0.0.1";
   let retried = false;
@@ -37,9 +37,16 @@ await new Promise((resolve, reject) => {
   this.server.listen(this.config.port, this.config.host);
 });`
 
+const bindSuccess = '    if (managed) process.env.DSH_ENGINE_PORT = String(this.listenedPort);'
+export const MANAGED_LISTEN_BLOCK = originalManagedListenBlock.replace(bindSuccess,
+  bindSuccess + '\n    globalThis.__dshMobileBootAttribution?.mark("listener-bound", performance.now(), this.listenedPort);')
+
 export const hasManagedPortBind = source => source.includes(MANAGED_LISTEN_BLOCK)
 export function patchManagedPortBind(source) {
   if (hasManagedPortBind(source)) return source
+  if (source.split(originalManagedListenBlock).length === 2) {
+    return source.replace(originalManagedListenBlock, MANAGED_LISTEN_BLOCK)
+  }
   if (source.includes(MANAGED_PORT_MARKER)) throw new Error('EP1 partial marker: refusing drift')
   if (source.split(before).length !== 2) throw new Error('EP1 expected one listen anchor')
   return source.replace(before, MANAGED_LISTEN_BLOCK)

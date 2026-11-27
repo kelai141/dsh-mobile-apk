@@ -393,6 +393,25 @@
       "test": "scripts/patches/tests/boot-third-party-isolation-g3.test.mjs"
     },
     {
+      "id": "boot-attribution",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
+      "additionalTargets": [
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis-plugin-loader/lib/index.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis/lib/index.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-app/lib/index.js"
+      ],
+      "scope": "engine",
+      "summary": "启用诊断开关时，用同一单调时钟输出启动阶段与 P1 等待窗口内 Loader entry Top 10，分别量取 _initTask、模块 import 和 fiber.inertia",
+      "provenance": "0.2.2-rc.3 MuMu 冷启动分段归因",
+      "requires": [
+        "managed-port-bind-EP1",
+        "combo-probe-P1"
+      ],
+      "marker": "dsh-mobile boot attribution",
+      "test": "scripts/patches/tests/boot-attribution.test.mjs"
+    },
+    {
       "id": "external-draft-conversation-seam-J1",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js",
       "scope": "engine",

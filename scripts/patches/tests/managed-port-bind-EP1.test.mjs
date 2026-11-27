@@ -22,12 +22,16 @@ test('EP1 matches the published fixture once and rejects drift', () => {
   assert.throws(() => patchManagedPortBind(patched.replace('let retried = false;', 'let retried = true;')), /partial marker/)
   assert.throws(() => patchManagedPortBind(source.replace('this.server.listen(this.config.port', 'this.server.listen(9999')), /one listen anchor/)
   assert.equal(patched.split(MANAGED_PORT_MARKER).length, 2)
+  const oldEP1 = patched.replace(/^.*__dshMobileBootAttribution.*\n/m, '')
+  assert.equal(patchManagedPortBind(oldEP1), patched)
 })
 
 test('real occupied listener stays alive while managed bind atomically gets an OS port', async () => {
   const owner = createServer()
   await new Promise(resolve => owner.listen(0, '127.0.0.1', resolve))
   const other = createServer()
+  const marks = []
+  globalThis.__dshMobileBootAttribution = { mark: (name, at, boundPort) => marks.push({ name, at, boundPort, listening: other.listening }) }
   try {
     const attempt = bind(other, owner.address().port)
     await attempt.promise
@@ -36,7 +40,14 @@ test('real occupied listener stays alive while managed bind atomically gets an O
     assert.notEqual(attempt.instance.listenedPort, owner.address().port)
     assert.equal(Number(attempt.env.DSH_ENGINE_PORT), other.address().port)
     assert.equal(other.listenerCount('listening'), 0)
-  } finally { await close(other); await close(owner) }
+    assert.equal(marks.length, 1)
+    assert.deepEqual(marks[0], { name: 'listener-bound', at: marks[0].at, boundPort: other.address().port, listening: true })
+    assert.ok(Number.isFinite(marks[0].at))
+  } finally {
+    delete globalThis.__dshMobileBootAttribution
+    await close(other)
+    await close(owner)
+  }
 })
 
 test('unmanaged invocation preserves upstream EADDRINUSE failure', async () => {

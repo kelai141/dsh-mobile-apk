@@ -33,6 +33,7 @@ import { hasProfileLinkSkip, patchProfileLinkSkip } from './data/profile-link-sk
 import { hasTerminalShellCandidates, patchTerminalShellCandidates } from './data/terminal-shell-candidates-T1.mjs'
 import { hasZshFpath, patchZshFpath } from './data/subprocess-zsh-fpath-A1.mjs'
 import { hasManagedPortBind, patchManagedPortBind } from './data/managed-port-bind-EP1.mjs'
+import { BOOT_ATTRIBUTION_FILE, BOOT_ATTRIBUTION_ADDITIONAL, patchBootAttribution } from './data/boot-attribution.mjs'
 import { IMAGE_HISTORY_CORE, planImageHistory } from './image-history-batch-offload-I1.mjs'
 import { PREVIEW_LOCAL, PREVIEW_PI, PREVIEW_DEEPSEEK, planRequestPreview } from './image-request-preview-P1.mjs'
 import { planImageExpiry } from './image-expiry-E1.mjs'
@@ -3159,13 +3160,34 @@ const MAP_OLD = [
       && s.includes('dshMobileComboProbeEmit')
       && s.includes('dshMobileComboProbeStartupFlush')
       && s.includes('dshMobileComboProbeEmptyGraph')
+      && s.includes('clearInterval(dshMobileComboProbeLoopTimer)')
+      && s.includes('dshMobileBootAttribution?.mark("p1-wait-start", started)')
+      && s.includes('dshMobileBootAttribution?.mark("p1-settled", started + duration)')
       && s.includes('import { isMainThread } from "node:worker_threads";')
       // 主线程门：探针块必须带 isMainThread 分支（worker 的 calls=0 不得冒充真读数）。
       && s.includes('if (!isMainThread) {')
       && s.includes('} else {'),
     apply: (s) => {
+      const samplerAnchor = 'if (gap > 0 && stats.samples < dshMobileComboProbeLoopMaxSamples) stats.add(gap);'
+      const stopSampler = '\n\t\t\tif (stats.samples === dshMobileComboProbeLoopMaxSamples) clearInterval(dshMobileComboProbeLoopTimer);'
+      const phaseAnchor = '\tconst startMs = Math.max(0, started - dshMobileComboProbeT0);'
+      const bridgeP1 = [
+        '\tif (name === "loader-settle-wait") {',
+        '\t\tglobalThis.__dshMobileBootAttribution?.mark("p1-wait-start", started);',
+        '\t\tglobalThis.__dshMobileBootAttribution?.mark("p1-settled", started + duration);',
+        '\t}',
+      ].join('\n')
+      const extendProbe = (source) => {
+        if (!source.includes(samplerAnchor + stopSampler)) {
+          source = replaceOnce(source, samplerAnchor, samplerAnchor + stopSampler)
+        }
+        if (!source.includes(bridgeP1 + '\n' + phaseAnchor)) {
+          source = replaceOnce(source, phaseAnchor, bridgeP1 + '\n' + phaseAnchor)
+        }
+        return source
+      }
       if (s.includes('dsh-mobile combo probe (P1)') && s.includes('dshMobileComboProbeEmit')
-        && s.includes('dshMobileComboProbeStartupFlush') && s.includes('dshMobileComboProbeEmptyGraph')) return s
+        && s.includes('dshMobileComboProbeStartupFlush') && s.includes('dshMobileComboProbeEmptyGraph')) return extendProbe(s)
       const upgradingProbe = s.includes('dsh-mobile combo probe (P1)') && s.includes('dshMobileComboProbeEmit')
       const CONSTRUCTOR_ANCHOR = [
         '\t\tfor (const entry of ctx.loader.entries()) this.dirty.add(entry.options.name);',
@@ -3433,7 +3455,25 @@ const MAP_OLD = [
         || !s.includes('if (!isMainThread) {')) {
         throw new Error('combo-probe 复核失败——不写回')
       }
-      return s
+      return extendProbe(s)
+    },
+  },
+
+  'boot-attribution': {
+    file: BOOT_ATTRIBUTION_FILE,
+    additionalFiles: BOOT_ATTRIBUTION_ADDITIONAL,
+    scope: 'engine',
+    check: (s) => patchBootAttribution(BOOT_ATTRIBUTION_FILE, s) === s
+      && BOOT_ATTRIBUTION_ADDITIONAL.every(file => {
+        const source = loadImpl(file, CURRENT_STAGE_ROOT)
+        return patchBootAttribution(file, source) === source
+      }),
+    apply: (s) => {
+      const primary = patchBootAttribution(BOOT_ATTRIBUTION_FILE, s)
+      for (const file of BOOT_ATTRIBUTION_ADDITIONAL) {
+        IMPL_state[file] = patchBootAttribution(file, loadImpl(file, CURRENT_STAGE_ROOT))
+      }
+      return primary
     },
   },
 
