@@ -72,13 +72,14 @@ try {
     block + '\nreturn { flush: dshMobileFlushCompileCacheQuietly };')
   const api = factory(() => { flushes += 1 }, fakeSetTimeout, fakeSetInterval, fakeProcess)
 
-  check('首刷定时器已调度（40 s）', timeouts.length === 1 && timeouts[0].ms === 40000, JSON.stringify(timeouts.map((t) => t.ms)))
+  check('首刷与复刷定时器已调度（15 s + 60 s）', timeouts.length === 2 && timeouts[0].ms === 15000 && timeouts[1].ms === 60000, JSON.stringify(timeouts.map((t) => t.ms)))
   check('周期定时器已调度（5 min）', intervals.length === 1 && intervals[0].ms === 300000, JSON.stringify(intervals.map((t) => t.ms)))
   check('exit 兜底已注册', exitHandlers.length === 1)
   timeouts[0].fn()
+  timeouts[1].fn()
   intervals[0].fn()
   exitHandlers[0]()
-  check('触发即调用 flush（首刷/周期/exit 各一次）', flushes === 3, 'flushes=' + flushes)
+  check('触发即调用 flush（首刷/复刷/周期/exit 各一次）', flushes === 4, 'flushes=' + flushes)
 
   // flush 抛错必须被吞（Node 契约：编译缓存是静默优化；引擎不得因此受影响）
   let quiet = 0

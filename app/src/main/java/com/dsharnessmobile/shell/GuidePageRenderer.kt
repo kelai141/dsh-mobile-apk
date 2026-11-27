@@ -550,6 +550,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       applyGuideHint(activity.getString(R.string.ds_safe_failed, result.message))
       return@runOnUiThread
     }
+    activity.clearEngineWebViewCache("safe-mode-enter")
     val prompt = buildSafeModePrompt(
       stage = stage,
       detail = result.message,

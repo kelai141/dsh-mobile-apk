@@ -206,4 +206,29 @@ internal object WebViewShim {
     } catch (_: Throwable) {
     }
   }
+
+  // ── 分层 HTTP / V8 字节码缓存策略（仅主引擎 WebView）───────────────
+
+  /** 允许开启分层 HTTP + V8 字节码缓存的最低 Chromium 主版本号。 */
+  internal const val ENGINE_HTTP_CACHE_MIN_CHROMIUM_MAJOR = 100
+
+  /**
+   * 为引擎主页面选择缓存模式：
+   * - 安全模式或未知/低于 Chromium 100 的老内核继续强制 `LOAD_NO_CACHE`；
+   * - Chromium 100+ 启用 `LOAD_DEFAULT`，使带 `rev` 且响应 `immutable` 的 `/plugins/...`
+   *   bundle 命中磁盘缓存与 V8 Code Cache，同时配合引擎侧 `index.html` 的 `no-store` 防止入口陈旧。
+   */
+  internal fun engineHttpCacheMode(chromiumVersion: String, safeModeActive: Boolean = false): Int {
+    if (safeModeActive) return WebSettings.LOAD_NO_CACHE
+    val major = majorOf(chromiumVersion)
+    return if (major >= ENGINE_HTTP_CACHE_MIN_CHROMIUM_MAJOR) WebSettings.LOAD_DEFAULT
+    else WebSettings.LOAD_NO_CACHE
+  }
+
+  /** 应用主引擎 WebView 的分层缓存策略并返回最终生效的 cacheMode。 */
+  fun applyEngineHttpCachePolicy(s: WebSettings, chromiumVersion: String, safeModeActive: Boolean = false): Int {
+    val mode = engineHttpCacheMode(chromiumVersion, safeModeActive)
+    s.cacheMode = mode
+    return mode
+  }
 }

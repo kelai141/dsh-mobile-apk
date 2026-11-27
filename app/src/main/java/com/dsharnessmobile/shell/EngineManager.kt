@@ -1338,6 +1338,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
     false
   }
 
+  private fun publicRepoFastPathReady(): Boolean {
+    if (publicRepoStatus() != PublicRepoStatus.OK) return false
+    val versionMarker = File(context.filesDir, ".public-repo-readme-" + BuildConfig.VERSION_NAME)
+    if (!versionMarker.isFile) return false
+    val dshData = dshDataDir
+    return File(dshData, "exports").isDirectory && File(dshData, "README.txt").isFile
+  }
+
   /**
    * 供给公共导出目录（根 + `.nomedia` + `exports/` + README）并**如实记账**（0.14.1 用户反馈）。
    *
@@ -1397,6 +1405,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
       Log.w(TAG, "public repo status write failed", t)
     }
     if (status == PublicRepoStatus.OK) {
+      try {
+        File(context.filesDir, ".public-repo-readme-" + BuildConfig.VERSION_NAME).writeText(BuildConfig.VERSION_NAME)
+      } catch (_: Throwable) {
+      }
       Log.i(TAG, "public export repo ready -> " + dshData.absolutePath)
     } else {
       // 落一条**用户可见面**的记录（LogCollector 会进 boot-diag/日志面），而不是只进 logcat——
@@ -1733,7 +1745,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // （快照刷新中 / 引擎已在跑）。故 provisionPublicRepo 另由 MainActivity 的 onCreate/onResume
       // 触发，那里才是「授权之后能自愈」的入口（0.14.1 用户反馈）。
       preludeProbe.step("provision-public-repo") {
-        provisionPublicRepo(PublicRepoProvision.TRIGGER_ENGINE_START)
+        if (!publicRepoFastPathReady()) {
+          provisionPublicRepo(PublicRepoProvision.TRIGGER_ENGINE_START)
+        }
       }
       // issue #1234：解压后的一次性前缀重写（shebang 无法自定位，见 SnapshotPrefixRewrite 头注释）。
       // 位置：引擎 spawn 之前、且在所有会 exec 快照内脚本的步骤之前——pip/pnpm 这些一旦先跑，
@@ -1767,9 +1781,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       preludeProbe.step("migrate-python-packages") { migratePythonPackages("engine-start") }
       preludeProbe.step("apply-runtime-patches") { applyRuntimePatches() }
       preludeProbe.step("prune-runtime-budgets") {
-        pruneCompileCacheDir(File(ensurePrivateDshData(), ".node-compile-cache"))
-        pruneDiagnosticsDirs(File(context.filesDir, "diagnostics"))
-        pruneDiagnosticsDirs(File(dshDataDir, "diagnostics"))
+        scheduleBackgroundRuntimeBudgetPrune()
       }
       preludeProbe.report(TAG, context)
       // --no-open: the engine must never try to open a desktop browser on Android
@@ -1811,8 +1823,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // issue #963 第 3 步：用户 Python 包**不再**靠 PYTHONPATH 前置（第 2 步那套已删除）。
       // 落点重定向走 shellEnv() 的 PIP_USER / PYTHONUSERBASE（见 PythonPackages.environment），
       // 全仓只有这一份路径口径，不存在"两套同时生效"。
+      val compileCacheDir = activeCompileCacheDir().apply { mkdirs() }.absolutePath
       val started = startWithArgs(args, shellEnv() + mapOf(
         "DSH_MOBILE_MANAGED_ENGINE" to "1", "DSH_ENGINE_PORT" to bindPort.toString(),
+        "NODE_COMPILE_CACHE" to compileCacheDir,
         OwnedEngineStop.ENV_INSTANCE to instanceToken,
       ))
       engineProcess = started
@@ -3132,10 +3146,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       "DASHSCOPE_API_KEY" to (File(context.filesDir, "dashscope-key.txt").takeIf { it.exists() }?.readText()?.trim() ?: ""),
       // DeepSeek 官方 provider（dsh-llm-deepseek，provider=deepseek-official）：同模式私有文件注入。
       "DEEPSEEK_API_KEY" to (File(context.filesDir, "deepseek-key.txt").takeIf { it.exists() }?.readText()?.trim() ?: ""),
-      // node 预热（0.13.0 启动提速 D3）：v8 模块编译缓存——引擎/工具子进程首启自动生成、
-      // 二次冷启动命中，直接缩短 node 冷启 require 树编译时间（K20 Pro 实测每次冷启都慢、
-      // 0.13.0 之前全快；缓存目录持久在 home/.dsh 下，随用户数据保留不随快照）。
-      "NODE_COMPILE_CACHE" to File(ensurePrivateDshData(), ".node-compile-cache").apply { mkdirs() }.absolutePath,
+      // Main engine injects a snapshot-generational NODE_COMPILE_CACHE in startEngine() so
+      // console/helper subprocesses do not pollute or evict core engine bytecode caches.
       // C1（P-AC-03 / §7.2）：libuv 线程池默认 4——fs/crypto/zlib/dns 全挤在这 4 条线程上。
       // 显式取 min(8, cores)（见 uvThreadPoolSize）：零产品语义改动，引擎与所有工具子进程
       // 经 shellEnv() 一并继承。判据：子进程回读 process.env.UV_THREADPOOL_SIZE = min(8, cores)。
@@ -3164,8 +3176,58 @@ class EngineManager(private val context: Context, private val pickToken: String?
       PythonPackages.environment(context.filesDir, usrDir)
   }
 
+  internal fun activeCompileCacheDir(): File =
+    CompileCachePolicy.resolveEngineCacheDir(ensurePrivateDshData(), liveFingerprint())
+
+  internal fun purgeActiveCompileCache(reason: String): Boolean {
+    val dsh = ensurePrivateDshData()
+    val target = CompileCachePolicy.resolveEngineCacheDir(dsh, liveFingerprint())
+    val cleared = CompileCachePolicy.clearGeneration(target)
+    if (cleared) {
+      Log.w(TAG, "purged active node compile cache (reason=" + reason + ") -> " + target.name)
+      LogCollector.log(TAG, "node compile cache purged: reason=" + reason + " dir=" + target.name)
+      try {
+        LogCollector.writeBootDiag(context, "compile-cache-purge", "reason=" + reason + " dir=" + target.name)
+      } catch (_: Throwable) {
+      }
+    }
+    return cleared
+  }
+
+  private fun scheduleBackgroundRuntimeBudgetPrune() {
+    if (!runtimeBudgetPruneInFlight.compareAndSet(false, true)) return
+    val dsh = ensurePrivateDshData()
+    val fp = liveFingerprint()
+    val filesDir = context.filesDir
+    val sharedDiag = File(dshDataDir, "diagnostics")
+    Thread {
+      try {
+        try { Thread.sleep(20_000L) } catch (_: InterruptedException) { return@Thread }
+        val cacheRoot = File(dsh, CompileCachePolicy.ROOT_DIR_NAME)
+        val activeGen = CompileCachePolicy.generationDirName(fp)
+        val staleRemoved = CompileCachePolicy.pruneStaleGenerations(cacheRoot, activeGen)
+        val activeCacheDir = CompileCachePolicy.resolveEngineCacheDir(dsh, fp)
+        val evicted = pruneCompileCacheDir(activeCacheDir)
+        val diagPrivate = pruneDiagnosticsDirs(File(filesDir, "diagnostics"))
+        val diagShared = pruneDiagnosticsDirs(sharedDiag)
+        if (staleRemoved > 0 || evicted > 0 || diagPrivate > 0 || diagShared > 0) {
+          LogCollector.log(
+            TAG,
+            "background runtime budget prune: staleGens=" + staleRemoved +
+              " evictedBlobs=" + evicted + " diagPrivate=" + diagPrivate + " diagShared=" + diagShared,
+          )
+        }
+      } catch (t: Throwable) {
+        Log.w(TAG, "background runtime budget prune failed: " + (t.message ?: t.javaClass.simpleName))
+      } finally {
+        runtimeBudgetPruneInFlight.set(false)
+      }
+    }.apply { isDaemon = true; name = "dsh-runtime-budget-prune" }.start()
+  }
+
   companion object {
     private const val TAG = "dsh-engine"
+    private val runtimeBudgetPruneInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** Shell bridge tools share screen coordinates and native receipts across backends. */
     private val PHONE_CONTROL_SKILL = """

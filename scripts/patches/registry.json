@@ -366,6 +366,24 @@
       "test": "scripts/patches/tests/client-index-loader-barrier.test.mjs"
     },
     {
+      "id": "frontend-index-no-store-C1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-frontend-static/lib/index.js",
+      "scope": "engine",
+      "summary": "首页 HTML 响应显式返回 cache-control: no-store, no-cache, must-revalidate 与 pragma: no-cache，确保现代 WebView 开启版本化资源缓存时永不命中陈旧入口页",
+      "provenance": "2026-11-27 启动缓存审计（MuMu 110 WebView 实证）：主 WebView 启用 LOAD_DEFAULT 复用 immutable 插件 bundle 时必须阻断 index.html 启发式缓存",
+      "marker": "dsh-mobile frontend index no-store (C1)",
+      "test": "scripts/patches/tests/frontend-index-no-store.test.mjs"
+    },
+    {
+      "id": "appboot-scope-fastpath-S1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
+      "scope": "engine",
+      "summary": "dsh-app-boot 安装域与依赖闭包扫描单次调用内记忆化：父目录 realpath、createRequire(anchor) 与 package.json 存在性探测仅在单次扫描生命周期内复用，符号链接仍走真实 realpath",
+      "provenance": "2026-10-21 启动审计 §4 + 2026-11-27 缓存审计：15 轮配对中位耗时 325ms -> 198ms（-34%），32241 条非符号链接等价性与符号链接反证通过",
+      "marker": "dsh-mobile appboot scope realpath memo (S1)",
+      "test": "scripts/patches/tests/appboot-scope-fastpath-s1.test.mjs"
+    },
+    {
       "id": "typert-registry-scan-C4",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-typert-loader/lib/index.js",
       "scope": "engine",
@@ -378,8 +396,8 @@
       "id": "perf-compile-cache-flush-N2",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
       "scope": "engine",
-      "summary": "NODE_COMPILE_CACHE 主动落盘：Node 只在正常退出时写编译缓存，而壳侧停引擎是有界宽限的 SIGTERM/SIGKILL、系统还会整进程回收，换树后的新条目长期写不进去——bin.js 周期 flush（40s 首刷 + 5min）+ exit 兜底，硬杀最多丢一个周期内的新增编译",
-      "provenance": "2026-09-14 缓存审计（docs/HANDOFF-COMBO-CACHE-2026-09-14.md §1；设备证据：09-12 23:07 后编译缓存零新增而 09-14 三次快照刷新）",
+      "summary": "NODE_COMPILE_CACHE 主动落盘：Node 只在正常退出时写编译缓存，而壳侧停引擎是有界宽限的 SIGTERM/SIGKILL、系统还会整进程回收——bin.js 周期 flush（15s 首刷 + 60s 复刷 + 5min）+ exit 兜底，硬杀最多丢一个周期内的新增编译",
+      "provenance": "2026-09-14 缓存审计（docs/HANDOFF-COMBO-CACHE-2026-09-14.md §1）+ 2026-11-27 MuMu 设备复核（40s 首刷导致更新后 6 次冷启零新增写入）",
       "marker": "dsh-mobile compile cache flush (N2)",
       "test": "scripts/patches/tests/compile-cache-flush-n2.test.mjs"
     },

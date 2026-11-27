@@ -1231,7 +1231,16 @@ object PluginMounts {
       .put("baseFingerprint", manifest.baseFingerprint)
       .put("entries", JSONArray(manifest.entries.map { JSONObject().put("id", it.id).put("name", it.name) }))
       .put("profileEntries", JSONArray(manifest.profileEntries.map { JSONObject().put("id", it.id).put("name", it.name) }))
-    return try { writeJsonAtomically(hardFile(context), json); true } catch (_: Throwable) { false }
+    return writeHardCacheIfChanged(hardFile(context), json)
+  }
+
+  internal fun writeHardCacheIfChanged(target: File, json: JSONObject): Boolean {
+    val serialized = json.toString()
+    val existing = try {
+      if (Files.isRegularFile(target.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) target.readText() else null
+    } catch (_: Throwable) { null }
+    if (existing == serialized) return true
+    return try { writeJsonAtomically(target, json); true } catch (_: Throwable) { false }
   }
 
   private fun readOnlineSnapshot(context: Context): Pair<String, String>? {

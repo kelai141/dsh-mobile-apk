@@ -506,6 +506,7 @@ class MainActivity : ComponentActivity() {
     // 早注册 + 精确值又可能拿到未确定的端口，所以选「晚注册 + 精确值」。
     // document-start 脚本对**其后**创建的文档生效，所以必须早于下面的 loadUrl。
     installBridgeOriginGuard()
+    applyEngineWebViewCachePolicy()
     val authCookie = EngineAuth.cookie(this)
     if (authCookie != null) {
       try {
@@ -537,6 +538,7 @@ class MainActivity : ComponentActivity() {
             pendingEngineCookie = null
           }
           enginePageFailed = false
+          clearEngineWebViewCache("page-recovery-reload")
           try { webView.reload() } catch (e: Exception) { Log.w(TAG, "foreground page recovery reload failed", e) }
         }
         false
@@ -1533,6 +1535,7 @@ class MainActivity : ComponentActivity() {
       override fun onReceivedError(view: WebView, errorCode: Int, description: String, failingUrl: String) {
         if (isEngineSource(failingUrl)) {
           enginePageFailed = true
+          clearEngineWebViewCache("received-error")
           showGuide()
         }
       }
@@ -2590,6 +2593,32 @@ class MainActivity : ComponentActivity() {
       vdisplayHost.clearPresentation()
     }
     return reply.toString()
+  }
+
+  private fun applyEngineWebViewCachePolicy() {
+    if (!webViewReady) return
+    if (observedChromiumVersion.isEmpty()) {
+      observedChromiumVersion = WebViewShim.chromiumVersionFromUserAgent(
+        runCatching { webView.settings.userAgentString.orEmpty() }.getOrDefault(""),
+      )
+    }
+    val safeMode = SafeMode.isActive(engineManager)
+    val mode = WebViewShim.applyEngineHttpCachePolicy(webView.settings, observedChromiumVersion, safeMode)
+    LogCollector.log(
+      TAG,
+      "engine webview cacheMode=" + (if (mode == android.webkit.WebSettings.LOAD_DEFAULT) "LOAD_DEFAULT" else "LOAD_NO_CACHE") +
+        " chromium=" + observedChromiumVersion.ifEmpty { "unknown" } + " safeMode=" + safeMode,
+    )
+  }
+
+  internal fun clearEngineWebViewCache(reason: String) {
+    if (!webViewReady || isDestroyed) return
+    runOnUiThread {
+      if (!webViewReady || isDestroyed) return@runOnUiThread
+      runCatching { webView.clearCache(true) }
+        .onSuccess { LogCollector.log(TAG, "cleared engine webview cache: reason=" + reason) }
+        .onFailure { Log.w(TAG, "clear engine webview cache failed: " + (it.message ?: it.javaClass.simpleName)) }
+    }
   }
 
   internal fun notifyLegacyStorageResult() {
