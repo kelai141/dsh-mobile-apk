@@ -28,7 +28,10 @@ let host: HTMLElement | undefined
 function bridgeWith(state: string, extra: Record<string, unknown> = {}): string[] {
   const calls: string[] = []
   Object.defineProperty(window, 'androidBridge', {
-    value: { apkUpdate: (action: string) => { calls.push(action); return JSON.stringify({ ok: true, state, ...extra }) } },
+    value: { version: () => '0.14.6', apkUpdate: (action: string) => {
+      calls.push(action)
+      return JSON.stringify({ ok: true, state, ...extra })
+    } },
     configurable: true, writable: true,
   })
   return calls
@@ -91,10 +94,11 @@ describe('设置页「应用更新」行：八态的文本与两枚按钮', () =
     expect(button(el, 'install')).toBeNull()
   })
 
-  it('up-to-date：显示壳侧给的版本，检查按钮变「重新检查」且可点', async () => {
+  it('shows the installed shell version and allows another check when up to date', async () => {
     bridgeWith('up-to-date', { version: 'v0.14.6' })
     const el = await render()
-    expect(rowText(el)).toContain('APK 已是最新 v0.14.6')
+    expect(rowText(el)).toContain('当前版本 0.14.6')
+    expect(rowText(el)).toContain('已是最新版本')
     const check = button(el, 'check')
     expect(check?.textContent).toBe('重新检查')
     expect(check?.disabled).toBe(false)
@@ -102,19 +106,20 @@ describe('设置页「应用更新」行：八态的文本与两枚按钮', () =
   })
 
   // 关键用例一：protected 载荷。壳侧 beginCheck() 会清 currentResult，discovered 的包就没了。
-  it('available：**检查按钮禁用**、下载按钮可点，并如实给出资产名与体积', async () => {
+  it('shows only install on the primary row and keeps the matching asset in details', async () => {
     bridgeWith('available', { tag: 'v0.14.7', name: 'dsh-mobile-apk-v0.14.7-x86_64.apk', current: '0.14.6', sizeBytes: 169 * 1024 * 1024 })
     const el = await render()
     const check = button(el, 'check')
     const install = button(el, 'install')
-    expect(check?.disabled, '发现新版时再检查会清掉壳侧载荷，必须禁用').toBe(true)
+    expect(check, 'A new check would clear the available artifact').toBeNull()
     expect(install, '发现新版时下载按钮必须在场').not.toBeNull()
     expect(install?.disabled).toBe(false)
-    expect(install?.textContent).toBe('下载并安装 v0.14.7')
+    expect(install?.textContent).toBe('下载并安装')
     // 用户要知道「将装哪个包」与「多大」——资产名是本机 ABI 的那个；旧文案「再点一次同一按钮」已删除。
-    expect(rowText(el)).toContain('dsh-mobile-apk-v0.14.7-x86_64.apk')
+    expect(rowText(el)).toContain('v0.14.7')
+    expect(el.querySelector('details [data-apk-asset]')?.textContent).toBe('dsh-mobile-apk-v0.14.7-x86_64.apk')
     expect(rowText(el)).toContain('169.0 MB')
-    expect(rowText(el)).toContain('当前 v0.14.6')
+    expect(rowText(el)).toContain('当前版本 0.14.6')
     expect(rowText(el)).not.toContain('再点')
   })
 
@@ -137,10 +142,10 @@ describe('设置页「应用更新」行：八态的文本与两枚按钮', () =
     expect(detail, '不得声称已校验通过').not.toContain('已校验通过')
   })
 
-  it('downloading：两枚按钮都禁用并显示真实百分比', async () => {
+  it('shows download progress as the single disabled action while downloading', async () => {
     bridgeWith('downloading', { percent: 42, name: 'x.apk', sizeBytes: 1024 })
     const el = await render()
-    expect(button(el, 'check')?.disabled).toBe(true)
+    expect(button(el, 'check')).toBeNull()
     const install = button(el, 'install')
     expect(install?.textContent).toBe('下载中 42%')
     expect(install?.disabled).toBe(true)
@@ -155,11 +160,11 @@ describe('设置页「应用更新」行：八态的文本与两枚按钮', () =
     expect(button(el, 'install')).toBeNull()
   })
 
-  it('need-permission：检查禁用，下载按钮是「授权后继续安装」且可点', async () => {
+  it('offers only the permission recovery action while waiting for permission', async () => {
     bridgeWith('need-permission')
     const el = await render()
     expect(rowText(el)).toContain('安装未知应用')
-    expect(button(el, 'check')?.disabled).toBe(true)
+    expect(button(el, 'check')).toBeNull()
     const install = button(el, 'install')
     expect(install?.textContent).toBe('授权后继续安装')
     expect(install?.disabled).toBe(false)
@@ -185,8 +190,9 @@ describe('设置页「应用更新」行：八态的文本与两枚按钮', () =
     expect(install, '有已校验的包时必须给重试安装的入口').not.toBeNull()
     expect(install?.textContent).toBe('重试安装')
     expect(install?.disabled).toBe(false)
-    // 检查按钮仍可用（另一条路是重新取元数据）。
-    expect(button(el, 'check')?.disabled).toBe(false)
+    const check = button(el, 'check')
+    expect(check?.disabled).toBe(false)
+    expect(check?.closest('details')?.open).toBe(false)
   })
 
   // 壳侧每个相位都发恒为布尔的 hasReadyArtifact；false 是最常见的失败形态（镜像链全挂 = 没下到包）。
@@ -231,14 +237,12 @@ describe('读不到 ≠ 合法空态', () => {
 
 describe('两枚按钮各自硬绑定动作（不再按状态推断）', () => {
   // 关键用例二：旧实现在 act() 里按 `state === 'available' || canStart` 推断动作。
-  it('available 态点**检查**按钮发的是 check（即便壳侧说 canStart:true）', async () => {
+  it('keeps check unavailable while an installable release is present', async () => {
     const calls = bridgeWith('available', { tag: 'v0.14.7', canStart: true })
     const el = await render()
     calls.length = 0
-    const check = button(el, 'check')!
-    // 按钮本身就是 disabled（保护载荷），点击不得发出任何动作。
-    await act(async () => { check.click() })
-    expect(calls, '禁用的检查按钮不得发动作').not.toContain('check')
+    expect(button(el, 'check')).toBeNull()
+    expect(calls).not.toContain('check')
     expect(calls).not.toContain('install')
   })
 
@@ -342,29 +346,24 @@ describe('回执与轮询纪律', () => {
     const el = await render()
     // 说明段现在挂在行内的灰色说明里（卡片保留、框内用上游行骨架）。
     const hint = [...el.querySelectorAll('.dsh-gs-desc')].map((n) => n.textContent ?? '').join(' ')
-    expect(hint).toContain('只在你点击时')
-    expect(hint).toContain('APK')
+    expect(hint).toContain('下载由你发起')
+    expect(hint).toContain('安装包')
   })
 })
 
 describe('分区形态（从开发者选项提级）', () => {
-  it('ApkUpdateSection 是可挂进 settings.section 的分区：卡片外壳 + 框内行骨架', async () => {
+  it('renders one flat summary row and collapsed installation details', async () => {
     bridgeWith('idle')
     host = document.createElement('div')
     document.body.appendChild(host)
     root = createRoot(host)
     await act(async () => { root!.render(<ApkUpdateSection close={() => {}} />) })
-    // 外壳仍是设置页统一的卡片（用户要求保留「一个框包住」的形态）。
-    const section = host.querySelector('section.dsh-screen-control-card')
-    expect(section, '分区用设置页统一的卡片外壳').not.toBeNull()
-    const titleId = section!.getAttribute('aria-labelledby') ?? ''
-    expect(titleId).not.toBe('')
-    expect(host.querySelector('#' + titleId)?.textContent).toBe('应用更新')
-    // 框内是上游行骨架（标题在左、控件在右），不再套第二层描边盒子。
+    expect(host.querySelector('section[aria-label="应用更新"]')).not.toBeNull()
     const root0 = host.querySelector('[data-plugin="dev-apk-update"]')!
     expect(root0.classList.contains('dsh-dev-cache'), '框内不再套第二层盒子').toBe(false)
     expect(root0.querySelector('.dsh-gs-row'), '框内至少一行').not.toBeNull()
-    expect(root0.querySelector('.dsh-gs-title')?.textContent).toBe('检查更新')
+    expect(root0.querySelector('.dsh-gs-title')?.textContent).toBe('当前版本 0.14.6')
+    expect(root0.querySelector('details')?.open).toBe(false)
     expect(button(host, 'check')).not.toBeNull()
   })
 

@@ -57,9 +57,24 @@ export const DEV_SECTION_CSS: string = `
    general-settings.css.ts——在只有本包、没有该表的构建里（例如 0.14.9 基线），
    .dsh-gs-title / .dsh-gs-desc 会完全没有样式，标题与灰色说明会长得一模一样。
    作用域限死在本页三个根下，不会污染其它分区。 */
-/* 卡片内的行：最后一行不画分隔线（框已经收边，多一条线只是噪音）。 */
-[data-plugin='dev-apk-update'] .dsh-gs-row:last-child {
-  border-bottom: 0;
+.dsh-apk-update-details > summary {
+  list-style: none;
+  font-size: 14px;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.dsh-apk-update-details > summary::-webkit-details-marker { display: none; }
+.dsh-apk-update-details > summary > svg { flex: none; color: var(--dsw-alias-label-secondary); }
+.dsh-apk-update-details[open] > summary > svg { transform: rotate(90deg); }
+.dsh-apk-update-notes { display: grid; gap: 8px; padding-block: 8px 12px; }
+.dsh-apk-update-notes > p { margin: 0; }
+.dsh-apk-update-notes > button { justify-self: start; }
+
+@media (max-width: 390px) {
+  [data-plugin='dev-apk-update'] .dsh-gs-row[data-apk-state] {
+    flex-wrap: wrap;
+  }
 }
 
 [data-plugin='dev-section'] .dsh-gs-text,

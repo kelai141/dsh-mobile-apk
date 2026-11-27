@@ -1277,6 +1277,8 @@ Settings entry recovery (#563): `dsh-client-ui-responsive/src/client/mobile/abou
 
 Both About entries open `AboutSection`. `dsh-client-ui-responsive/src/client/mobile/release-info.ts` reads the Android version from the bridge and the running Host release from `window.__DSH_BOOT__.release.version`. The upstream General settings version row provides only the inline entry's position. Direct entry, conflicting display markup and missing Host metadata are covered by `about-version.spec.ts`.
 
+App updates uses the same installed Android version reader and falls back to the update status snapshot when the bridge supplies no version. `ApkUpdateSection` presents the current status and one primary action. The installation disclosure contains the selected asset, digest details and the secondary check action when a verified artifact can still be installed.
+
 0.2.2 设置分区：`settings-nav.ts` 捕获列表点击，下一任务才切二级页、收起列表和移动焦点。浏览器派发真实触摸时，捕获和冒泡之间可能执行微任务，不能用微任务代替这一步。标题、说明及返回历史取导航行的可见标签，跳过上游 `aria-hidden` 图标。
 
 #### S01 引擎侧注入层（三个子仓）
