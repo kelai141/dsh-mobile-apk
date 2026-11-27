@@ -26,6 +26,8 @@ import { MIMO_PI_FILE, planMimoThinking } from './mimo-thinking-toggle-056.mjs'
 import { REASONING_FILES, planReasoning } from './data/reasoning-envelope-1304.mjs'
 import { TYPERT_SCAN_MARKER, planTypertRegistryScan } from './data/registry-scan-c4.mjs'
 import { CLIENT_INDEX_LOADER_BARRIER_MARKER, planClientIndexLoaderBarrier } from './data/client-index-loader-barrier.mjs'
+import { FRONTEND_INDEX_NO_STORE_MARKER, hasFrontendIndexNoStore, patchFrontendIndexNoStore } from './data/frontend-index-no-store.mjs'
+import { hasAppbootScopeFastpath, patchAppbootScopeFastpath } from './data/appboot-scope-fastpath-S1.mjs'
 import { resolveEnginePatchFile } from './resolve-engine-patch-target.mjs'
 import { hasSidebarReorder, patchSidebarReorder } from './data/sidebar-bubble-reorder.mjs'
 import { hasInspectorWorkerExposeInternals, patchInspectorWorkerExposeInternals } from './data/inspector-worker-expose-internals-472.mjs'
@@ -3451,6 +3453,18 @@ const MAP_OLD = [
     check: (s) => s.includes(CLIENT_INDEX_LOADER_BARRIER_MARKER),
     apply: planClientIndexLoaderBarrier,
   },
+  'frontend-index-no-store-C1': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-frontend-static/lib/index.js',
+    scope: 'engine',
+    check: (s) => hasFrontendIndexNoStore(s) && s.includes(FRONTEND_INDEX_NO_STORE_MARKER),
+    apply: patchFrontendIndexNoStore,
+  },
+  'appboot-scope-fastpath-S1': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
+    scope: 'engine',
+    check: (s) => hasAppbootScopeFastpath(s),
+    apply: patchAppbootScopeFastpath,
+  },
   'typert-registry-scan-C4': {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-typert-loader/lib/index.js',
     scope: 'engine',
@@ -3461,9 +3475,23 @@ const MAP_OLD = [
   'perf-compile-cache-flush-N2': {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
     scope: 'engine',
-    check: (s) => s.includes('dsh-mobile compile cache flush (N2)') && s.includes('dshMobileFlushCompileCacheQuietly'),
+    check: (s) => s.includes('dsh-mobile compile cache flush (N2)')
+      && s.includes('dshMobileFlushCompileCacheQuietly')
+      && s.includes('setTimeout(dshMobileFlushCompileCacheQuietly, 15000)')
+      && s.includes('setTimeout(dshMobileFlushCompileCacheQuietly, 60000)'),
     apply: (s) => {
-      if (s.includes('dsh-mobile compile cache flush (N2)') && s.includes('dshMobileFlushCompileCacheQuietly')) return s
+      if (s.includes('dsh-mobile compile cache flush (N2)')
+        && s.includes('dshMobileFlushCompileCacheQuietly')
+        && s.includes('setTimeout(dshMobileFlushCompileCacheQuietly, 15000)')
+        && s.includes('setTimeout(dshMobileFlushCompileCacheQuietly, 60000)')) return s
+      const LEGACY_SINGLE = 'setTimeout(dshMobileFlushCompileCacheQuietly, 40000).unref();'
+      if (s.includes(LEGACY_SINGLE)) {
+        return replaceOnce(
+          s,
+          LEGACY_SINGLE,
+          'setTimeout(dshMobileFlushCompileCacheQuietly, 15000).unref();\nsetTimeout(dshMobileFlushCompileCacheQuietly, 60000).unref();',
+        )
+      }
       // 锚 = bin.js 的最后一条顶层 import。0.2.2-rc.3 起根包自己被拆成两层：lib/bin.js 只剩
       // shebang + 两条 node: 内置 import（realpathSync / pathToFileURL），真正的 CLI 在
       // ./bin-CwxESKe-.js 里按需动态 import。所以「node:util 的 inspect」这条锚在 rc.3 逐字符消失
@@ -3485,7 +3513,8 @@ const MAP_OLD = [
         '\t\t/* a failed flush must never affect the engine (Node compile-cache contract) */',
         '\t}',
         '};',
-        'setTimeout(dshMobileFlushCompileCacheQuietly, 40000).unref();',
+        'setTimeout(dshMobileFlushCompileCacheQuietly, 15000).unref();',
+        'setTimeout(dshMobileFlushCompileCacheQuietly, 60000).unref();',
         'setInterval(dshMobileFlushCompileCacheQuietly, 300000).unref();',
         'process.on("exit", dshMobileFlushCompileCacheQuietly);',
       ].join('\n')

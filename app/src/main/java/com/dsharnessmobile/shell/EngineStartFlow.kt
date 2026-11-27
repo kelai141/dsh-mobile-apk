@@ -366,6 +366,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       LogCollector.log("dsh-shell", "repair gate cleared by page-reported boot-ready")
     }
     pageReadyReported = true
+    compileCachePurgedForGeneration = false
     if (pageReadyLogged) return
     pageReadyLogged = true
     // 页面自报的就绪行本身带上 waitedMs，落到 page-console 便于与 shell-stall 对照。
@@ -414,6 +415,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   /** 本进程是否已花掉自动回滚预算（一次性；与 UndoGate.RETRY_WINDOW_MS 叠加）。 */
   @Volatile private var clientPluginTreeRecoverySpent = false
 
+  /** Per-session guard so automatic retry purges NODE_COMPILE_CACHE at most once. */
+  @Volatile private var compileCachePurgedForGeneration = false
+
   /** 失败契约行原文（折叠后；供解析 failedIds 与落盘 detail）。 */
   @Volatile private var clientPluginFailureRawLine = ""
 
@@ -452,6 +456,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       " line=" + folded.take(400))
     // ② latch：此后所有「把 WebUI 推回前台」的自动路径都必须让路。
     clientPluginTreeFailed = true
+    activity.clearEngineWebViewCache("client-plugin-tree-failed")
     // ③ 呈现：前台立刻切错误相位；非前台挂起，由 MainActivity.onResume 消费。
     activity.runOnUiThread { activity.presentClientPluginFailure() }
     // 页面装配失败也消耗同一份两次重试预算，不再执行配置回滚。
@@ -652,6 +657,10 @@ internal class EngineStartFlow(private val activity: MainActivity) {
             requireNativeRepair()
             return@Thread
           }
+          if (CompileCachePolicy.shouldPurgeOnRetry(attempt, compileCachePurgedForGeneration)) {
+            compileCachePurgedForGeneration = true
+            activity.engineManager.purgeActiveCompileCache("boot-retry-" + attempt)
+          }
           activity.engineManager.resetCooldown()
           activity.runOnUiThread {
             if (isCurrentEngineFlow(generation)) {
@@ -700,6 +709,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     // CONTRACT §4：新启动世代/用户显式重试 ⇒ 解除插件失败 latch（放行一次坏页面的呈现）。
     // 这里只清 latch，**不**退一次性回滚预算——预算是「本进程最多自动回滚一次」，与世代无关。
     clearClientPluginTreeFailureLatch()
+    if (entry == StartEntryPoint.GUIDE_BUTTON || entry == StartEntryPoint.SAFE_MODE_RESTART) {
+      compileCachePurgedForGeneration = false
+    }
     // 页面装载失败也会消耗两次重试预算；新世代开始时清掉 latch，
     // 让下一次页面申报能再次落到修复闸门。
     clientPluginTreeFailed = false
@@ -1002,6 +1014,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
             }
             return@Thread
           }
+          activity.clearEngineWebViewCache("snapshot-refreshed")
           activity.runOnUiThread {
             if (!isCurrentEngineFlow(generation)) return@runOnUiThread
             activity.applyGuidePhase(GuidePhase.Starting, UiText.t(activity, "正在启动引擎…", "Starting the engine…"))
@@ -1656,6 +1669,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     // 而不是被上一次失败的降级闸门挡住（与手动重试同口径）。
     engineRetryCount = 0
     engine.clearRefreshLedger()
+    activity.clearEngineWebViewCache("safe-mode-restart")
     // P2（定位报告 §4/§7）：**成功/进入面**留痕。既有四个失败 stage（refused / not-owned /
     // stop-failed / failed）都在失败分支上，成功面此前只写 LogCollector.log——而采集器默认关
     // （DevLogPrefs 默认 false），dsh-day.log 恒 absent ⇒ 安全模式重启的成功面在诊断包里

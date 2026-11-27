@@ -451,6 +451,15 @@ internal object SafeMode {
     }
   }
 
+  /** Read-only check used to fail closed when Safe Mode is active or ambiguous. */
+  internal fun isActive(engine: EngineManager): Boolean = try {
+    val store = resolveSafeModeAutoDir(patchFile(engine), homePatchFile(engine), autoDir(engine))
+    if (store.second != null) true
+    else Files.exists(File(store.first, STATE_FILE).toPath(), LinkOption.NOFOLLOW_LINKS)
+  } catch (_: Throwable) {
+    true
+  }
+
   /** 当前状态。未开启与「状态文件损坏」是两件事，回执必须分开（否则用户以为没开）。 */
   internal fun status(autoDir: File, patch: File? = null, homePatch: File? = null): Result {
     val selectedAutoDir = if (patch != null && homePatch != null) {
