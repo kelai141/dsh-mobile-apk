@@ -90,6 +90,9 @@ describe('关于入口（独立页面）', () => {
     expect(links.length, '应有仓库与社群两条链接').toBe(2)
     expect(links[0]!.dataset.dshAboutLink).toContain('github.com/kelai141/dsh-mobile-apk')
     expect(links[1]!.dataset.dshAboutLink).toContain('qun.qq.com')
+    for (const link of links) {
+      expect(link.querySelectorAll('svg[aria-hidden="true"] path')).toHaveLength(1)
+    }
     links[0]!.click()
     links[1]!.click()
     expect(opened.length).toBe(2)

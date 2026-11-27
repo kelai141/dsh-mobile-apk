@@ -49,8 +49,7 @@ function LinkRow(props: { label: string; detail: string; url: string }) {
       <span className="dsh-gs-control">
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none"
           stroke="currentColor" strokeWidth="1.3">
-          <path d="M6 3h7v7M13 3 5.5 10.5" strokeLinecap="round" strokeLinejoin="round" />
-          <path d="M11 12.5H3.5V5" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M5 4h7v7M12 4l-8 8" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </span>
     </button>
