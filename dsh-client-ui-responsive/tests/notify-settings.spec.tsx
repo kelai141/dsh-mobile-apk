@@ -104,6 +104,28 @@ afterEach(async () => {
 })
 
 describe('NotifySettingsRow（块J FIX-4 设置页入口）', () => {
+  it('groups the switches, keeps diagnostics collapsed, and reads system status from settings', async () => {
+    let permissionGranted = false
+    const selfCheck = vi.fn(() => shellSelfCheck())
+    const { bridge } = makeBridge({
+      snapshot: () => ({ ...snapshot(), notificationsEnabled: true, permissionGranted }),
+      selfCheck,
+    })
+    setBridge(bridge)
+    const el = await render()
+    const status = el.querySelector('[data-notify-system-status]')
+    const diagnostics = el.querySelector('details')
+    expect(status?.textContent).toBe('系统未允许')
+    expect([...el.querySelectorAll('section h3')].map(heading => heading.textContent)).toEqual(['需要你回应', '任务进展'])
+    expect(diagnostics?.open).toBe(false)
+    expect(selfCheck).not.toHaveBeenCalled()
+
+    permissionGranted = true
+    await act(async () => { window.dispatchEvent(new Event('focus')) })
+    expect(status?.textContent).toBe('已允许')
+    expect(selfCheck).not.toHaveBeenCalled()
+  })
+
   it('挂载即从壳侧真源读取（不是本地默认值，也不是一次性裸读）', async () => {
     const { calls, bridge } = makeBridge({ snapshot: () => snapshot({ suppressForeground: true }) })
     setBridge(bridge)
@@ -111,17 +133,16 @@ describe('NotifySettingsRow（块J FIX-4 设置页入口）', () => {
 
     expect(calls.filter((c) => c.kind === 'get').length).toBeGreaterThan(0)
     // 展示值必须等于真源：true = 抑制开启。
-    expect(switchByLabel(el, '前台抑制通知').checked).toBe(true)
-    expect(el.textContent).toContain('前台抑制开启')
+    expect(switchByLabel(el, '前台暂缓工作汇报').checked).toBe(true)
+    expect(el.textContent).toContain('离开应用或关闭此项后补发')
   })
 
-  it('默认值下开关为关且文案说明「前台照常推送」', async () => {
+  it('默认值下暂缓开关关闭，且保留补发说明', async () => {
     const { bridge } = makeBridge({ snapshot: () => snapshot() })
     setBridge(bridge)
     const el = await render()
-    expect(switchByLabel(el, '前台抑制通知').checked).toBe(false)
-    expect(el.textContent).toContain('前台照常推送')
-    expect(el.textContent).toContain('等于本版默认值')
+    expect(switchByLabel(el, '前台暂缓工作汇报').checked).toBe(false)
+    expect(el.textContent).toContain('离开应用或关闭此项后补发')
   })
 
   it('拨动开关必须经桥写入，并按返回读回（真源变才置位）', async () => {
@@ -133,13 +154,13 @@ describe('NotifySettingsRow（块J FIX-4 设置页入口）', () => {
     setBridge(bridge)
     const el = await render()
 
-    await act(async () => { switchByLabel(el, '前台抑制通知').click() })
+    await act(async () => { switchByLabel(el, '前台暂缓工作汇报').click() })
 
     const writes = calls.filter((c) => c.kind === 'set')
     expect(writes).toEqual([{ kind: 'set', key: 'suppressForeground', value: true }])
     // 写后必须再读真源（而不是把入参写进本地 state）。
     expect(calls.filter((c) => c.kind === 'get').length).toBeGreaterThanOrEqual(2)
-    expect(switchByLabel(el, '前台抑制通知').checked).toBe(true)
+    expect(switchByLabel(el, '前台暂缓工作汇报').checked).toBe(true)
   })
 
   it('applied=false 时不得置位，并如实显示真因（拒绝乐观置位）', async () => {
@@ -150,11 +171,11 @@ describe('NotifySettingsRow（块J FIX-4 设置页入口）', () => {
     setBridge(bridge)
     const el = await render()
 
-    await act(async () => { switchByLabel(el, '前台抑制通知').click() })
+    await act(async () => { switchByLabel(el, '前台暂缓工作汇报').click() })
 
     expect(calls.some((c) => c.kind === 'set')).toBe(true)
     // 真源仍为 false ⇒ 开关必须仍是关的（不得乐观置位）。
-    expect(switchByLabel(el, '前台抑制通知').checked).toBe(false)
+    expect(switchByLabel(el, '前台暂缓工作汇报').checked).toBe(false)
     expect(el.textContent).toContain('系统没有接受这次改动')
     // P3-1/P3-6：码不上屏（旧断言把「未生效（readback-mismatch）：cat.question」当契约），只进 data-code。
     expect(el.textContent, '机器码不得出现在正文').not.toContain('readback-mismatch')
@@ -203,9 +224,9 @@ describe('NotifySettingsRow（块J FIX-4 设置页入口）', () => {
     }
     setBridge(bridge)
     const el = await render()
-    await act(async () => { switchByLabel(el, '前台抑制通知').click() })
+    await act(async () => { switchByLabel(el, '前台暂缓工作汇报').click() })
     expect(el.textContent).toContain('写入失败')
-    expect(switchByLabel(el, '前台抑制通知').checked).toBe(false)
+    expect(switchByLabel(el, '前台暂缓工作汇报').checked).toBe(false)
   })
 
   it('自检：系统把渠道降级时必须说「已降级」，不得显示「未降级任何渠道」', async () => {
@@ -281,13 +302,12 @@ describe('NotifySettingsRow（块J FIX-4 设置页入口）', () => {
     const { bridge } = makeBridge({})
     setBridge(bridge)
     const el = await render()
-    // 第一行是「前台抑制」，五个分类从第二行起。
     const labels = [...el.querySelectorAll('button[role="switch"]')]
-      .slice(1)
       .map((button) => button.getAttribute('aria-label'))
+      .filter(label => label !== '前台暂缓工作汇报')
     // 这五个词必须与壳侧 `UserCopy.notifyCategory` + `NotifyCenter.Face.label` 逐字一致
     // （Kotlin 侧 `UserCopyTest.faceLabelsShareTheSingleTable` 钉住那一半）。
-    expect(labels).toEqual(['工作汇报', '提问', '授权请求', '待办进度', '后台动态'])
+    expect(labels).toEqual(['提问', '授权请求', '工作汇报', '待办进度', '后台动态'])
   })
 
   it('P3-5：通知设置已从「开发者选项」提级为设置页一级分区（源码级形态断言）', async () => {
@@ -308,11 +328,11 @@ describe('NotifySettingsRow（块J FIX-4 设置页入口）', () => {
     const { bridge } = makeBridge({ snapshot: () => snapshot({ suppressForeground: stored }) })
     setBridge(bridge)
     const el = await render()
-    expect(switchByLabel(el, '前台抑制通知').checked).toBe(false)
+    expect(switchByLabel(el, '前台暂缓工作汇报').checked).toBe(false)
 
     // 模拟「在别处（壳侧/adb）改了真源，然后回到页面」。
     stored = true
     await act(async () => { window.dispatchEvent(new Event('focus')) })
-    expect(switchByLabel(el, '前台抑制通知').checked).toBe(true)
+    expect(switchByLabel(el, '前台暂缓工作汇报').checked).toBe(true)
   })
 })

@@ -466,14 +466,30 @@ export const DEV_SECTION_CSS: string = `
 }
 
 /* 0.14.1 块J FIX-4：通知设置块（前台抑制 + 五类分类开关）。 */
-.dsh-dev-notify {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid var(--dsw-alias-border-l3);
-  border-radius: 12px;
-  background: var(--dsw-alias-bg-layer-2);
+.dsh-notify-group > h3 {
+  margin: 18px 0 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.dsh-notify-diagnostics > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.dsh-notify-diagnostics > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dsh-notify-diagnostics[open] > summary > svg {
+  transform: rotate(90deg);
+}
+
+.dsh-notify-diagnostics > .dsh-dev-actions {
+  flex-wrap: wrap;
+  margin-top: 10px;
 }
 
 /* #43 深色兜底（2026-08-18 首修 / 2026-09-25 二次修）。
