@@ -487,11 +487,6 @@ export const DEV_SECTION_CSS: string = `
   transform: rotate(90deg);
 }
 
-.dsh-notify-diagnostics > .dsh-dev-actions {
-  flex-wrap: wrap;
-  margin-top: 10px;
-}
-
 /* #43 深色兜底（2026-08-18 首修 / 2026-09-25 二次修）。
  *
  * 首修把这一块挂在 @media (prefers-color-scheme: dark)：本机实测三个 prefers-color-scheme
@@ -523,17 +518,46 @@ body[data-ds-dark-theme] .dsh-dev-error {
   }
 }
 
-/* Diagnostic rows use the same type scale and dividers as settings. */
+/* Keep the result heading and its controls together as the column narrows. */
 .dsh-dev-notify-check {
-  margin-block-start: 12px;
+  display: grid;
+  gap: 12px;
+  padding-block: 12px 4px;
 }
 
-.dsh-dev-notify-check h4 {
-  margin: 0 0 4px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 12px;
+.dsh-notify-check-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.dsh-notify-check-copy {
+  flex: 1 1 112px;
+}
+
+.dsh-notify-check-copy h4 {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
   font-weight: 500;
-  line-height: 18px;
+  line-height: 20px;
+}
+
+.dsh-notify-check-copy > p {
+  margin-block-start: 2px;
+}
+
+.dsh-notify-check-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.dsh-notify-check-actions > button {
+  min-height: 40px;
 }
 
 .dsh-notify-channels {

@@ -202,6 +202,8 @@ export function NotifySettingsRow() {
     : snapshot.notificationsEnabled === true && snapshot.permissionGranted === true
       ? tr('已允许', 'Allowed')
       : tr('状态不可用', 'Status unavailable')
+  const diagnosticsBlocked = (snapshot.notificationsEnabled ?? selfCheck?.notificationsEnabled) === false
+    || (snapshot.permissionGranted ?? selfCheck?.permissionGranted) === false
   const channelRows: ReadonlyArray<NotifyChannelRow> = selfCheck?.channels ?? []
   /** 渠道档位文本：壳侧人话优先，缺失才回退到页面侧的数值翻译（快照可能比 APK 新）。 */
   const importanceTextOf = (row: NotifyChannelRow): string =>
@@ -263,46 +265,49 @@ export function NotifySettingsRow() {
           {tr('排查通知', 'Troubleshoot notifications')}
           <IconChevronRightOutlineMedium size={14} aria-hidden="true" />
         </summary>
-        <div className="dsh-dev-row dsh-dev-actions">
-          <Button
-            size="sm"
-            onClick={() => {
-              setSelfCheckTried(true)
-              setSelfCheck(readSelfCheck())
-            }}
-          >
-            {tr('通知自检', 'Check notifications')}
-          </Button>
-          {/* S3-26：自证「哪几类真的能到达」。渠道状态看上面的自检，这里看**实际到达效果**——
-              「我把提问提醒关了 / 系统降级了渠道之后，任务完成还会不会提醒我」是这一族最实际的疑问。 */}
-          <Button
-            size="sm"
-            onClick={() => {
-              let posted = 0
-              try {
-                posted = window.androidBridge?.notifySendTest?.() ?? 0
-              } catch {
-                posted = 0
-              }
-              setMessage(
-                posted > 0
-                  ? { diagnostics: true, text: tr('已发送 ', 'Sent ') + String(posted) + tr(' 条测试通知（五类各一条）——请到通知栏看哪几条真的到了、哪几条是静默的', ' test notifications (one per category). Check the shade to see which arrived.') }
-                  : { diagnostics: true, text: tr('一条也没发出去：通知权限未授予或渠道不可用——请先在上面的自检里看渠道状态，并到系统设置里允许通知', 'Nothing was sent: notification permission is missing or the channel is unavailable. Check the status above and allow notifications in system settings.') },
-              )
-            }}
-          >
-            {tr('发送测试通知', 'Send a test notification')}
-          </Button>
-        </div>
-        {selfCheckTried && selfCheck === null && (
-          <p className="dsh-dev-warn">{tr('自检不可用（桥未装配或壳侧上下文未绑定）。', 'The self-check is unavailable (bridge missing or not bound).')}</p>
-        )}
-        {selfCheck !== null && (
-          <div className="dsh-dev-notify-check">
-            <h4>{tr('通知渠道', 'Notification channels')}</h4>
-            {(selfCheck.notificationsEnabled === false || selfCheck.permissionGranted === false) && (
-              <p className="dsh-dev-hint">{tr('系统未允许通知，以下是各渠道的设置。', 'Android is blocking notifications. These are the channel settings.')}</p>
-            )}
+        <div className="dsh-dev-notify-check">
+          <div className="dsh-notify-check-heading">
+            <div className="dsh-notify-check-copy">
+              <h4>{tr('通知渠道', 'Notification channels')}</h4>
+              {diagnosticsBlocked && (
+                <p className="dsh-dev-hint">{tr('系统未允许通知', 'Blocked by Android')}</p>
+              )}
+            </div>
+            <div className="dsh-notify-check-actions">
+              <Button
+                onClick={() => {
+                  setSelfCheckTried(true)
+                  setSelfCheck(readSelfCheck())
+                }}
+              >
+                {tr('通知自检', 'Check notifications')}
+              </Button>
+              <Button
+                onClick={() => {
+                  let posted = 0
+                  try {
+                    posted = window.androidBridge?.notifySendTest?.() ?? 0
+                  } catch {
+                    posted = 0
+                  }
+                  setMessage(
+                    posted > 0
+                      ? { diagnostics: true, text: tr('已发送 ', 'Sent ') + String(posted) + tr(' 条测试通知。请到通知栏查看。', ' test notifications. Check the notification shade.') }
+                      : { diagnostics: true, text: tr('一条也没发出去。请在系统设置中检查通知权限和渠道。', 'Nothing was sent. Check notification permissions and channels in Android settings.') },
+                  )
+                }}
+              >
+                {tr('发送测试通知', 'Send a test notification')}
+              </Button>
+            </div>
+          </div>
+          {selfCheckTried && selfCheck === null && (
+            <p className="dsh-dev-warn" role="status">{tr('自检不可用（桥未装配或壳侧上下文未绑定）。', 'The self-check is unavailable (bridge missing or not bound).')}</p>
+          )}
+          {message?.diagnostics && (
+            <p className="dsh-dev-warn" role="status" {...noticeDataAttrs(message)}>{message.text}</p>
+          )}
+          {selfCheck !== null && (
             <ul className="dsh-notify-channels">
               {channelRows.map((channel) => {
                 const label = channel.label ?? channel.category ?? tr('未知渠道', 'Unknown channel')
@@ -342,11 +347,8 @@ export function NotifySettingsRow() {
                 )
               })}
             </ul>
-          </div>
-        )}
-        {message?.diagnostics && (
-          <p className="dsh-dev-warn" role="status" {...noticeDataAttrs(message)}>{message.text}</p>
-        )}
+          )}
+        </div>
       </details>
     </div>
   )
