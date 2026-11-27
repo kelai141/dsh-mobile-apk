@@ -624,6 +624,63 @@ class NativeShizukuDisplayTest {
     assertTrue(platform.contains("shizukuFacts.remove(\"displayOperations\")"))
   }
 
+  @Test fun rootBackendAcceptsRealLaunchAppAndRealOrVirtualKeyEventWithoutShizuku() {
+    val calls = mutableListOf<String>()
+    val a11y = object : NativeControlDispatcher.Platform {
+      override fun implements(plan: JSONObject) = false
+      override fun execute(callId: String, plan: JSONObject, args: JSONObject,
+        refreshFacts: () -> Boolean, authorize: () -> Boolean): CompletableFuture<JSONObject> =
+        CompletableFuture.completedFuture(JSONObject().put("executed", "no"))
+    }
+    val execution = NativeShizukuExecution(
+      a11y = a11y,
+      displayIdForAlias = { alias -> if (alias == "virtual-1") 7 else null },
+      context = { null },
+      executeRootKeyEvent = { _, displayId, screenId, key, authorize ->
+        val ok = authorize()
+        calls += "keyEvent:$displayId:$screenId:$key:$ok"
+        JSONObject().put("ok", ok).put("code", if (ok) "key-event-accepted" else "authorize-denied")
+          .put("executed", if (ok) "yes" else "no").put("screenId", screenId)
+      },
+      executeRootLaunchApp = { _, pkg, authorize ->
+        val ok = authorize()
+        calls += "launchApp:$pkg:$ok"
+        JSONObject().put("ok", ok).put("code", if (ok) "launch-confirmed" else "authorize-denied")
+          .put("executed", if (ok) "yes" else "no").put("screenId", "real")
+      },
+    )
+    fun rootPlan(op: String, alias: String, displayId: Int): JSONObject = JSONObject()
+      .put("backend", "root").put("operation", op).put("screenId", alias)
+      .put("displayId", displayId).put("width", 480).put("height", 640)
+      .put("epoch", "3").put("generation", "8")
+
+    assertTrue(execution.implements(rootPlan("launchApp", "real", 0)))
+    assertFalse("launchApp 不得落在虚拟屏", execution.implements(rootPlan("launchApp", "virtual-1", 7)))
+    assertTrue(execution.implements(rootPlan("keyEvent", "real", 0)))
+    assertTrue(execution.implements(rootPlan("keyEvent", "virtual-1", 7)))
+    assertFalse("未登记虚拟屏的 root keyEvent 必须拒绝", execution.implements(rootPlan("keyEvent", "virtual-9", 9)))
+    assertFalse("其他 op 不得落入 root 分支", execution.implements(rootPlan("click", "real", 0)))
+
+    val launched = execution.execute("r-1", rootPlan("launchApp", "real", 0),
+      JSONObject().put("pkg", "com.android.settings"), { true }, { true }).get()
+    assertTrue(launched.optBoolean("ok"))
+    assertEquals("launch-confirmed", launched.optString("code"))
+
+    val keyVirtual = execution.execute("r-2", rootPlan("keyEvent", "virtual-1", 7),
+      JSONObject().put("key", "enter"), { true }, { true }).get()
+    assertTrue(keyVirtual.optBoolean("ok"))
+    assertEquals("key-event-accepted", keyVirtual.optString("code"))
+    assertEquals("virtual-1", keyVirtual.optString("screenId"))
+
+    val badKey = execution.execute("r-3", rootPlan("keyEvent", "real", 0),
+      JSONObject().put("key", "power"), { true }, { true }).get()
+    assertFalse(badKey.optBoolean("ok"))
+    assertEquals("invalid-key", badKey.optString("code"))
+    assertEquals("no", badKey.optString("executed"))
+
+    assertEquals(listOf("launchApp:com.android.settings:true", "keyEvent:7:virtual-1:enter:true"), calls)
+  }
+
   private fun repoFile(path: String): java.io.File {
     var dir: java.io.File? = java.io.File(".").absoluteFile
     while (dir != null) {

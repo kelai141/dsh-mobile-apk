@@ -8,13 +8,13 @@
  *
  * 版本来源：
  *  - 壳（DeepCode）：壳桥 `androidBridge.version()`（BuildConfig.VERSION_NAME）；
- *  - 引擎（DeepSeek​Harness）：由 about-entry 在被替换的那行原文里抓到，经 getEngineVersion() 取。
+ *  - DeepSeek Harness: the running Host's release identity from its boot graph.
  */
 import { useEffect, useRef } from 'react'
 import { tr } from '../i18n.ts'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { ABOUT_LOGO_DATA_URL } from './about-logo.ts'
-import { getEngineVersion, getShellVersion } from './about-entry.ts'
+import { getEngineVersion, getShellVersion } from './release-info.ts'
 
 /** 仓库地址。 */
 const REPO_URL = 'https://github.com/kelai141/dsh-mobile-apk'
@@ -49,8 +49,7 @@ function LinkRow(props: { label: string; detail: string; url: string }) {
       <span className="dsh-gs-control">
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none"
           stroke="currentColor" strokeWidth="1.3">
-          <path d="M6 3h7v7M13 3 5.5 10.5" strokeLinecap="round" strokeLinejoin="round" />
-          <path d="M11 12.5H3.5V5" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M5 4h7v7M12 4l-8 8" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </span>
     </button>

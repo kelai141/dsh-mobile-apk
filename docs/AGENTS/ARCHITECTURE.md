@@ -98,7 +98,7 @@
 | NativeControlDispatcher.kt / NativeControlFrames.kt | 计划分派与长度前缀帧协议；Rust 决定授权与通道，Kotlin 只执行计划 | NativeControlHost、各 Platform 适配器 |
 | nativecontrol/NativeA11yExecution.kt | a11y 计划的执行适配：快照、点击、长按、输入、滚动、滑动、全局动作、截屏与区域读取 | NativeControlRuntime |
 | nativecontrol/NativeShizukuExecution.kt | Shizuku 后端：真实屏输入、固定键码按键与虚拟屏手势/全局 Back | NativeControlRuntime |
-| nativecontrol/NativeVdisplayExecution.kt | vd 计划绑定别名与 generation，再调 `VdisplayController.executeAuthorized`；授权门在真实副作用紧前 | NativeControlRuntime |
+| nativecontrol/NativeVdisplayExecution.kt | vd 计划（`backend=shizuku` 或独立授权 `backend=root`）绑定别名与 generation，再调 `VdisplayController.executeAuthorized`；授权门在真实副作用紧前 | NativeControlRuntime |
 | nativecontrol/NativePrivilegeExecution.kt | `shExec`/`rootExec`/`termuxExec` 的执行适配；紧邻调用前复查 `authorize` | NativeControlRuntime |
 | nativecontrol/NativeEnvironmentExecution.kt | `prepareEnvironment` 只关/恢复三项框架动画倍率，无输入法逻辑 | NativeControlRuntime |
 | nativecontrol/NativeAppWebViewExecution.kt | 自有 WebView 的 DOM 读取与动作计划（`webSnapshot`/`webAction`） | NativeSharedHostExecution |
@@ -220,7 +220,7 @@ android_screen_list（metadata only; no screen content）
              └─ DispatchPlan: a11y / shizuku / root / browserHost / webViewHost / local
                   ├─ a11y → NativeA11yExecution → NativeAccessibilityPlatform
                   ├─ shizuku → NativeShizukuExecution / NativeVdisplayExecution
-                  ├─ root/termux/sh → NativePrivilegeExecution（Rust shell_policy 准入）
+                  ├─ root/termux/sh → NativePrivilegeExecution（Rust shell_policy 准入）/ NativeVdisplayExecution（独立授权 Root 虚拟屏）
                   ├─ browserHost → NativeSharedHostExecution → BrowserHost.controlOp
                   └─ webViewHost → NativeAppWebViewExecution → MainActivity.webViewRef
 ```
@@ -241,7 +241,7 @@ AI 工具（dsh-android-phone-control）
    └─ 读 capabilities（epoch、scope、每屏 op；不读旧队列状态）
         ├─ a11y 在线 → 语义与点手势计划
         ├─ shizuku 就绪 → 固定 argv 的屏幕/按键/只读查询
-        ├─ root 独立授权 → rootExec（RootExecutionFence + RootMaintenanceLease）
+        ├─ root 独立授权 → rootExec（RootExecutionFence + RootMaintenanceLease）、虚拟屏 vd* 及真实屏 launchApp / 全屏 keyEvent（ShizukuOrRoot）
         └─ termux 就绪 → termuxExec（应用 UID，NativeAppShell）
 ```
 

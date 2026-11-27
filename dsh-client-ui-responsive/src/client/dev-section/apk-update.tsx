@@ -41,9 +41,10 @@
  *  - 全程无自动请求：只有用户显式点击才发 check / install。
  */
 import { useCallback, useEffect, useState } from 'react'
+import { getShellVersion } from '../mobile/release-info.ts'
 import { useShellState } from '../mobile/use-shell-state.ts'
 import { noticeDataAttrs, type Notice } from '../user-copy.ts'
-import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconChevronRightOutlineMedium } from '@deepseek-ai/dsh-client-ui-primitives'
 import { tr } from '../i18n.ts'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -173,18 +174,15 @@ function viewOf(state: string, status: ApkUpdateStatus): RowView {
     case 'checking':
       return checkOnly(tr('正在查询最新版本…', 'Looking up the latest version…'), false, tr('检查中…', 'Checking…'))
     case 'up-to-date':
-      return checkOnly(tr('APK 已是最新 ', 'APK is up to date ') + (status.version ?? ''), true, tr('重新检查', 'Check again'))
+      return checkOnly(tr('已是最新版本', 'Up to date'), true, tr('重新检查', 'Check again'))
     case 'available':
       return {
-        text: tr('发现新版 ', 'New version ') + (status.tag ?? '') +
-          (status.current === undefined
-            ? ''
-            : tr('（当前 v', ' (current v') + status.current + tr('，', ', ') + fmtBytes(status.sizeBytes ?? 0) + tr('）', ')')) +
-          tr('——资产 ', ' — asset ') + (status.name ?? ''),
+        text: [tr('发现新版', 'New version'), status.tag, status.sizeBytes === undefined
+          ? undefined : fmtBytes(status.sizeBytes)].filter(Boolean).join(' '),
         // 检查按钮禁用：beginCheck() 会清掉已发现的新版载荷，此刻再检查等于丢掉可下载的包。
         checkLabel: tr('检查更新', 'Check for updates'),
         checkEnabled: false,
-        installLabel: tr('下载并安装 ', 'Download and install ') + (status.tag ?? ''),
+        installLabel: tr('下载并安装', 'Download and install'),
         installEnabled: true,
         // 摘要口径：这是**发布方声明的值**（壳侧下载后拿它比对），不是「本机已校验通过」。
         // 本次发布没给摘要就如实说没给——留空会让用户以为校验过了。
@@ -237,7 +235,7 @@ function viewOf(state: string, status: ApkUpdateStatus): RowView {
       }
     }
     default:
-      return checkOnly(tr('运行时与安装包状态未检查', 'Runtime and APK status not checked'), true)
+      return checkOnly(tr('尚未检查更新', 'Updates have not been checked'), true)
   }
 }
 
@@ -301,45 +299,50 @@ export function ApkUpdateRow() {
       }
     : viewOf(state, status)
 
+  const currentVersion = getShellVersion() || status?.current || (state === 'up-to-date' ? status?.version : undefined)
+  const hasInstallAction = row.installLabel !== null
+
   return (
     <div data-plugin="dev-apk-update">
       <div className="dsh-gs-row" data-apk-state={status === null ? 'unavailable' : state}>
         <div className="dsh-gs-text">
-          <div className="dsh-gs-title">{tr('检查更新', 'Check for updates')}</div>
-          <div className="dsh-gs-desc">{row.text}</div>
-          {row.detail !== null && <div className="dsh-gs-desc" data-apk-detail>{row.detail}</div>}
+          <div className="dsh-gs-title">
+            {currentVersion
+              ? tr('当前版本 ', 'Current version ') + currentVersion
+              : tr('当前版本不可用', 'Current version unavailable')}
+          </div>
+          <div className="dsh-gs-desc" role="status">{row.text}</div>
           {message !== null && (
             <div className="dsh-gs-desc" {...noticeDataAttrs(message)}>{message.text}</div>
           )}
         </div>
         <div className="dsh-gs-control dsh-gs-actions">
-          <Button
-            size="sm"
-            data-apk-action="check"
-            disabled={!row.checkEnabled}
-            onClick={onCheck}
-          >{row.checkLabel}</Button>
-        {/* 下载按钮只在有这条路时才渲染（其余态壳侧没有可受理的 install，摆一枚点了没反应的按钮
-            比不摆更糟）。失败态的重试路径是 check，故这里不复活它。 */}
-          {row.installLabel !== null && (
-            <Button
-              size="sm"
-              data-apk-action="install"
-              disabled={!row.installEnabled}
-              onClick={onInstall}
-            >{row.installLabel}</Button>
-          )}
+          {hasInstallAction
+            ? <Button variant="primary" data-apk-action="install" disabled={!row.installEnabled}
+                onClick={onInstall}>{row.installLabel}</Button>
+            : <Button variant="primary" data-apk-action="check" disabled={!row.checkEnabled}
+                onClick={onCheck}>{row.checkLabel}</Button>}
         </div>
       </div>
 
-      {/* 说明段：留在框内，作为行下方的灰色说明，不再单独一个描边段落。 */}
-      <div className="dsh-gs-row">
-        <div className="dsh-gs-text">
-          <div className="dsh-gs-desc">
-            {tr('更新应用安装包（APK）：按本机 ABI 从 GitHub 发布页取包，校验体积与 sha256 后交给系统安装器。只在你点击时下载；缺「安装未知应用」权限会先打开授权页。', 'Updates the app APK: the matching ABI comes from the GitHub release, and its size and sha256 are verified before the system installer opens. Downloads start only when you tap; a missing install permission opens the grant page first.')}
-          </div>
+      <details className="dsh-apk-update-details">
+        <summary className="dsh-gs-row">
+          {tr('安装说明', 'Installation details')}
+          <IconChevronRightOutlineMedium size={14} />
+        </summary>
+        <div className="dsh-apk-update-notes">
+          {status?.name && <p className="dsh-gs-desc" data-apk-asset>{status.name}</p>}
+          {row.detail !== null && <p className="dsh-gs-desc" data-apk-detail>{row.detail}</p>}
+          <p className="dsh-gs-desc">
+            {tr('从 GitHub 获取适配本机的安装包，核对大小和发布方提供的 SHA-256 后交给系统安装器。下载由你发起。', 'The Android installer opens after the package size and any SHA-256 digest supplied by the release are checked. The download starts when you tap.')}
+          </p>
+          {hasInstallAction && row.checkEnabled && (
+            <Button size="sm" variant="outline" data-apk-action="check" onClick={onCheck}>
+              {tr('重新检查更新', 'Check for updates again')}
+            </Button>
+          )}
         </div>
-      </div>
+      </details>
     </div>
   )
 }
@@ -356,13 +359,7 @@ export function ApkUpdateRow() {
  */
 export function ApkUpdateSection(_props: PropsRuntime<'settings.section'>) {
   return (
-    <section className="dsh-screen-control-card" aria-labelledby="dsh-apk-update-title">
-      <header className="dsh-screen-control-header">
-        <span>
-          <strong id="dsh-apk-update-title">{tr('应用更新', 'App updates')}</strong>
-          <small>{tr('检查是否有新版安装包，并在此下载安装；只在你点击时才发起。', 'Check for a newer APK and install it here; nothing starts until you tap.')}</small>
-        </span>
-      </header>
+    <section aria-label={tr('应用更新', 'App updates')}>
       <ApkUpdateRow />
     </section>
   )

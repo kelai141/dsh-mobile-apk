@@ -1,5 +1,6 @@
 package com.dsharnessmobile.shell.nativecontrol
 
+import android.content.Context
 import android.os.SystemClock
 import com.dsharnessmobile.shell.ShizukuTransport
 import org.json.JSONObject
@@ -8,6 +9,7 @@ import java.util.concurrent.RejectedExecutionException
 
 /**
  * Executes Rust-authorized real-screen input: the point tap (bit 0) and focused-editor text (bit 1).
+ * Also executes Rust-authorized root `launchApp` (display 0) and `keyEvent` plans without requiring Shizuku.
  * It never chooses the channel and never substitutes another input path.
  */
 internal class NativeShizukuExecution(
@@ -18,16 +20,44 @@ internal class NativeShizukuExecution(
    */
   private val displayIdForAlias: (String) -> Int? =
     { alias -> com.dsharnessmobile.shell.VdisplayController.displayIdForAlias(alias) },
+  private val context: () -> Context? = { null },
+  private val executeRootKeyEvent: (
+    context: Context?,
+    displayId: Int,
+    screenId: String,
+    key: String,
+    authorize: () -> Boolean,
+  ) -> JSONObject = { app, displayId, screenId, key, authorize ->
+    if (app == null) JSONObject().put("ok", false).put("code", "root-host-unavailable")
+      .put("executed", "no").put("screenId", screenId)
+    else com.dsharnessmobile.shell.VdisplayController.keyEventViaRoot(app, displayId, screenId, key, authorize)
+  },
+  private val executeRootLaunchApp: (
+    context: Context?,
+    pkg: String,
+    authorize: () -> Boolean,
+  ) -> JSONObject = { app, pkg, authorize ->
+    if (app == null) JSONObject().put("ok", false).put("code", "root-host-unavailable")
+      .put("executed", "no").put("screenId", "real")
+    else com.dsharnessmobile.shell.VdisplayController.launchRealAppViaRoot(app, pkg, authorize)
+  },
 ) : NativeControlDispatcher.Platform {
   override fun implements(plan: JSONObject): Boolean =
     if (plan.optString("backend") == "shizuku")
       isRealTap(plan) || isRealText(plan) || isRealSnapshot(plan) || isRealFeature(plan) || isRealNode(plan) ||
         isVirtualText(plan) || isVirtualGesture(plan) || isVirtualSnapshot(plan) ||
         isVirtualFeature(plan) || isVirtualNode(plan)
+    else if (plan.optString("backend") == "root")
+      isRootLaunchApp(plan) || isRootKeyEvent(plan)
     else a11y.implements(plan)
 
   override fun execute(callId: String, plan: JSONObject, args: JSONObject, refreshFacts: () -> Boolean,
     authorize: () -> Boolean): CompletableFuture<JSONObject> {
+    if (plan.optString("backend") == "root") {
+      if (isRootLaunchApp(plan)) return rootLaunchApp(args, authorize)
+      if (isRootKeyEvent(plan)) return rootKeyEvent(plan, args, authorize)
+      return rejected("platform-adapter-unavailable")
+    }
     if (plan.optString("backend") != "shizuku") return a11y.execute(callId, plan, args, refreshFacts, authorize)
     if (isVirtualText(plan)) return virtualText(plan, args, authorize)
     if (isVirtualGesture(plan)) return virtualGesture(plan, args, authorize)
@@ -138,14 +168,51 @@ internal class NativeShizukuExecution(
     } == true &&
     plan.optString("operation") in setOf("click", "longClick", "setText", "scroll", "nodeText")
 
+  // ── 独立授权 Root 执行面（launchApp / keyEvent，不依赖 Shizuku） ───────────
+
+  private fun isRootLaunchApp(plan: JSONObject): Boolean =
+    plan.optString("backend") == "root" && plan.optString("operation") == "launchApp" &&
+      plan.optString("screenId") == "real" && plan.optInt("displayId", -1) == 0 && !plan.has("nodeTarget")
+
+  private fun isRootKeyEvent(plan: JSONObject): Boolean =
+    plan.optString("backend") == "root" && plan.optString("operation") == "keyEvent" && !plan.has("nodeTarget") &&
+      ((plan.optString("screenId") == "real" && plan.optInt("displayId", -1) == 0) || virtualDisplayTarget(plan) != null)
+
+  private fun rootLaunchApp(args: JSONObject, authorize: () -> Boolean): CompletableFuture<JSONObject> {
+    val pkg = args.optString("pkg")
+    if (!NativeShizukuMotion.validPackage(pkg)) return rejected("invalid-package")
+    return try {
+      worker.supplyAsync({
+        val guard = { try { authorize() } catch (_: Exception) { false } }
+        executeRootLaunchApp(context(), pkg, guard)
+      })
+    } catch (_: RejectedExecutionException) {
+      rejected("shizuku-native-input-busy")
+    }
+  }
+
+  private fun rootKeyEvent(plan: JSONObject, args: JSONObject,
+    authorize: () -> Boolean): CompletableFuture<JSONObject> {
+    val key = args.optString("key")
+    if (NativeShizukuMotion.keycodeFor(key) == null) return rejected("invalid-key")
+    val target = if (plan.optString("screenId") == "real" && plan.optInt("displayId", -1) == 0) {
+      "real" to 0
+    } else {
+      virtualDisplayTarget(plan) ?: return rejected("shizuku-motion-target-unregistered")
+    }
+    return try {
+      worker.supplyAsync({
+        val guard = { try { authorize() } catch (_: Exception) { false } }
+        executeRootKeyEvent(context(), target.second, target.first, key, guard)
+      })
+    } catch (_: RejectedExecutionException) {
+      rejected("shizuku-native-input-busy")
+    }
+  }
+
   // ── 虚拟屏：只认已登记且在事实面测过的 displayId ───────────────────────────
 
-  /**
-   * 虚拟屏目标的统一形状检查：backend 是 shizuku、alias 是产品别名、displayId 与别名当前一致。
-   * 显式目标必须自己成立——绝不拿「当前选中屏」补上缺的 displayId。
-   */
-  private fun virtualTarget(plan: JSONObject): Pair<String, Int>? {
-    if (plan.optString("backend") != "shizuku") return null
+  private fun virtualDisplayTarget(plan: JSONObject): Pair<String, Int>? {
     val alias = plan.optString("screenId")
     if (!NativeVdisplayExecution.isVirtualAlias(alias)) return null
     val displayId = plan.optInt("displayId", -1)
@@ -153,6 +220,15 @@ internal class NativeShizukuExecution(
     val registered = runCatching { displayIdForAlias(alias) }.getOrNull()
     if (registered != displayId) return null
     return alias to displayId
+  }
+
+  /**
+   * 虚拟屏目标的统一形状检查：backend 是 shizuku、alias 是产品别名、displayId 与别名当前一致。
+   * 显式目标必须自己成立——绝不拿「当前选中屏」补上缺的 displayId。
+   */
+  private fun virtualTarget(plan: JSONObject): Pair<String, Int>? {
+    if (plan.optString("backend") != "shizuku") return null
+    return virtualDisplayTarget(plan)
   }
 
   private fun isVirtualText(plan: JSONObject): Boolean =

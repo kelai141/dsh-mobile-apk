@@ -61,6 +61,7 @@ import { NotifySettingsSection } from './dev-section/notify-settings.tsx'
 import { ApkUpdateSection } from './dev-section/apk-update.tsx'
 import { LinuxEnvironmentSection } from './linux-environment/LinuxEnvironmentSection.tsx'
 import { LinuxEnvironmentPanel, LinuxPanelIcon } from './linux-environment/LinuxEnvironmentPanel.tsx'
+import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { LINUX_ENVIRONMENT_CSS } from './linux-environment/linux-environment.css.ts'
 import { DEV_SECTION_CSS } from './dev-section/dev-section.css.ts'
@@ -475,11 +476,11 @@ export function apply(ctx: ClientContext): void {
     name: 'settings.section',
     id: 'linux-environment',
     order: 95,
-    label: () => tr('Linux环境', 'Linux environment'),
+    label: () => tr('可选资源', 'Optional resources'),
   }, LinuxEnvironmentSection))
   ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
     name: 'sidebar.panellist', id: 'android-linux-environment', order: 30,
-    label: () => tr('Linux环境', 'Linux environment'),
+    label: () => tr('可选资源', 'Optional resources'),
   }, LinuxPanelIcon))
   ctx.slots.inject('main', () => ctx.slots.register({
     name: 'main', key: 'android-linux-environment', inject: () => ({ close: () => {
@@ -553,6 +554,7 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.header.leading',
     inject: (): SidebarToggleInjected => ({
       toggleSidebar: () => { ctx.layout.toggleSidebar() },
+      openDownloads: () => { ctx.layout.selectPanel('android-linux-environment' as MainPanelId) },
     }),
   }, SidebarToggle))
 

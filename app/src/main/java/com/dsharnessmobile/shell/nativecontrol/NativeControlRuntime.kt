@@ -29,7 +29,10 @@ internal object NativeControlRuntime {
       try {
         val a11y = NativeA11yExecution()
         val androidFacts = NativePlatformFacts(app, a11y, { ScreenScopePrefs.current(app).wire })
-        val androidExecution = NativeSharedHostExecution(NativeShizukuExecution(a11y), NativeVdisplayExecution({ app }))
+        val androidExecution = NativeSharedHostExecution(
+          NativeShizukuExecution(a11y, context = { app }),
+          NativeVdisplayExecution({ app }),
+        )
         val opened = NativeControlHost.open(app,
           NativeControlDispatcher.Facts { NativePrivilegeFacts.augment(app, androidFacts.capture()) },
           NativeEnvironmentExecution(app, NativePrivilegeExecution(app, androidExecution)))

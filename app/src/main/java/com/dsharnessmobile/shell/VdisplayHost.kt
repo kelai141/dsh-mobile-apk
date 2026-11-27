@@ -91,7 +91,7 @@ internal class VdisplayHost(
     }
 
     override fun onDisplayRemoved(displayId: Int) {
-      // 不挂逻辑（方案定例）：无屏无画面，冻结无妨；重建由 onDisplayAdded 强信号解冻。
+      onMain { if (VdisplayController.activeSize() == null) clearPresentation() }
     }
   }
 
@@ -389,6 +389,17 @@ internal class VdisplayHost(
         leftMargin = left
         topMargin = top
       }
+    }
+  }
+
+  /** 虚拟屏全部销毁后立即清掉画面、全屏态与浮钮，不残留最后一帧。 */
+  fun clearPresentation() {
+    onMain {
+      attached = false
+      stageVisible = false
+      resetFullscreen()
+      view?.let { if (it.visibility != View.GONE) it.visibility = View.GONE }
+      Unit
     }
   }
 

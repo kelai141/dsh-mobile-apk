@@ -146,7 +146,7 @@ const OWN_SECTION_DESCRIPTIONS: ReadonlyMap<string, string> = new Map([
   ['通知', '任务提醒与授权请求'],
   ['模型能力', '补齐第三方模型的思考档位'],
   ['应用更新', '检查新版本并下载安装包'],
-  ['Linux环境', '安装并启用 Debian 环境'],
+  ['可选资源', '下载和管理 Linux 工作环境'],
   ['关于', '应用与引擎版本'],
 ])
 
@@ -157,7 +157,8 @@ const OWN_SECTION_DESCRIPTIONS_EN: ReadonlyMap<string, string> = new Map([
   ['通知', 'Task alerts and approval requests'],
   ['模型能力', 'Thinking levels for third-party models'],
   ['应用更新', 'Check for a new version and download the installer'],
-  ['Linux环境', 'Install and enable the Debian environment'],
+  ['可选资源', 'Download and manage the Linux workspace'],
+  ['Optional resources', 'Download and manage the Linux workspace'],
   ['关于', 'App and engine versions'],
 ])
 

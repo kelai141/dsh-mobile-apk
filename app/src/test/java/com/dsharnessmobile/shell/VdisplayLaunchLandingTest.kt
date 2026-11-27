@@ -1,6 +1,7 @@
 package com.dsharnessmobile.shell
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -94,5 +95,44 @@ class VdisplayLaunchLandingTest {
       ).isEmpty(),
     )
     assertTrue(VdisplayController.displaysRunning("", onlyOnVirtual).isEmpty())
+  }
+
+  @Test
+  fun transportSelectionKeepsShizukuIsolatedAndRoutesRootPlans() {
+    assertEquals("shizuku", VdisplayController.resolveTransport("shizuku", directSuReady = true, shizukuOk = true))
+    assertEquals("shizuku", VdisplayController.resolveTransport("shizuku", directSuReady = true, shizukuOk = false))
+    assertEquals("su", VdisplayController.resolveTransport("root", directSuReady = true, shizukuOk = true))
+    assertEquals("shizuku-root", VdisplayController.resolveTransport("root", directSuReady = false, shizukuOk = true))
+    assertEquals("shizuku", VdisplayController.resolveTransport(null, directSuReady = true, shizukuOk = true))
+    assertEquals("su", VdisplayController.resolveTransport(null, directSuReady = true, shizukuOk = false))
+    assertEquals("'com.example.app/.Main'", VdisplayController.shellQuote("com.example.app/.Main"))
+    assertEquals("'a'\\''b'", VdisplayController.shellQuote("a'b"))
+  }
+
+  @Test fun overlayDisplaySettingDetectionDistinguishesActiveFromClearedValues() {
+    assertFalse(VdisplayController.isOverlayDisplaySettingActive(null))
+    assertFalse(VdisplayController.isOverlayDisplaySettingActive(""))
+    assertFalse(VdisplayController.isOverlayDisplaySettingActive("   "))
+    assertFalse(VdisplayController.isOverlayDisplaySettingActive("null"))
+    assertFalse(VdisplayController.isOverlayDisplaySettingActive("None"))
+    assertTrue(VdisplayController.isOverlayDisplaySettingActive("720x1600/240"))
+    assertTrue(VdisplayController.isOverlayDisplaySettingActive("1280x720/213;1920x1080/320"))
+  }
+
+  @Test fun activityTaskSupervisorSectionDoesNotBleedVirtualDisplayIntoDisplayZero() {
+    val dump = """
+      Display #12 (activities from top to bottom):
+          topResumedActivity=ActivityRecord{48089135 u0 app.morphe.manager/.MainActivity_Default t9703}
+          * Hist  #0: ActivityRecord{48089135 u0 app.morphe.manager/.MainActivity_Default t9703}
+      Display #0 (activities from top to bottom):
+          topResumedActivity=ActivityRecord{83496618 u0 com.dsharnessmobile.shell/.MainActivity t9701}
+      ActivityTaskSupervisor state:
+        Display: mDisplayId=0 (organized)
+            * ActivityRecord{83496618 u0 com.dsharnessmobile.shell/.MainActivity t9701}
+        Display: mDisplayId=12
+            * ActivityRecord{48089135 u0 app.morphe.manager/.MainActivity_Default t9703}
+    """.trimIndent()
+    assertEquals(setOf(12), VdisplayController.displaysRunning("app.morphe.manager", dump))
+    assertEquals(setOf(0), VdisplayController.displaysRunning("com.dsharnessmobile.shell", dump))
   }
 }

@@ -204,7 +204,7 @@ tier-2（`isolationTier=process-suffix`）把浏览器视图放在 `:browser` �
 | 页面 → 壳 | `notifySelfCheck()` | AndroidBridge（默认实现读 `ShellAppContext`）→ `NotifyCenter.selfCheck` | 每渠道**系统实际状态**（enabled/importance/是否被降级）JSON。默认实现钉在真源上、不依赖 MainActivity 传参（漏接线这一失效形态从结构上消失） |
 | 页面 → 壳 | `openNotifyAppSettings()` | AndroidBridge → MainActivity → `NotifyCenter.appSettingsIntent` | 系统「本应用通知设置」深链；返回 boolean，false = 该 ROM 无此页（页面如实提示，不假装拉起过） |
 | 页面 → 壳 | `openNotifyChannelSettings(channelId)` | AndroidBridge → MainActivity → `NotifyCenter.channelSettingsIntent` | 渠道级深链；channelId 来自 `notifySelfCheck` 回执 |
-| 同上（页面消费） | — | `src/client/dev-section/notify-settings.tsx` | 「通知自检」+「系统通知设置」两枚入口 + 每渠道一行「系统实际状态 + 打开该渠道设置」；五类开关各配一句「关掉会怎样」（提问/授权两类写明「关闭 = 不弹窗，仍可作答」） |
+| Page → shell | `getNotifySetting("")` | `NotifyCenter.settingsSnapshot` → `notify-settings.tsx` | The snapshot includes `notificationsEnabled` and `permissionGranted`. The settings page reads both on entry and foreground return. Older shells lacking either field show an unavailable status unless a returned flag explicitly denies notifications. Channel diagnostics remain behind the troubleshooting section. |
 | 壳侧语义变更 | — | `NotifyCenter.Face.interactive` | 交互类（question/approval）类别关闭 ⇒ **降级为静默渠道**（不弹窗不响铃、仍投递、仍可作答），不再 `return DISABLED`；非交互类（report/todo/silent）才允许丢弃 |
 | 壳侧载荷修正 | `dsh.notify.*` extras | `NotifyCenter.EXTRA_KIND / EXTRA_TARGET_SESSION / EXTRA_TARGET_AGENT` | 旧实现把 `sessionId` 与 `agentId` **依次写进同一个 key**（后写覆盖先写）。现按键语义拆开，读取者 = `MainActivity.consumeNotifyRoute` / `onNewIntent` |
 
@@ -280,6 +280,8 @@ bootstrap 调用 `linuxPluginHost.install({directory,entry='lib/index.js',config
 | `linuxAssetPause()` | 请求暂停当前资产下载；只在下载阶段接受，校验与解包期间返回 `false`。 |
 | `linuxAssetResume()` | 使用当前资产原清单、摘要、大小及来源恢复下载，并复用 `.part` 文件中的已接收字节。 |
 | `linuxInstallJob(action, payload)` | `start` 校验并原子持久化安装任务后排队；`status` 返回任务与当前资产进度；`pause` 请求暂停；`retry` 恢复暂停或失败任务。任务文件为 `linux-environment/install-job.json`。 |
+
+`linuxInstallJob('status', null)` includes the release `version`, selected `runtimeId`, and the aggregate `totalBytes` and `availableBytes`. Available bytes count completed assets and the current asset's reported bytes, including reused data. They measure preparation against the manifest, and can reach the total before activation. Both the chat header and Optional resources read this status and keep download progress separate from environment activation.
 
 设置页从固定版本的发布 manifest 取得 runtime 插件、backend、rootfs 与 Node 资产，按序调用 `linuxInstallJob('start', payload)`。APK 将 `{version, runtimeId, assets, index, state}` 通过原子替换写入 `linux-environment/install-job.json`。任务由单线程 worker 执行，随后的状态查询读取任务阶段及 `linuxAssetPrepareStatus()` 进度。EngineService 恢复时调用 `resumePending()`，继续 `queued` 或 `installing` 状态任务；下载进度通过系统通知展示。暂停状态和资产索引持久化，重试后继续当前资产并复用 `.part` 文件。完成全部暂存后，安装任务向引擎 POST `/install`，携带固定 `runtimeId` 与 `expectedVersion`。
 

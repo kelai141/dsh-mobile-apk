@@ -17,26 +17,28 @@ class NativeVdisplayExecutionTest {
 
   private var calls = mutableListOf<Pair<String, String>>()
   private var lastArgs: JSONObject? = null
+  private var lastBackend: String? = null
   private var reply: (String, JSONObject, String) -> JSONObject = { op, _, alias ->
     JSONObject().put("ok", true).put("code", op + "-ok").put("screenId", alias)
   }
   private val context = null
-  private val adapter = NativeVdisplayExecution({ context }, { _, op, args, screenId, guard ->
+  private val adapter = NativeVdisplayExecution({ context }, { _, op, args, screenId, backend, guard ->
     if (!guard()) JSONObject().put("ok", false).put("code", "authorize-denied").put("executed", "no")
     else {
       calls.add(op to screenId)
       lastArgs = args
+      lastBackend = backend
       reply(op, args, screenId)
     }
   })
 
-  private fun creation(alias: String = "virtual-1", args: JSONObject = JSONObject()): JSONObject =
-    JSONObject().put("backend", "shizuku").put("operation", "vdCreate").put("target", "virtualCreation")
+  private fun creation(alias: String = "virtual-1", args: JSONObject = JSONObject(), backend: String = "shizuku"): JSONObject =
+    JSONObject().put("backend", backend).put("operation", "vdCreate").put("target", "virtualCreation")
       .put("screenId", alias).put("epoch", "3").put("args", args)
 
   private fun bound(operation: String, alias: String = "virtual-1", displayId: Int = 9,
-    args: JSONObject = JSONObject()): JSONObject =
-    JSONObject().put("backend", "shizuku").put("operation", operation).put("target", "androidScreen")
+    args: JSONObject = JSONObject(), backend: String = "shizuku"): JSONObject =
+    JSONObject().put("backend", backend).put("operation", operation).put("target", "androidScreen")
       .put("screenId", alias).put("displayId", displayId).put("width", 480).put("height", 640)
       .put("epoch", "3").put("generation", "8").put("args", args)
 
@@ -100,7 +102,7 @@ class NativeVdisplayExecutionTest {
 
   @Test fun falseFinalAuthorizationNeverCallsTheAndroidController() {
     var controllerCalls = 0
-    val denied = NativeVdisplayExecution({ context }, { _, _, _, _, guard ->
+    val denied = NativeVdisplayExecution({ context }, { _, _, _, _, _, guard ->
       if (!guard()) JSONObject().put("ok", false).put("code", "authorize-denied").put("executed", "no")
       else {
         controllerCalls++
@@ -158,7 +160,7 @@ class NativeVdisplayExecutionTest {
   }
 
   @Test fun controllerExceptionIsUnknownRatherThanNotExecuted() {
-    val exploding = NativeVdisplayExecution({ context }, { _, _, _, _, guard -> check(guard()); throw IllegalStateException("lost") })
+    val exploding = NativeVdisplayExecution({ context }, { _, _, _, _, _, guard -> check(guard()); throw IllegalStateException("lost") })
     val receipt = exploding.execute("call-7", bound("vdLaunchApp",
       args = JSONObject().put("pkg", "com.example.app")), JSONObject(), { true }, { true }).get()
     assertEquals("vdisplay-result-unknown", receipt.getString("code"))
@@ -170,6 +172,24 @@ class NativeVdisplayExecutionTest {
       { true }, { true })
     assertEquals("platform-adapter-unavailable", future.get().getString("code"))
     assertTrue(calls.isEmpty())
+  }
+
+  @Test fun rootBackendPlansAreAcceptedAndForwardedVerbatim() {
+    assertTrue(adapter.implements(creation(backend = "root")))
+    assertTrue(adapter.implements(creation(backend = "root").put("operation", "vdInfo")))
+    assertTrue(adapter.implements(bound("vdDestroy", backend = "root")))
+    assertTrue(adapter.implements(bound("vdLaunchApp", args = JSONObject().put("pkg", "com.example.app"), backend = "root")))
+    assertFalse(adapter.implements(bound("vdDestroy", backend = "local")))
+    val receipt = adapter.execute(
+      "call-root-1",
+      creation(alias = "virtual-1", args = JSONObject().put("width", 480).put("height", 640), backend = "root"),
+      JSONObject(),
+      { true },
+      { true },
+    ).get()
+    assertEquals("yes", receipt.getString("executed"))
+    assertEquals("root", lastBackend)
+    assertEquals(listOf("vdCreate" to "virtual-1"), calls)
   }
 
   @Test fun adapterDoesNotClaimNonVirtualPlans() {
