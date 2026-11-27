@@ -530,8 +530,8 @@ body[data-ds-dark-theme] .dsh-dev-error {
   margin-top: 8px;
 }
 
-.dsh-dev-check-row {
-  align-items: center;
-  gap: 8px;
+[data-plugin='dev-notify-settings'] .dsh-dev-check-row {
+  padding-block: 8px;
+  gap: 12px;
 }
 `

@@ -299,35 +299,44 @@ export function NotifySettingsRow() {
             ) : (
               <p className="dsh-dev-hint">{tr('系统未降级任何通知渠道。', 'No notification channel is muted by the system.')}</p>
             )}
-            {channelRows.map((c) => (
-              <div key={String(c.selected ?? c.category)} className="dsh-dev-row dsh-dev-check-row">
-                <span>
-                  {(c.label ?? c.category ?? tr('未知渠道', 'unknown channel'))}
-                  {'：'}
-                  {c.degraded === true
-                    ? tr('系统已降级', 'muted by system')
-                    : (c.exists === false ? tr('渠道不存在', 'channel missing') : tr('正常', 'normal'))}
-                  {/* 档位口径优先取壳侧人话（P3-1：两侧同源，不各自翻译一遍）。 */}
-                  {importanceTextOf(c) === '' ? '' : '（' + importanceTextOf(c) + '）'}
-                </span>
-                <button
-                  type="button"
-                  className="dsh-dev-link"
-                  onClick={() => {
-                    const channelId = String(c.selected ?? '')
-                    let ok = false
-                    try {
-                      ok = channelId !== '' && window.androidBridge?.openNotifyChannelSettings?.(channelId) === true
-                    } catch {
-                      ok = false
-                    }
-                    if (!ok) setMessage({ diagnostics: true, text: tr('无法打开该渠道的系统设置页——请在系统设置里手动查找', 'The channel settings page did not open. Find it in system settings.') })
-                  }}
-                >
-                  {tr('打开该渠道设置', 'Open channel settings')}
-                </button>
-              </div>
-            ))}
+            {channelRows.map((channel) => {
+              const label = channel.label ?? channel.category ?? tr('未知渠道', 'Unknown channel')
+              const channelId = channel.selected ?? ''
+              const importance = importanceTextOf(channel)
+              const status = channel.degraded === true
+                ? tr('系统已降级', 'Muted by system')
+                : channel.exists === false ? tr('渠道不存在', 'Channel missing') : tr('正常', 'Normal')
+              return (
+                <div key={channel.category ?? channelId} className="dsh-gs-row dsh-dev-check-row">
+                  <div className="dsh-gs-text">
+                    <div className="dsh-gs-title">{label}</div>
+                    <div className="dsh-gs-desc">
+                      {channel.degraded === true && importance !== '' ? status + ' · ' + importance
+                        : channel.exists === false || importance === '' ? status : importance}
+                    </div>
+                  </div>
+                  {channelId !== '' && (
+                    <div className="dsh-gs-control">
+                      <Button
+                        size="sm"
+                        aria-label={tr('打开' + label + '的渠道设置', 'Open ' + label + ' channel settings')}
+                        onClick={() => {
+                          let opened = false
+                          try {
+                            opened = window.androidBridge?.openNotifyChannelSettings?.(channelId) === true
+                          } catch {
+                            opened = false
+                          }
+                          if (!opened) setMessage({ diagnostics: true, text: tr('无法打开该渠道的系统设置页，请在系统设置里手动查找。', 'The channel settings page did not open. Find it in system settings.') })
+                        }}
+                      >
+                        {tr('设置', 'Settings')}
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         )}
         {message?.diagnostics && (
