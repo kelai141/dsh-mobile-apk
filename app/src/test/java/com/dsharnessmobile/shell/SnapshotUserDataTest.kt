@@ -198,4 +198,39 @@ class SnapshotUserDataTest {
     assertEquals(1, SnapshotUserData.firstExecutableTag(listOf("a: !!js/regexp x"))!!.first)
     // 不是 js 标签的其它标签不得误拒
     assertEquals(null, SnapshotUserData.firstExecutableTag(listOf("a: !!str 1", "b: !ref x")))
-  }}
+  }
+
+  // ── issue: profile patch 只写了 .yaml 时，工厂 settings.yaml 不得被当成活动配置 ──
+
+  @Test
+  fun configurationDocumentRecognizesYamlProfilePatch() {
+    val root = Files.createTempDirectory("config-document-yaml-patch").toFile()
+    try {
+      val dshRoot = File(root, "live/.dsh")
+      val profile = File(dshRoot, "profiles/web").apply { mkdirs() }
+      val yaml = File(profile, "cordis.patch.yaml").apply { writeText("providers: {}\n") }
+      assertEquals("只有 .yaml 时必须把它当活动配置", yaml, SnapshotUserData.configurationDocument(dshRoot))
+    } finally {
+      SnapshotFs.deletePath(root)
+    }
+  }
+
+  @Test
+  fun prepareStagedSnapshotTreatsYamlProfilePatchAsActiveConfig() {
+    val root = Files.createTempDirectory("staged-yaml-patch").toFile()
+    try {
+      val liveDsh = File(root, "live/.dsh")
+      File(liveDsh, "profiles/web").mkdirs()
+      File(liveDsh, "profiles/web/cordis.patch.yaml").writeText("- id: user-route\n")
+      val stagedDsh = File(root, "stage/.dsh").apply { mkdirs() }
+      val factorySeed = File(stagedDsh, "settings.yaml").apply { writeText("llm-pi-ai:\n  providers: {}\n") }
+
+      val notes = SnapshotUserData.prepareStagedSnapshot(stagedDsh, liveDsh)
+
+      assertFalse("活动配置只有 .yaml 时，工厂 settings.yaml 必须被丢弃；notes=" + notes, factorySeed.exists())
+      assertTrue(notes.isNotEmpty())
+    } finally {
+      SnapshotFs.deletePath(root)
+    }
+  }
+}

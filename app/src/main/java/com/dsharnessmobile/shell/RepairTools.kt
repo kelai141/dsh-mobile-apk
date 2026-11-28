@@ -5,6 +5,9 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.CharBuffer
+import java.nio.charset.CharacterCodingException
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -44,6 +47,7 @@ internal fun backupWriteDenied(path: String, write: Boolean): Boolean {
 internal class RepairTools(
   private val context: Context,
   private val engine: EngineManager,
+  private val diagDir: File? = null,
 ) {
   private val toolsFs = RepairToolsFs(
     runtimeRoot = context.filesDir,
@@ -77,8 +81,9 @@ internal class RepairTools(
       val result = when (name) {
         "read" -> toolsFs.read(
           path = requiredString(args, "path"),
-          offset = args.optLong("offset", 0L),
+          offset = if (args.has("offset")) args.optLong("offset", -1L) else null,
           limit = args.optInt("limit", DEFAULT_READ_LIMIT),
+          tail = readTailArgument(args),
         )
         "write" -> toolsFs.write(
           path = requiredString(args, "path"),
@@ -93,6 +98,15 @@ internal class RepairTools(
         "engine_status" -> engineStatus()
         "restart_engine" -> restartEngine(callGeneration)
         "refresh_runtime" -> refreshRuntime(callGeneration)
+        "edit" -> toolsFs.edit(
+          path = editTextArgument(args, "path"),
+          oldText = editTextArgument(args, "oldText"),
+          newText = editTextArgument(args, "newText"),
+        )
+        "preflight" -> {
+          if (args.length() != 0) throw RepairFailure("bad-arguments", "preflight 不接受参数")
+          return repairToolWireJson(RepairPreflight.collectJson(context, engine, diagDir))
+        }
         else -> throw RepairFailure("unknown-tool", "未知工具：" + name)
       }
       finish(result)
@@ -154,7 +168,7 @@ internal class RepairTools(
       }
       activeProcess.set(process)
       if (generation.get() != callGeneration) killTree(process)
-      val result = ProcIo.readBoundedMillis(process, timeout, BASH_OUTPUT_BYTES)
+      val result = ProcIo.readBoundedHeadTailMillis(process, timeout, headBytes = 4096, tailBytes = 12288)
       if (result.timedOut || generation.get() != callGeneration) killTree(process)
       val exitCode = if (process.isAlive) null else runCatching { process.exitValue() }.getOrNull()
       val output = LogSanitizer.sanitizeOrNull(result.text)
@@ -288,9 +302,11 @@ internal class RepairTools(
   }
 
   private fun finish(value: JSONObject): String {
-    val sanitized = LogSanitizer.sanitizeOrNull(value.toString())
-      ?: return "{\"ok\":false,\"error\":\"sanitize-failed\"}"
-    return sanitized
+    return try {
+      repairToolWireJson(sanitizeToolObject(value))
+    } catch (_: RepairFailure) {
+      "{\"ok\":false,\"error\":\"sanitize-failed\"}"
+    }
   }
 
   private fun errorJson(code: String, message: String?): String {
@@ -321,12 +337,11 @@ internal class RepairTools(
 
   companion object {
     internal const val BACKUP_DIR = "repair-backups"
-    internal const val DEFAULT_READ_LIMIT = 64 * 1024
+    internal const val DEFAULT_READ_LIMIT = 16 * 1024
     internal const val MAX_READ_LIMIT = 256 * 1024
     internal const val MAX_WRITE_BYTES = 512 * 1024
     internal const val MAX_BACKUP_BYTES = 16L * 1024L * 1024L
     internal const val MAX_LIST_ENTRIES = 200
-    internal const val BASH_OUTPUT_BYTES = 256 * 1024
     internal const val MAX_COMMAND_BYTES = 8 * 1024
     internal const val DEFAULT_BASH_TIMEOUT_MS = 30_000L
     internal const val MIN_BASH_TIMEOUT_MS = 1_000L
@@ -338,6 +353,65 @@ internal class RepairTools(
     internal const val DEFERRED_REASON_SNAPSHOT_REFRESH = "snapshot-refresh-in-flight"
   }
 }
+
+/** Legacy callers sanitize serialized tool text again. Preserve JSON string boundaries through that pass. */
+internal fun repairToolWireJson(value: JSONObject): String {
+  val serialized = value.toString()
+  if (LogSanitizer.sanitizeOrNull(serialized) == serialized) return serialized
+  val escaped = buildString {
+    var inString = false
+    var afterEscape = false
+    var stringStart = 0
+    for ((index, char) in serialized.withIndex()) {
+      when {
+        afterEscape -> { append(char); afterEscape = false }
+        inString && char == '\\' -> { append(char); afterEscape = true }
+        char == '"' -> {
+          if (!inString) stringStart = length + 1
+          append(char)
+          inString = !inString
+          if (!inString && serialized.getOrNull(index + 1) == ':' && stringStart < length - 1) {
+            // Escaping the last key character also protects JSON properties named after secrets.
+            val last = length - 2
+            if (get(last).isLetter()) replace(last, last + 1, unicodeEscape(get(last)))
+          }
+        }
+        inString && char in ":=：" -> append(unicodeEscape(char))
+        else -> append(char)
+      }
+    }
+  }
+  return if (LogSanitizer.sanitizeOrNull(escaped) == escaped) escaped
+  else """{"ok":false,"error":"sanitize-failed"}"""
+}
+
+private fun unicodeEscape(char: Char): String = "\\u" + char.code.toString(16).padStart(4, '0')
+
+private fun sanitizeToolObject(value: JSONObject): JSONObject = JSONObject().apply {
+  for (key in value.keys()) put(key, sanitizeToolValue(value.get(key), key))
+}
+
+private fun sanitizeToolValue(value: Any, key: String = ""): Any = when (value) {
+  is JSONObject -> sanitizeToolObject(value)
+  is JSONArray -> JSONArray().apply {
+    for (index in 0 until value.length()) put(sanitizeToolValue(value.get(index)))
+  }
+  is String -> {
+    val prefix = if (key.isEmpty()) "" else "$key: "
+    val safe = LogSanitizer.sanitizeOrNull(prefix + value)
+      ?: throw RepairFailure("sanitize-failed", "工具结果脱敏失败")
+    if (safe.startsWith(prefix)) safe.removePrefix(prefix) else LogSanitizer.MASK
+  }
+  else -> value
+}
+
+internal fun readTailArgument(args: JSONObject): Boolean {
+  if (!args.has("tail")) return false
+  return args.opt("tail") as? Boolean ?: throw RepairFailure("bad-arguments", "tail 必须为布尔值")
+}
+
+internal fun editTextArgument(args: JSONObject, key: String): String =
+  args.opt(key) as? String ?: throw RepairFailure("bad-arguments", "$key 必须为字符串")
 
 /**
  * `restart_engine` 对引擎三态的处理方式（issue #720）。
@@ -378,23 +452,36 @@ internal class RepairToolsFs(
 ) {
   private data class Scope(val root: File, val writable: Boolean)
 
-  fun read(path: String, offset: Long, limit: Int): JSONObject {
-    if (offset < 0) throw RepairFailure("bad-offset", "offset 不能为负数")
+  fun read(
+    path: String,
+    offset: Long? = null,
+    limit: Int = RepairTools.DEFAULT_READ_LIMIT,
+    tail: Boolean = false,
+  ): JSONObject {
+    if (tail && offset != null) throw RepairFailure("bad-arguments", "tail=true 时不能传入 offset")
+    val start = offset ?: 0L
+    if (start < 0) throw RepairFailure("bad-offset", "offset 不能为负数")
     val file = resolve(path, write = false)
     if (!file.exists()) throw RepairFailure("not-found", "路径不存在：" + path)
     if (file.isDirectory) throw RepairFailure("is-directory", "目标不是文件：" + path)
     if (!file.isFile) throw RepairFailure("not-regular", "目标不是普通文件：" + path)
     val max = limit.coerceIn(1, RepairTools.MAX_READ_LIMIT)
+    if (tail) {
+      val window = readRepairTail(file, max, completeLinesOnly = false)
+      return readResult(file, window.offset, window.size, window.bytes, window.offset > 0)
+        .put("omittedBeforeBytes", window.offset)
+        .put("nextOffset", JSONObject.NULL)
+    }
     val size = file.length()
     // 2026-10-25 审计 M-R2：offset 超出文件大小必须立刻拒绝。旧实现只在 offset < size 时
     // seek，越界 offset 会静默从文件头读——返回「offset=大值却带着文件头内容」的自相矛盾
     // 载荷，模型按错位数据做修复判断。offset == size 仍合法（读到空，nextOffset=null 收尾）。
-    if (offset > size) throw RepairFailure("bad-offset", "offset 超出文件大小（offset=$offset size=$size）")
+    if (start > size) throw RepairFailure("bad-offset", "offset 超出文件大小（offset=$start size=$size）")
     val buffer = ByteArray(max + 1)
     val read = FileInputStream(file).use { input ->
       // 上层已保证 offset <= size，这里无条件 seek：offset == size 时读到 EOF（空内容收尾），
       // 旧实现的 `if (offset < size)` 会让 == size 分支同样从文件头读——与越界同族的错位形态。
-      input.channel.position(offset)
+      input.channel.position(start)
       var count = 0
       while (count < buffer.size) {
         val n = input.read(buffer, count, buffer.size - count)
@@ -405,6 +492,10 @@ internal class RepairToolsFs(
     }
     val truncated = read > max
     val bytes = buffer.copyOf(if (truncated) max else read)
+    return readResult(file, start, size, bytes, truncated)
+  }
+
+  private fun readResult(file: File, offset: Long, size: Long, bytes: ByteArray, truncated: Boolean): JSONObject {
     val content = LogSanitizer.sanitizeOrNull(String(bytes, Charsets.UTF_8))
       ?: throw RepairFailure("sanitize-failed", "文件内容脱敏失败，已丢弃内容")
     return JSONObject()
@@ -418,20 +509,85 @@ internal class RepairToolsFs(
       .put("content", content)
   }
 
-  fun write(path: String, content: String): JSONObject {
+  fun write(path: String, content: String): JSONObject = synchronized(mutationLock) {
     // The model supplies content as text. Scan only this prospective write so a
     // credential cannot be copied into a non-credential filename (for example
     // backup.txt), while returned previews use the full LogSanitizer rules.
     RepairToolsGuard.credentialLike(content)?.let { throw RepairFailure("protected-file", it) }
-    val bytes = content.toByteArray(Charsets.UTF_8)
-    if (bytes.size > RepairTools.MAX_WRITE_BYTES) {
+    val bytes = writeBytes(content)
+    val target = resolve(path, write = true)
+    replace(target, path, bytes)
+  }
+
+  fun edit(path: String, oldText: String, newText: String): JSONObject = synchronized(mutationLock) {
+    if (oldText.isEmpty()) throw RepairFailure("bad-arguments", "oldText 不能为空")
+    val target = resolve(path, write = true)
+    if (!target.exists()) throw RepairFailure("not-found", "路径不存在：" + path)
+    ensureRegular(target, path)
+    val original = readEditBytes(target)
+    val before = try {
+      Charsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(original)).toString()
+    } catch (_: CharacterCodingException) {
+      throw RepairFailure("invalid-utf8", "目标必须是有效的 UTF-8 文件")
+    }
+    val at = before.indexOf(oldText)
+    if (at < 0) throw RepairFailure("edit-not-found", "oldText 未命中")
+    if (before.indexOf(oldText, at + 1) >= 0) throw RepairFailure("edit-ambiguous", "oldText 命中多处")
+    val end = at + oldText.length
+    if (oldText == newText) {
+      return@synchronized JSONObject().put("ok", true).put("path", target.absolutePath)
+        .put("changed", false).put("backedUp", false)
+    }
+    if (before.length.toLong() - oldText.length + newText.length > RepairTools.MAX_WRITE_BYTES) {
+      throw RepairFailure("content-too-large", "编辑后内容超过字节上限")
+    }
+    val after = before.replaceRange(at, end, newText)
+    RepairToolsGuard.credentialLikeEdit(before, after, at, end, at + newText.length)?.let {
+      throw RepairFailure("protected-file", it)
+    }
+    replace(target, path, writeBytes(after), original).put("changed", true)
+  }
+
+  private fun writeBytes(content: String): ByteArray {
+    if (content.length > RepairTools.MAX_WRITE_BYTES) {
       throw RepairFailure("content-too-large", "内容超过 " + RepairTools.MAX_WRITE_BYTES + " 字节")
     }
-    val target = resolve(path, write = true)
-    if (target.exists() && target.isDirectory) {
-      throw RepairFailure("is-directory", "目标不是普通文件：" + path)
+    val encoded = try {
+      Charsets.UTF_8.newEncoder().encode(CharBuffer.wrap(content))
+    } catch (_: CharacterCodingException) {
+      throw RepairFailure("invalid-utf8", "内容必须能编码为有效的 UTF-8")
     }
+    if (encoded.remaining() > RepairTools.MAX_WRITE_BYTES) {
+      throw RepairFailure("content-too-large", "内容超过 " + RepairTools.MAX_WRITE_BYTES + " 字节")
+    }
+    return ByteArray(encoded.remaining()).also { encoded.get(it) }
+  }
+
+  private fun ensureRegular(file: File, path: String) {
+    if (file.isDirectory) throw RepairFailure("is-directory", "目标不是普通文件：" + path)
+    if (!file.isFile) throw RepairFailure("not-regular", "目标不是普通文件：" + path)
+  }
+
+  private fun readEditBytes(target: File): ByteArray {
+    if (Files.isSymbolicLink(target.toPath())) throw RepairFailure("symlink-target", "拒绝读取符号链接目标")
+    return FileInputStream(target).use { input ->
+      val size = input.channel.size()
+      if (size > RepairTools.MAX_BACKUP_BYTES) throw RepairFailure("backup-too-large", "原文件超过备份上限")
+      val data = ByteArray(size.toInt())
+      var count = 0
+      while (count < data.size) {
+        val n = input.read(data, count, data.size - count)
+        if (n < 0) throw RepairFailure("edit-conflict", "读取期间目标文件已变更")
+        count += n
+      }
+      if (input.read() >= 0) throw RepairFailure("edit-conflict", "读取期间目标文件已变更")
+      data
+    }
+  }
+
+  private fun replace(target: File, path: String, bytes: ByteArray, original: ByteArray? = null): JSONObject {
     val existed = target.exists()
+    if (existed || original != null) ensureRegular(target, path)
     if (existed && target.length() > RepairTools.MAX_BACKUP_BYTES) {
       throw RepairFailure("backup-too-large", "原文件超过备份上限；为避免无备份覆盖，已拒绝写入")
     }
@@ -443,27 +599,34 @@ internal class RepairToolsFs(
     if (Files.isSymbolicLink(target.toPath())) {
       throw RepairFailure("symlink-target", "拒绝写入符号链接目标")
     }
-    val backupId = if (existed) backup(target) else null
+    val backupId = if (existed) backup(target, original) else null
     val permissions = if (existed) runCatching { Files.getPosixFilePermissions(target.toPath()) }.getOrNull() else null
-    val tmp = File(parent, "." + target.name + ".repair-" + UUID.randomUUID().toString().take(8))
+    val tmp = try {
+      Files.createTempFile(parent.toPath(), ".repair-", ".tmp")
+    } catch (failure: IOException) {
+      throw RepairFailure("write-failed", failure.javaClass.simpleName + ": " + (failure.message ?: ""))
+    }
     try {
-      FileOutputStream(tmp).use { output ->
+      FileOutputStream(tmp.toFile()).use { output ->
         output.write(bytes)
+        permissions?.let { Files.setPosixFilePermissions(tmp, it) }
         output.fd.sync()
       }
-      permissions?.let { perms ->
-        runCatching { Files.setPosixFilePermissions(tmp.toPath(), perms) }
+      if (original != null && !readEditBytes(target).contentEquals(original)) {
+        throw RepairFailure("edit-conflict", "替换前目标文件已变更")
       }
       try {
         Files.move(
-          tmp.toPath(), target.toPath(),
+          tmp, target.toPath(),
           StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE,
         )
       } catch (_: AtomicMoveNotSupportedException) {
-        Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        if (original != null) throw RepairFailure("write-failed", "文件系统未提供原子替换")
+        Files.move(tmp, target.toPath(), StandardCopyOption.REPLACE_EXISTING)
       }
     } catch (failure: Throwable) {
-      runCatching { Files.deleteIfExists(tmp.toPath()) }
+      runCatching { Files.deleteIfExists(tmp) }
+      if (failure is RepairFailure) throw failure
       throw RepairFailure("write-failed", failure.javaClass.simpleName + ": " + (failure.message ?: ""))
     }
     return JSONObject()
@@ -597,7 +760,7 @@ internal class RepairToolsFs(
     if (isProtectedName(file.name)) {
       throw RepairFailure("protected-file", "凭据文件不通过修复工具读写")
     }
-    val path = file.absolutePath
+    val path = file.absolutePath.replace(File.separatorChar, '/')
     if (backupWriteDenied(path, write)) {
       throw RepairFailure("backup-reserved", "修复备份目录只允许读取（备份是最后一份好内容，不允许模型改写）")
     }
@@ -635,7 +798,7 @@ internal class RepairToolsFs(
     return p == r || p.startsWith(r + File.separator)
   }
 
-  private fun backup(target: File): String {
+  private fun backup(target: File, original: ByteArray? = null): String {
     if (target.length() > RepairTools.MAX_BACKUP_BYTES) {
       throw RepairFailure("backup-too-large", "原文件超过备份上限")
     }
@@ -645,8 +808,9 @@ internal class RepairToolsFs(
     val destination = File(directory, target.name.ifBlank { "file" })
     var copied = 0L
     try {
-      FileInputStream(target).use { input ->
-        FileOutputStream(destination).use { output ->
+      FileOutputStream(destination).use { output ->
+        if (original != null) output.write(original)
+        else FileInputStream(target).use { input ->
           val buffer = ByteArray(32 * 1024)
           while (true) {
             val n = input.read(buffer)
@@ -657,14 +821,19 @@ internal class RepairToolsFs(
             }
             output.write(buffer, 0, n)
           }
-          output.fd.sync()
         }
+        output.fd.sync()
       }
     } catch (failure: Throwable) {
       runCatching { destination.delete() }
       throw RepairFailure("backup-failed", "写入前备份失败：" + (failure.message ?: failure.javaClass.simpleName))
     }
     return id + "/" + destination.name
+  }
+
+  private companion object {
+    // Multiple repair screens may address the same runtime tree.
+    val mutationLock = Any()
   }
 }
 
@@ -707,21 +876,62 @@ internal object RepairToolsGuard {
     Regex("""(?i)\b(?:rm|mv|cp|dd|chmod|chown|truncate)\b[^|;&\n]*\$[A-Za-z_]\w*""")
 
   private val credentialKey = Regex(
-    "(?i)[\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret|" +
-      "password|passwd|credentials?|token)[\"']?\\s*[:=]\\s*\\S+",
+    """(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|id[_-]?token|""" +
+      """client[_-]?secret|password|passwd|credentials?|token|secret)["']?\s*[:=：][ \t]*""",
   )
-  private val credentialPrefix = Regex("\\b(?:sk-|ghp_|gho_|github_pat_|AIza|xai-)")
+  private val credentialValue = Regex(
+    """(?:"[^"\r\n]*"|'[^'\r\n]*')(?=[\s,;}\]]|$)|[^\s,;}\]]+""",
+  )
+  private val credentialPrefix = Regex(
+    """\b(?:sk-|gh[opurs]_|github_pat_|AIza|xai-|glpat-|xox[baprs]-)[A-Za-z0-9_.-]*""" +
+      """|\bAKIA[0-9A-Z]{16}\b|\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}""",
+  )
+  private val credentialHeader = Regex(
+    """(?i)\b(?:authorization|(?:set-)?cookie)[ \t]*:[^\r\n]*|\bBEGIN[ \t]+[A-Z0-9 ]*PRIVATE KEY\b""",
+  )
+  private val referenceName = Regex("""[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+""")
+  private const val CREDENTIAL_REFUSAL = "内容包含凭据材料，修复工具拒绝写入"
 
   /** Refuse a write whose content itself carries credential material. */
-  fun credentialLike(content: String): String? {
-    if (content.contains("BEGIN ") && content.contains("PRIVATE KEY") ||
-      content.contains("Authorization:") || content.contains("Cookie:")) {
-      return "内容包含凭据材料，修复工具拒绝写入"
+  fun credentialLike(content: String): String? =
+    if (credentialFindings(content).any()) CREDENTIAL_REFUSAL else null
+
+  fun credentialLikeEdit(before: String, after: String, start: Int, oldEnd: Int, newEnd: Int): String? {
+    // Scan changed lines and their neighbors so a replacement that completes a key or
+    // changes only its value still sees the assignment. Existing findings may survive.
+    fun nearby(text: String, end: Int): String {
+      val lineStart = text.lastIndexOf('\n', start - 1) + 1
+      val previousStart = text.lastIndexOf('\n', lineStart - 2) + 1
+      val newline = text.indexOf('\n', end)
+      val nextEnd = if (newline < 0) -1 else text.indexOf('\n', newline + 1)
+      return text.substring(previousStart, if (nextEnd < 0) text.length else nextEnd)
     }
-    if (credentialPrefix.containsMatchIn(content) || credentialKey.containsMatchIn(content)) {
-      return "内容包含凭据材料，修复工具拒绝写入"
+    val existing = credentialFindings(nearby(before, oldEnd)).groupingBy { it }.eachCount().toMutableMap()
+    val introduced = credentialFindings(nearby(after, newEnd)).any { finding ->
+      val count = existing[finding] ?: 0
+      if (count > 0) existing[finding] = count - 1
+      count == 0
     }
-    return null
+    return if (introduced) CREDENTIAL_REFUSAL else null
+  }
+
+  private fun credentialFindings(text: String): Sequence<String> = sequence {
+    for (match in credentialHeader.findAll(text)) yield(match.value)
+    for (match in credentialPrefix.findAll(text)) yield(match.value)
+    for (match in credentialKey.findAll(text)) {
+      var start = match.range.last + 1
+      val key = match.groupValues[1]
+      // A bare YAML credentials key introduces a mapping. Other sensitive keys
+      // can carry a scalar on the following line and still need checking.
+      if (!key.equals("credentials", ignoreCase = true)) {
+        while (start < text.length && text[start].isWhitespace()) start++
+      }
+      val value = credentialValue.matchAt(text, start)?.value ?: continue
+      if (value.startsWith('#') && key.equals("credentials", ignoreCase = true)) continue
+      val unquoted = value.removeSurrounding("\"").removeSurrounding("'")
+      if (unquoted in setOf("", "true", "false", "null") || referenceName.matches(unquoted)) continue
+      yield(key.lowercase(Locale.ROOT) + "=" + value)
+    }
   }
 }
 
@@ -734,7 +944,9 @@ internal object RepairToolSchemas {
       JSONObject()
         .put("path", string("Absolute or runtime-relative path"))
         .put("offset", integer("Byte offset, default 0"))
-        .put("limit", integer("Maximum bytes, default 65536, max 262144")),
+        .put("limit", integer("Maximum bytes, default 16384, max 262144"))
+        .put("tail", JSONObject().put("type", "boolean")
+          .put("description", "Read the final complete-starting lines. Use without offset; default false.")),
       listOf("path"),
     ),
     tool(
@@ -774,6 +986,21 @@ internal object RepairToolSchemas {
     tool(
       "refresh_runtime",
       "Stop only an owned engine, re-extract the bundled runtime snapshot, then verify freshness, runtime completion and HTTP state.",
+      JSONObject(),
+      emptyList(),
+    ),
+    tool(
+      "edit",
+      "Replace exactly one literal occurrence in an existing UTF-8 file inside the runtime tree. Backs up the original.",
+      JSONObject()
+        .put("path", string("Existing file inside the runtime tree"))
+        .put("oldText", string("Nonempty text that must occur exactly once"))
+        .put("newText", string("Replacement text. An empty value removes the match.")),
+      listOf("path", "oldText", "newText"),
+    ),
+    tool(
+      "preflight",
+      "Summarize current repair signals from local state and recent diagnostic logs without changing runtime state.",
       JSONObject(),
       emptyList(),
     ),

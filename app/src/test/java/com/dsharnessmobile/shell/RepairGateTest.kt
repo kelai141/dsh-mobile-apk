@@ -126,6 +126,13 @@ class RepairGateTest {
     val main = source("MainActivity.kt")
     assertTrue(main.contains("Automatic retries are used up. Retry the engine first"))
     val chrome = source("GuideChrome.kt")
-    assertFalse("独立助手按钮不能被永久藏起", chrome.contains("repairButton.visibility = View.GONE"))
+    assertTrue("修复助手按钮必须挂载在 primaryRow", chrome.contains("primaryRow.addView(repairButton"))
+    val renderer = source("GuidePageRenderer.kt")
+    assertTrue(
+      "Error 相位必须显式展示修复助手按钮",
+      renderer.contains("chrome.repairButton.visibility = if (showRepair) View.VISIBLE else View.GONE") ||
+        (renderer.contains("chrome.repairButton.visibility") && renderer.contains("GuidePhase.Error")),
+    )
+    assertFalse("不得隐藏修复助手按钮的父行 primaryRow", renderer.contains("(chrome.repairButton.parent as? View)?.visibility"))
   }
 }

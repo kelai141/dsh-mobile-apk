@@ -13,6 +13,9 @@ package com.dsharnessmobile.shell
 internal sealed class RepairYamlValue {
   /** An unrelated YAML block (for example a persona prompt); never a usable route scalar. */
   class Opaque : RepairYamlValue()
+
+  /** A present key with an explicit null value (`null` / `~`); never the literal string. */
+  class Null : RepairYamlValue()
   class Scalar(val value: String) : RepairYamlValue()
   class Mapping(val values: LinkedHashMap<String, RepairYamlValue>) : RepairYamlValue()
   class Sequence(val values: MutableList<RepairYamlValue>) : RepairYamlValue()
@@ -25,12 +28,31 @@ internal sealed class RepairYamlValue {
 
 internal object RepairYaml {
   fun parse(text: String): RepairYamlValue {
-    if (text.trimStart().startsWith("---")) {
-      val body = text.substring(text.indexOf("---") + 3)
-      return parse(body)
+    // UTF-8 BOM is legal at the very start of a document but must not become part of
+    // the first key. Strip it before any structural inspection.
+    val normalized = text.removePrefix("\uFEFF").replace("\r\n", "\n").replace("\r", "\n")
+    val kept = ArrayList<String>()
+    var documentStarted = false
+    for (raw in normalized.split("\n")) {
+      val line = raw.trimStart('\uFEFF')
+      val content = stripComment(line).trim()
+      if (!documentStarted) {
+        // Comments / blank lines may precede the document marker; %YAML and %TAG
+        // directives are metadata, not document content.
+        if (content.isEmpty() || content.startsWith("%")) continue
+        if (content == "---") {
+          documentStarted = true
+          continue
+        }
+        documentStarted = true
+      }
+      // The end marker closes the explicit document. Only a column-zero marker is
+      // structural: an indented "..." inside a block scalar is payload, not a marker.
+      val columnZero = line == line.trimStart()
+      if (columnZero && (content == "..." || content == "---")) break
+      kept += line
     }
-    val lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-      .mapIndexedNotNull { index, raw -> parseLine(index + 1, raw) }
+    val lines = kept.mapIndexedNotNull { index, raw -> parseLine(index + 1, raw) }
     if (lines.isEmpty()) return RepairYamlValue.Mapping(LinkedHashMap())
     val parser = Parser(lines)
     return parser.document()
@@ -43,7 +65,7 @@ internal object RepairYaml {
     if (noComment.isBlank()) return null
     val indent = noComment.indexOfFirst { it != ' ' }
     if (indent < 0) return null
-    require(!noComment.startsWith("\t")) { "unsupported tab indentation at line $number" }
+    require(!noComment.startsWith("\t")) { "unsupported tab indentation at line " + number }
     val content = noComment.substring(indent).trimEnd()
     return Line(indent, content)
   }
@@ -77,11 +99,11 @@ internal object RepairYaml {
 
     private fun node(indent: Int): RepairYamlValue {
       if (index >= lines.size) return RepairYamlValue.Mapping(LinkedHashMap())
-      return if (lines[index].text.startsWith("-") &&
-        (lines[index].text == "-" || lines[index].text.startsWith("- "))) {
-        sequence(indent)
-      } else mapping(indent)
+      return if (isSequenceLine(lines[index].text)) sequence(indent) else mapping(indent)
     }
+
+    private fun isSequenceLine(text: String): Boolean =
+      text == "-" || text.startsWith("- ")
 
     private fun mapping(indent: Int): RepairYamlValue.Mapping {
       val values = LinkedHashMap<String, RepairYamlValue>()
@@ -89,18 +111,16 @@ internal object RepairYaml {
         val line = lines[index]
         if (line.indent < indent) break
         if (line.indent > indent) throw IllegalArgumentException("unexpected indentation at " + line.text)
-        if (line.text.startsWith("-")) break
+        if (isSequenceLine(line.text)) break
         val pair = splitKey(line.text) ?: throw IllegalArgumentException("expected mapping key: " + line.text)
         index++
         val key = unquote(pair.first)
         val inline = pair.second.trim()
         values[key] = when {
           inline.isEmpty() -> childOrEmpty(indent)
-          inline == "{}" -> RepairYamlValue.Mapping(LinkedHashMap())
-          inline == "[]" -> RepairYamlValue.Sequence(mutableListOf())
           isBlockHeader(inline) -> blockScalar(inline, indent)
           inline.startsWith("{") || inline.startsWith("[") -> flow(inline)
-          else -> RepairYamlValue.Scalar(unquote(inline))
+          else -> scalar(inline)
         }
       }
       return RepairYamlValue.Mapping(values)
@@ -112,7 +132,7 @@ internal object RepairYaml {
         val line = lines[index]
         if (line.indent < indent) break
         if (line.indent > indent) throw IllegalArgumentException("unexpected indentation at " + line.text)
-        if (!line.text.startsWith("-")) break
+        if (!isSequenceLine(line.text)) break
         val rest = line.text.drop(1).trimStart()
         index++
         when {
@@ -133,7 +153,7 @@ internal object RepairYaml {
               else -> scalarOrFlow(firstValue)
             }
             while (index < lines.size && lines[index].indent == objectIndent &&
-              !lines[index].text.startsWith("-")) {
+              !isSequenceLine(lines[index].text)) {
               val child = lines[index]
               val pair = splitKey(child.text)
                 ?: throw IllegalArgumentException("expected mapping key: " + child.text)
@@ -154,29 +174,147 @@ internal object RepairYaml {
     }
 
     private fun childOrEmpty(parentIndent: Int): RepairYamlValue {
-      if (index >= lines.size || lines[index].indent <= parentIndent) {
-        return RepairYamlValue.Mapping(LinkedHashMap())
+      if (index >= lines.size) return RepairYamlValue.Mapping(LinkedHashMap())
+      val next = lines[index]
+      if (next.indent < parentIndent) return RepairYamlValue.Mapping(LinkedHashMap())
+      // Indentless block sequence: a mapping key may own a sequence whose dashes sit
+      // at the same column as the key itself (legal YAML, common in hand-edited files).
+      if (next.indent == parentIndent && isSequenceLine(next.text)) {
+        return sequence(parentIndent)
       }
-      return node(lines[index].indent)
+      if (next.indent <= parentIndent) return RepairYamlValue.Mapping(LinkedHashMap())
+      return node(next.indent)
     }
 
     private fun scalarOrFlow(value: String): RepairYamlValue =
-      if (value.startsWith("{") || value.startsWith("[")) flow(value) else RepairYamlValue.Scalar(unquote(value))
+      if (value.startsWith("{") || value.startsWith("[")) flow(value) else scalar(value)
 
-    private fun flow(value: String): RepairYamlValue {
-      // Empty flow objects/lists cover the factory seed. Other inline flow values
-      // are not needed for provider routes and stay fail-closed.
-      return when (value.trim()) {
-        "{}" -> RepairYamlValue.Mapping(LinkedHashMap())
-        "[]" -> RepairYamlValue.Sequence(mutableListOf())
-        else -> throw IllegalArgumentException("inline flow collections are not supported")
-      }
+    private fun scalar(value: String): RepairYamlValue {
+      val trimmed = value.trim()
+      if (isPlainNull(trimmed)) return RepairYamlValue.Null()
+      return RepairYamlValue.Scalar(unquote(trimmed))
     }
 
-    /** YAML block scalar header: `|`, `|-`, `|+`, `>`, `>-`, `>+` with an optional indent digit. */
+    /** YAML null forms are values, not strings: `baseURL: null` must stay missing. */
+    private fun isPlainNull(value: String): Boolean {
+      if (value.length >= 2 && (value.first() == '\'' || value.first() == '"')) return false
+      return value.isEmpty() || value == "~" || value.equals("null", ignoreCase = true)
+    }
+
+    private fun flow(value: String): RepairYamlValue {
+      val text = value.trim()
+      val reader = FlowReader(text)
+      val node = reader.readNode()
+      require(reader.remaining() == 0) { "trailing content after inline flow collection" }
+      return node
+    }
+
+    /**
+     * Recursive reader for YAML flow collections.
+     *
+     * Quoted entries may contain commas, colons and brackets; those separators belong
+     * to the scalar, not to the collection. Nested `{}` / `[]` recurse, so a patch
+     * such as `config: {providers: {demo: {models: [a, b]}}}` resolves structurally.
+     */
+    private inner class FlowReader(private val text: String) {
+      private var index = 0
+
+      fun remaining(): Int = text.length - index
+
+      fun readNode(): RepairYamlValue {
+        skipSpace()
+        require(index < text.length) { "unexpected end of inline flow collection" }
+        return when (text[index]) {
+          '{' -> mapping()
+          '[' -> sequence()
+          else -> throw IllegalArgumentException("inline flow collection must start with { or [")
+        }
+      }
+
+      private fun mapping(): RepairYamlValue.Mapping {
+        index++
+        val values = LinkedHashMap<String, RepairYamlValue>()
+        skipSpace()
+        if (peek('}')) { index++; return RepairYamlValue.Mapping(values) }
+        while (true) {
+          skipSpace()
+          val key = unquote(readScalar(setOf(':')))
+          skipSpace()
+          require(peek(':')) { "expected ':' in inline flow mapping" }
+          index++
+          val value = value(setOf(',', '}'))
+          values[key] = value
+          skipSpace()
+          require(index < text.length) { "unterminated inline flow mapping" }
+          when (text[index]) {
+            ',' -> {
+              index++
+              skipSpace()
+              if (peek('}')) { index++; return RepairYamlValue.Mapping(values) }
+            }
+            '}' -> { index++; return RepairYamlValue.Mapping(values) }
+            else -> throw IllegalArgumentException("expected ',' or '}' in inline flow mapping")
+          }
+        }
+      }
+
+      private fun sequence(): RepairYamlValue.Sequence {
+        index++
+        val values = mutableListOf<RepairYamlValue>()
+        skipSpace()
+        if (peek(']')) { index++; return RepairYamlValue.Sequence(values) }
+        while (true) {
+          values += value(setOf(',', ']'))
+          skipSpace()
+          require(index < text.length) { "unterminated inline flow sequence" }
+          when (text[index]) {
+            ',' -> {
+              index++
+              skipSpace()
+              if (peek(']')) { index++; return RepairYamlValue.Sequence(values) }
+            }
+            ']' -> { index++; return RepairYamlValue.Sequence(values) }
+            else -> throw IllegalArgumentException("expected ',' or ']' in inline flow sequence")
+          }
+        }
+      }
+
+      private fun value(stopAt: Set<Char>): RepairYamlValue {
+        skipSpace()
+        if (index < text.length && (text[index] == '{' || text[index] == '[')) return readNode()
+        val raw = readScalar(stopAt)
+        return scalar(raw)
+      }
+
+      private fun readScalar(stopAt: Set<Char>): String {
+        skipSpace()
+        val start = index
+        var quote: Char? = null
+        while (index < text.length) {
+          val c = text[index]
+          if (quote != null) {
+            if (c == quote && (index == 0 || text[index - 1] != '\\')) quote = null
+            index++
+            continue
+          }
+          if (c == '\'' || c == '"') { quote = c; index++; continue }
+          if (c in stopAt) break
+          index++
+        }
+        return text.substring(start, index).trim()
+      }
+
+      private fun skipSpace() {
+        while (index < text.length && text[index].isWhitespace()) index++
+      }
+
+      private fun peek(c: Char): Boolean = index < text.length && text[index] == c
+    }
+
+    /** YAML block scalar header: `|`, `|-2`, `|2-`, `>+`, `>2+` (both suffix orders). */
     private fun isBlockHeader(value: String): Boolean {
       if (value.isEmpty() || (value[0] != '|' && value[0] != '>')) return false
-      return value.substring(1).matches(Regex("[+-]?[1-9]?"))
+      return value.substring(1).matches(Regex("(?:[+-][1-9]?|[1-9][+-]?)?"))
     }
 
     /** Skip block payloads without interpreting prompts as config keys or guessing credentials. */

@@ -343,6 +343,36 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     lp.topMargin = dpix(R.dimen.ds_space_16)
     layoutParams = lp
   }
+  val safeModeButton = Button(activity).apply {
+    text = UiText.t(activity, "安全模式启动", "Start in Safe Mode")
+    isAllCaps = false
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+    setTextColor(color(R.color.ds_text_primary))
+    typeface = typeMedium()
+    stateListAnimator = null
+    background = DsUi.ripple(
+      DsUi.roundRect(
+        color(R.color.ds_chip), dim(R.dimen.ds_radius_pill),
+        color(R.color.ds_hairline), hairline,
+      ),
+      color(R.color.ds_accent_soft),
+    )
+    minWidth = 0
+    minimumWidth = 0
+    minHeight = dp(40f)
+    minimumHeight = dp(40f)
+    setPadding(dpix(R.dimen.ds_space_12), dp(6f), dpix(R.dimen.ds_space_12), dp(6f))
+    maxLines = 1
+    ellipsize = TextUtils.TruncateAt.END
+    DsUi.bindPressScale(this, 0.97f)
+    setOnClickListener { callbacks.onSafeMode() }
+    visibility = View.GONE
+    val lp = LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+    )
+    lp.topMargin = dpix(R.dimen.ds_space_8)
+    layoutParams = lp
+  }
   val copyLog = TextView(activity).apply {
     text = activity.getString(R.string.ds_copy_log)
     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
@@ -387,6 +417,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   // 分享入口直接挂 card（不挂 logSection）——见 shareLog 处的说明：日志摘要缺失时
   // logSection 整段隐藏，而那种失败恰恰最需要诊断包（B3）。
   card.addView(shareLog)
+  card.addView(safeModeButton)
   content.addView(card)
 
   val scroll = ScrollView(activity).apply {
@@ -412,8 +443,8 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   root.addView(viewport)
 
   // —— Actions (sticky) ——
-  fun makePrimary(): Button = Button(activity).apply {
-    text = activity.getString(R.string.ds_start_engine)
+  fun makePrimary(label: String, onClick: () -> Unit): Button = Button(activity).apply {
+    text = label
     isAllCaps = false
     setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
     setTextColor(color(R.color.ds_text_on_accent))
@@ -423,11 +454,18 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
       DsUi.roundRect(color(R.color.ds_accent), dim(R.dimen.ds_radius_pill)),
       color(R.color.ds_accent_pressed),
     )
+    minWidth = 0
+    minimumWidth = 0
+    minHeight = dpix(R.dimen.ds_btn_height)
+    minimumHeight = dpix(R.dimen.ds_btn_height)
+    setPadding(dpix(R.dimen.ds_space_12), 0, dpix(R.dimen.ds_space_12), 0)
+    maxLines = 1
+    ellipsize = TextUtils.TruncateAt.END
     layoutParams = LinearLayout.LayoutParams(
-      ViewGroup.LayoutParams.MATCH_PARENT, dpix(R.dimen.ds_btn_height),
+      ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
     )
     DsUi.bindPressScale(this)
-    setOnClickListener { callbacks.onStartEngine() }
+    setOnClickListener { onClick() }
   }
 
   fun makeSecondary(label: String, onClick: () -> Unit): Button = Button(activity).apply {
@@ -448,12 +486,10 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     setOnClickListener { onClick() }
   }
 
-  val primaryButton = makePrimary()
+  val primaryButton = makePrimary(activity.getString(R.string.ds_start_engine), callbacks.onStartEngine)
   val consoleButton = makeSecondary(activity.getString(R.string.ds_open_console), callbacks.onOpenConsole)
   val updateButton = makeSecondary(activity.getString(R.string.ds_check_update), callbacks.onCheckUpdate)
-  val repairButton = makeSecondary(activity.getString(R.string.ds_repair_assistant), callbacks.onRepairAssistant)
-
-  val safeModeButton = makeSecondary(UiText.t(activity, "安全模式启动", "Start in Safe Mode"), callbacks.onSafeMode)
+  val repairButton = makePrimary(activity.getString(R.string.ds_repair_assistant), callbacks.onRepairAssistant)
     .apply { visibility = View.GONE }
 
   // 更新块的两枚新增控件：状态行（次要色小字）+ 下载按钮（与检查按钮同款次级样式，视觉上并列）。
@@ -516,19 +552,6 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   secondaryRow.addView(consoleButton, half)
   secondaryRow.addView(updateButton, halfEnd)
 
-  // Startup failure keeps both exits visible: retry the engine here, or hand the failure to the
-  // native assistant. The row sits above the sticky primary button so neither action is hidden.
-  val repairRow = LinearLayout(activity).apply {
-    orientation = LinearLayout.HORIZONTAL
-    visibility = View.GONE
-    layoutParams = LinearLayout.LayoutParams(
-      ViewGroup.LayoutParams.MATCH_PARENT, dpix(R.dimen.ds_btn_secondary_height),
-    ).apply { topMargin = dpix(R.dimen.ds_space_8) }
-  }
-  repairRow.addView(repairButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
-  repairRow.addView(safeModeButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
-    .apply { marginStart = dpix(R.dimen.ds_space_8) })
-
   val gear = android.widget.ImageButton(activity).apply {
     setImageDrawable(android.graphics.drawable.RotateDrawable().apply {
       drawable = activity.getDrawable(R.drawable.ic_management_gear)
@@ -557,11 +580,11 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.END or Gravity.BOTTOM
     }
-    primaryRow.addView(primaryButton, LinearLayout.LayoutParams(0, dpix(R.dimen.ds_btn_height), 1f))
+    primaryRow.addView(primaryButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    primaryRow.addView(repairButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     primaryRow.addView(gear, LinearLayout.LayoutParams(dpix(R.dimen.ds_btn_height), dpix(R.dimen.ds_btn_height)).apply {
       marginStart = dpix(R.dimen.ds_space_12)
     })
-    addView(repairRow)
     addView(primaryRow)
   }
   root.addView(actionBlock)

@@ -89,7 +89,7 @@
     <string name="ds_start_runtime_unavailable">运行时或必需插件未就绪。请打开控制台并复制日志查看原因；安全模式保留现有恢复入口。[runtime-unavailable]</string>
     <string name="ds_start_unknown">尚无法确定启动失败原因。请打开控制台或复制日志反馈；也可尝试安全模式，暂时隔离第三方插件。[start-unknown]</string>
     <string name="ds_start_retry">重试启动</string>
-  <string name="ds_repair_assistant">启动修复助手</string>
+  <string name="ds_repair_assistant">修复助手</string>
   <!-- 功能 B（0.14.6）：启动页故障诊断包的快捷分享入口。
        入口只在「有可诊断证据」时出现（boot-fail/boot-diag 非空 或 失败相位），常态不显示；
        点击即出系统分享面板，中间不加二次确认（B7）。 -->

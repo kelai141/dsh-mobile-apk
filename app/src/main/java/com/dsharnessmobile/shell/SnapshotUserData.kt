@@ -64,9 +64,11 @@ internal object SnapshotUserData {
       notes += "省略出厂用户数据 " + label
     }
     val liveLegacy = File(liveDsh, "settings.yaml")
-    val livePatch = File(liveDsh, "profiles/web/cordis.patch.yml")
+    val livePatchYml = File(liveDsh, "profiles/web/cordis.patch.yml")
+    val livePatchYaml = File(liveDsh, "profiles/web/cordis.patch.yaml")
+    val livePatchExists = SnapshotFs.exists(livePatchYml) || SnapshotFs.exists(livePatchYaml)
     if (SnapshotFs.exists(File(liveDsh, "settings.yaml.imported")) ||
-        (!SnapshotFs.exists(liveLegacy) && SnapshotFs.exists(livePatch))) {
+        (!SnapshotFs.exists(liveLegacy) && livePatchExists)) {
       discard(File(stagedDsh, "settings.yaml"), "settings.yaml（已迁移到活动 profile）")
     }
     // An importer marker belongs to this installation, never to the factory archive.
@@ -108,7 +110,15 @@ internal object SnapshotUserData {
   /** The web engine persists settings in its profile patch; imported YAML is historical only. */
   fun configurationDocument(dshRoot: File, profileName: String = "web"): File {
     val profile = File(File(dshRoot, "profiles"), profileName)
-    val patch = File(profile, "cordis.patch.yml")
+    val patchYml = File(profile, "cordis.patch.yml")
+    val patchYaml = File(profile, "cordis.patch.yaml")
+    // Both extensions are legal for hand-edited installs. Prefer the engine's .yml
+    // when both exist; when neither exists keep the .yml path for the error message.
+    val patch = when {
+      SnapshotFs.exists(patchYml) -> patchYml
+      SnapshotFs.exists(patchYaml) -> patchYaml
+      else -> patchYml
+    }
     val migrated = SnapshotFs.exists(File(dshRoot, "settings.yaml.imported")) ||
       SnapshotFs.exists(File(profile, "settings.yaml.imported"))
     return if (migrated || SnapshotFs.exists(patch)) patch else File(dshRoot, "settings.yaml")
