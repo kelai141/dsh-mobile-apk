@@ -13,7 +13,7 @@ import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { basename, dirname, relative, resolve as resolvePath, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { UserConfig } from 'tsdown'
+import type { TsdownPlugin, UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 import MagicString from 'magic-string'
 import { PLATFORM_MODULES } from './platform.ts'
@@ -26,6 +26,17 @@ import { PLATFORM_MODULES } from './platform.ts'
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
 const XTERM_CSS = '@xterm/xterm/css/xterm.css'
+
+// Build each panel as its own entry graph. Rolldown's shared CJS chunks would
+// make the main factory synchronously require a relative file.
+const PANEL_ENTRIES = {
+  'dev-section': 'dev-section/DevSection.tsx',
+  'phone-control': 'dev-section/phone-control.tsx',
+  'notify-settings': 'dev-section/notify-settings.tsx',
+  'apk-update': 'dev-section/apk-update.tsx',
+  'linux-environment': 'linux-environment/LinuxEnvironmentPanel.tsx',
+  'about': 'mobile/about-section.tsx',
+}
 
 /**
  * Wire/type layers a client bundle may inline: browser-safe contracts
@@ -102,13 +113,20 @@ export function clientBundle(
   const lib = clientLibraryConfig(id, libEntry, options.lib)
   return ({ env }) => {
     const face = buildFace(env?.DSH_BUILD_FACE)
-    const client = clientConfig(id, face === undefined
-      ? 'src/client/index.ts'
-      : 'lib/types/client/index.js')
+    const source = face === undefined
+    const clientPath = (path: string) => source ? `src/client/${path}` : `lib/types/client/${path.replace(/\.tsx?$/, '.js')}`
+    const panels = Object.entries(PANEL_ENTRIES).map(([name, path]) => ({
+      name: `client.${name}`,
+      path: clientPath(path),
+    }))
+    const client = [
+      clientConfig(id, clientPath('index.ts'), 'client', panels),
+      ...panels.map(({ name, path }) => clientConfig(id, path, name)),
+    ]
     const node = [lib, ...(options.companions ?? [])]
     if (face === 'host') return options.hostPhase === true ? node : [SKIP_WORKSPACE_BUILD]
-    if (face === 'client') return options.hostPhase === true ? [client] : [...node, client]
-    return [...node, client]
+    if (face === 'client') return options.hostPhase === true ? client : [...node, ...client]
+    return [...node, ...client]
   }
 }
 
@@ -171,10 +189,61 @@ function clientLibraryConfig(
   }
 }
 
-function clientConfig(id: string, entry: string): UserConfig {
+/** Route Rolldown's CJS dynamic imports through the client factory loader. */
+function asyncChunkRequirePlugin(panels: readonly { name: string; path: string }[]): TsdownPlugin {
+  const chunks = new Map(panels.map(({ name, path }) => [resolvePath(REPOSITORY_ROOT, path), `./${name}.js`]))
   return {
-    name: `${id}/client`,
-    entry: { client: entry },
+    name: 'dsh-client-async-chunk-require',
+    resolveId(source, importer, { kind }) {
+      if (kind !== 'dynamic-import' || importer === undefined || !source.startsWith('./')) return null
+      const chunk = chunks.get(resolvePath(dirname(importer), source))
+      return chunk === undefined ? null : { id: chunk, external: true }
+    },
+    renderChunk(code, chunk, outputOptions) {
+      if (outputOptions.format !== 'cjs') return null
+      const source = new MagicString(code)
+      for (const dynamicImport of chunk.dynamicImports) {
+        const fileName = dynamicImport.startsWith('./') ? dynamicImport.slice(2) : dynamicImport
+        if (!/^client\.[A-Za-z0-9][A-Za-z0-9._-]*\.js$/.test(fileName)) continue
+        const specifier = `./${fileName}`
+        const escapedSpecifier = specifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        // Explicit panel entries remain external import() calls in Rolldown's CJS output.
+        const call = new RegExp(
+          `Promise\\.resolve\\(\\)\\.then\\(\\(\\)\\s*=>\\s*require\\((['"])${escapedSpecifier}\\1\\)\\)`
+            + `|\\bimport\\((['"])${escapedSpecifier}\\2\\)`,
+          'gu',
+        )
+        const matches = [...code.matchAll(call)]
+        if (matches.length === 0) {
+          throw new Error(`client bundle compiler: dynamic chunk ${JSON.stringify(specifier)} has no generated import expression`)
+        }
+        for (const match of matches) {
+          source.overwrite(match.index, match.index + match[0].length, `require.async(${JSON.stringify(specifier)})`)
+        }
+      }
+      return source.hasChanged() ? { code: source.toString(), map: source.generateMap({ hires: true }) } : null
+    },
+    generateBundle(_outputOptions, bundle) {
+      for (const output of Object.values(bundle)) {
+        if (output.type !== 'chunk') continue
+        const dependency = output.imports.find(specifier => /^(?:\.\/)?client(?:\.[A-Za-z0-9._-]+)?\.js$/.test(specifier))
+        if (dependency !== undefined) {
+          throw new Error(`client bundle compiler: ${output.fileName} synchronously imports ${dependency}`)
+        }
+      }
+    },
+  }
+}
+
+function clientConfig(
+  id: string,
+  entry: string,
+  name: string,
+  panels: readonly { name: string; path: string }[] = [],
+): UserConfig {
+  return {
+    name: `${id}/${name}`,
+    entry: { [name]: entry },
     // Browser bundle lands next to the node half (single lib/ artifact dir;
     // the entryFileNames pin keeps it exactly lib/client.js). clean must stay
     // off — a default clean would wipe the node-half output emitted above.
@@ -234,7 +303,7 @@ function clientConfig(id: string, entry: string): UserConfig {
           + 'cross-plugin value imports are forbidden; collaborate through cordis services (type-only imports are erased and never reach this gate)',
         )
       },
-    }, {
+    }, asyncChunkRequirePlugin(panels), {
       name: 'dsh-xterm-browser-floor',
       transform(code: string, id: string) {
         // xterm's accessibility handler uses a Unicode property escape. Emit the
@@ -289,13 +358,17 @@ function clientConfig(id: string, entry: string): UserConfig {
       },
     }],
     outputOptions: {
-      entryFileNames: 'client.js',
+      entryFileNames: '[name].js',
+      chunkFileNames: 'client.[name].js',
       // The map is served from /plugins/<scoped-package>/client.js.map. The
       // browser resolves its local sources back into URLs that mirror the
       // /packages/<group>/<package>/src directories; sourcesContent keeps them usable
       // without exposing that tree as an HTTP route.
       sourcemapPathTransform: browserSourcePath,
-      banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(id)}, factory: (require) => {`,
+      banner: chunk => {
+        const main = chunk.isEntry && chunk.fileName === 'client.js'
+        return `window.__ModuleLoader__.load({ id: ${JSON.stringify(id)}, ${main ? '' : `chunk: ${JSON.stringify(chunk.fileName)}, `}factory: (require) => {`
+      },
       footer: 'return module.exports; } });',
       intro: 'var module = { exports: {} }; var exports = module.exports;',
     },

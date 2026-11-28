@@ -55,12 +55,10 @@ import { ComposerPopupGuard } from './composer-popup-guard.ts'
 import { SESSION_LOG_DIALOG_HIDE_CSS, SHELL_OUTCOME_ATTR } from './session-log-dialog.css.ts'
 import { SessionLogDialogObserver } from './session-log-dialog-observer.ts'
 import { openSessionForNotify, type SessionOpenFace } from './mobile/notify-landing.ts'
-import { DevSection } from './dev-section/DevSection.tsx'
-import { PhoneControlSection } from './dev-section/phone-control.tsx'
-import { NotifySettingsSection } from './dev-section/notify-settings.tsx'
-import { ApkUpdateSection } from './dev-section/apk-update.tsx'
-import { LinuxEnvironmentSection } from './linux-environment/LinuxEnvironmentSection.tsx'
-import { LinuxEnvironmentPanel, LinuxPanelIcon } from './linux-environment/LinuxEnvironmentPanel.tsx'
+import { createElement, lazy, Suspense, type Attributes, type ComponentProps, type ReactElement } from 'react'
+import { IconCodeOutlineMedium } from '@deepseek-ai/dsh-client-ui-primitives'
+import { linuxDownloads } from './linux-environment/LinuxDownloadButton.tsx'
+import '@xterm/xterm/css/xterm.css'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { LINUX_ENVIRONMENT_CSS } from './linux-environment/linux-environment.css.ts'
@@ -69,7 +67,6 @@ import { MARKETPLACE_CSS } from './marketplace/marketplace.css.ts'
 import { registerMarketplaceAction } from './marketplace/marketplace-entry.tsx'
 import { installAboutEntry } from './mobile/about-entry.ts'
 import { ABOUT_ENTRY_CSS } from './mobile/about-entry.css.ts'
-import { AboutSection } from './mobile/about-section.tsx'
 import { GeneralSettings } from './general-settings/GeneralSettings.tsx'
 import { GENERAL_SETTINGS_CSS } from './general-settings/general-settings.css.ts'
 import { observeDocumentLanguage, tr } from './i18n.ts'
@@ -1213,3 +1210,30 @@ import { DocumentExternalMenuAction } from './mobile/DocumentExternalMenuAction.
 import { FilePathCopy } from './mobile/file-path-copy.ts'
 import { FILE_PATH_COPY_CSS } from './mobile/file-path-copy.css.ts'
 import { zh as pathCopyZh, en as pathCopyEn } from './mobile/file-path-copy.locales.ts'
+
+/** Keep the slot registration synchronous and suspend only the selected panel body. */
+function lazyPanel<Props extends object>(load: () => Promise<{ default: (props: Props) => ReactElement }>) {
+  const Panel = lazy(load)
+  return (props: Attributes & ComponentProps<typeof Panel>) =>
+    createElement(Suspense, { fallback: null }, createElement(Panel, props))
+}
+
+function LinuxPanelIcon({ size }: { size: number }) {
+  return createElement(IconCodeOutlineMedium, { size })
+}
+
+const DevSection = lazyPanel(async () => ({ default: (await import('./dev-section/DevSection.tsx')).DevSection }))
+const PhoneControlSection = lazyPanel(async () => ({ default: (await import('./dev-section/phone-control.tsx')).PhoneControlSection }))
+const NotifySettingsSection = lazyPanel(async () => ({ default: (await import('./dev-section/notify-settings.tsx')).NotifySettingsSection }))
+const ApkUpdateSection = lazyPanel(async () => ({ default: (await import('./dev-section/apk-update.tsx')).ApkUpdateSection }))
+const LazyLinuxEnvironmentSection = lazyPanel(async () => ({ default: (await import('./linux-environment/LinuxEnvironmentPanel.tsx')).LinuxEnvironmentSection }))
+const LazyLinuxEnvironmentPanel = lazyPanel(async () => ({ default: (await import('./linux-environment/LinuxEnvironmentPanel.tsx')).LinuxEnvironmentPanel }))
+const AboutSection = lazyPanel(async () => ({ default: (await import('./mobile/about-section.tsx')).AboutSection }))
+
+function LinuxEnvironmentSection({ close }: { close(): void }) {
+  return createElement(LazyLinuxEnvironmentSection, { close, downloads: linuxDownloads })
+}
+
+function LinuxEnvironmentPanel({ close }: { close(): void }) {
+  return createElement(LazyLinuxEnvironmentPanel, { close, downloads: linuxDownloads })
+}

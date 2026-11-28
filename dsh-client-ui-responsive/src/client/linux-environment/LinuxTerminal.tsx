@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
-import '@xterm/xterm/css/xterm.css'
 import { tr } from '../i18n.ts'
 import { RouteError, terminalRequest, type TerminalUpdate } from './transport.ts'
 

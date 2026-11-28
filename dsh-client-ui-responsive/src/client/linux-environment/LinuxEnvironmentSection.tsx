@@ -10,8 +10,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { LinuxTerminal } from './LinuxTerminal.tsx'
 import { LinuxToolchains } from './LinuxToolchains.tsx'
-import { downloadStatus, LinuxDownloadProgress } from './LinuxDownloadButton.tsx'
-import { acknowledgeInstallJob, formatBytes, refreshInstallJob, useLinuxInstallJob } from './install-job.ts'
+import type { linuxDownloads } from './LinuxDownloadButton.tsx'
 import { tr } from '../i18n.ts'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '../android-bridge.ts'
@@ -171,7 +170,14 @@ function primaryLabel(state: PrimaryState, status: LinuxStatus | null): string {
   }
 }
 
-export function LinuxEnvironmentSection({ close, sidebar = false }: { close(): void; sidebar?: boolean }) {
+export interface LinuxEnvironmentSectionProps {
+  close(): void
+  sidebar?: boolean
+  downloads: typeof linuxDownloads
+}
+
+export function LinuxEnvironmentSection({ close, sidebar = false, downloads }: LinuxEnvironmentSectionProps) {
+  const { acknowledgeInstallJob, downloadStatus, formatBytes, LinuxDownloadProgress, refreshInstallJob, useLinuxInstallJob } = downloads
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
   const [advanced, setAdvanced] = useState(false)
