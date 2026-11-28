@@ -22,6 +22,8 @@
 
 /** Design cap on the slash-command menu height (figma SLASH 39:26572 MenuDropdown). */
 const LISTBOX_HEIGHT_CAP = 320
+/** Upstream trigger surface cap for wider layouts. */
+const TABLET_TRIGGER_HEIGHT_CAP = 400
 /** Design cap on the model menu height (upstream ModelSelect .menu). */
 const MENU_HEIGHT_CAP = 360
 /** Space kept between a popup and the mobile top bar. */
@@ -314,7 +316,12 @@ export class ComposerPopupGuard {
     }
 
     const viewportWidth = document.documentElement.clientWidth
-    const widthCap = `${popupMaxWidth(viewportWidth)}px`
+    const phoneForm = document.documentElement.hasAttribute('data-dsh-mobile-form')
+    const android = window.androidBridge !== undefined
+    const defaultWidthCap = popupMaxWidth(viewportWidth)
+    const composerWidth = phoneForm
+      ? Math.min(card.getBoundingClientRect().width, viewportWidth - 2 * POPUP_EDGE_GAP)
+      : 0
     const topbarBottom = topbar?.getBoundingClientRect().bottom ?? 0
     // The keyboard shrinks the visual viewport, not the layout viewport, and a pan
     // moves it down; both are measured per pass (no cached value can go stale across
@@ -324,7 +331,7 @@ export class ComposerPopupGuard {
     const visibleTop = visible?.top ?? 0
     const visibleBottom = visible === null ? Number.POSITIVE_INFINITY : visible.top + visible.height
     const styled = new Set<HTMLElement>()
-    const measured: Element[] = topbar === null ? [] : [topbar, card]
+    const measured: Element[] = topbar === null ? [card] : [topbar, card]
 
     for (const popup of popups) {
       // ModelSelect keeps the controlled portal surface as role=menu while
@@ -335,10 +342,14 @@ export class ComposerPopupGuard {
       measured.push(surface, popup)
       if (modelMenus.has(popup)) {
         surface.setAttribute('data-dsh-mobile-model-menu', '')
-        if (window.androidBridge !== undefined) surface.setAttribute('data-dsh-android-model-menu', '')
+        if (android) surface.setAttribute('data-dsh-android-model-menu', '')
         else surface.removeAttribute('data-dsh-android-model-menu')
       }
 
+      // The suggestion surface sits flush with the composer through its own insets.
+      const isTriggerMenu = popup.matches("[data-trigger-menu] > [role='listbox']")
+      const matchesComposer = composerWidth > 0 && isTriggerMenu
+      const widthCap = `${matchesComposer ? composerWidth : defaultWidthCap}px`
       for (const element of surface === popup ? [popup] : [popup, surface]) {
         if (element.style.getPropertyValue('--dsh-mobile-popup-max-width') !== widthCap) {
           element.style.setProperty('--dsh-mobile-popup-max-width', widthCap)
@@ -361,13 +372,17 @@ export class ComposerPopupGuard {
       const anchorBottom = anchored ? triggerRect.top - POPUP_EDGE_GAP : rect.bottom - currentShiftTop
       const topBound = Math.max(topbarBottom + TOPBAR_CLEARANCE, visibleTop + POPUP_EDGE_GAP)
       const bottomBound = Math.min(anchorBottom, visibleBottom - POPUP_EDGE_GAP)
-      const cap = modelMenus.has(popup) || popup.getAttribute('role') === 'menu' ? MENU_HEIGHT_CAP : LISTBOX_HEIGHT_CAP
+      const tabletTrigger = isTriggerMenu && android && !phoneForm
+      const heightTarget = tabletTrigger ? surface : popup
+      const cap = tabletTrigger ? TABLET_TRIGGER_HEIGHT_CAP
+        : modelMenus.has(popup) || popup.getAttribute('role') === 'menu' ? MENU_HEIGHT_CAP : LISTBOX_HEIGHT_CAP
       const heightCap = `${visible === null
-        ? composerPopupMaxHeight(anchorBottom, topbarBottom, chromeHeight(popup), cap)
-        : Math.max(0, Math.min(cap, Math.floor(bottomBound - topBound - chromeHeight(popup))))}px`
-      if (popup.style.getPropertyValue('--dsh-mobile-menu-max-height') !== heightCap) {
-        popup.style.setProperty('--dsh-mobile-menu-max-height', heightCap)
+        ? composerPopupMaxHeight(anchorBottom, topbarBottom, chromeHeight(heightTarget), cap)
+        : Math.max(0, Math.min(cap, Math.floor(bottomBound - topBound - chromeHeight(heightTarget))))}px`
+      if (heightTarget.style.getPropertyValue('--dsh-mobile-menu-max-height') !== heightCap) {
+        heightTarget.style.setProperty('--dsh-mobile-menu-max-height', heightCap)
       }
+      surface.toggleAttribute('data-dsh-tablet-trigger-menu', tabletTrigger)
       // Read after sizing: the first painted frame must use the capped height.
       // Upstream can rewrite top on scroll, but the trigger-derived target stays
       // independent of both its inline position and our previous transform.
@@ -405,6 +420,7 @@ export class ComposerPopupGuard {
     element.style.removeProperty('--dsh-mobile-popup-shift-y')
     element.style.removeProperty('--dsh-mobile-menu-max-height')
     element.removeAttribute('data-dsh-popup')
+    element.removeAttribute('data-dsh-tablet-trigger-menu')
     element.removeAttribute('data-dsh-mobile-model-menu')
     element.removeAttribute('data-dsh-android-model-menu')
   }

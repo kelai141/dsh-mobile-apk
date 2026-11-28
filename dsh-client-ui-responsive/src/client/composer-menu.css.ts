@@ -1,10 +1,10 @@
 /**
  * Composer popup geometry (upstream ui-input-trigger + ui-model-selection):
- * - The slash menu's scroll container (`.viewport`, the `[role='listbox']`) is a
- *   flex child without flex:1, so when the candidate list exceeds max-height the
- *   viewport grows past the menu and is clipped by the menu's overflow:hidden —
- *   the scrollbar lands outside the visible area and the list appears
- *   unscrollable. Fix: let the viewport fill the menu and scroll inside it.
+ * - The slash menu's listbox is the scroll viewport inside the painted surface.
+ *   Let that flex child shrink under the surface's height cap so overflow stays
+ *   inside the scroll viewport. Its section and source headings keep their own
+ *   row heights so wrapped content and labels cannot overlap adjacent options.
+ *
  * - The upstream menus clamp against viewport y=0 only, and size themselves
  *   against their trigger, so on phones they can leave the viewport sideways or
  *   rise above the fixed top bar. `ComposerPopupGuard` measures each open popup
@@ -13,8 +13,8 @@
  *   content (a blank strip with a detached scrollbar — issue apk#135).
  */
 export const COMPOSER_MENU_CSS: string = `
-[data-composer-card] [role='listbox'] > div {
-  flex: 1 1 0%;
+[data-composer-card] [data-menu-material='translucent'] > [role='listbox'] {
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -34,6 +34,12 @@ html[data-dsh-mobile-form] [data-composer-card] [role='listbox'] {
 
 html[data-dsh-mobile-form] [data-composer-card] [role='listbox'] {
   max-height: var(--dsh-mobile-menu-max-height, 320px) !important;
+}
+
+/* Android can move the composer as the keyboard closes without the layout
+   resize that refreshes the upstream surface's inline max-height. */
+[data-composer-card] [data-dsh-tablet-trigger-menu] {
+  max-height: var(--dsh-mobile-menu-max-height) !important;
 }
 
 /* The model menu is its own painted surface; its height cap only exists while
