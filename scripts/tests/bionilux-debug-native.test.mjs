@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { readBioniluxDebugNative } from './bionilux-debug-native.mjs'
+import { readBioniluxDebugNative } from '../lib/bionilux-debug-native.mjs'
 
 const loader = 'libbionilux-loader.so'
 const helper = 'libbionilux-ldconfig.so'
