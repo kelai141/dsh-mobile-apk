@@ -36,6 +36,12 @@ html[data-dsh-mobile-form] [data-composer-card] [role='listbox'] {
   max-height: var(--dsh-mobile-menu-max-height, 320px) !important;
 }
 
+/* Android can move the composer as the keyboard closes without the layout
+   resize that refreshes the upstream surface's inline max-height. */
+[data-composer-card] [data-dsh-tablet-trigger-menu] {
+  max-height: var(--dsh-mobile-menu-max-height) !important;
+}
+
 /* The model menu is its own painted surface; its height cap only exists while
    the guard measures one, so the upstream 360px design cap stays in charge. */
 html[data-dsh-mobile-form] [data-composer-card] [role='menu'] {

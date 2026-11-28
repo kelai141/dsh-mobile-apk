@@ -240,6 +240,7 @@ describe('ComposerPopupGuard', () => {
     const composer = surface.parentElement!
     const html = document.documentElement
     surface.setAttribute('data-menu-material', 'translucent')
+    surface.setAttribute('data-trigger-menu', '')
     composer.getBoundingClientRect = surface.getBoundingClientRect
     const menu = document.createElement('div')
     menu.setAttribute('role', 'menu')
@@ -274,6 +275,47 @@ describe('ComposerPopupGuard', () => {
     } finally {
       html.removeAttribute('data-dsh-mobile-form')
     }
+  })
+
+  it('recovers the tablet suggestion surface height when the keyboard closes', async () => {
+    const { card: surface, listbox } = mountComposer({ left: 130, right: 785, bottom: 450 })
+    const height = '--dsh-mobile-menu-max-height'
+    const tabletMarker = 'data-dsh-tablet-trigger-menu'
+    surface.setAttribute('data-trigger-menu', '')
+    surface.style.maxHeight = '88px'
+    const viewport = { height: 250, offsetTop: 0, addEventListener: vi.fn(), removeEventListener: vi.fn() }
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: viewport })
+    Object.defineProperty(document.documentElement, 'clientWidth', { configurable: true, value: 915 })
+    const measure = surface.getBoundingClientRect
+    surface.getBoundingClientRect = () => {
+      const shift = parseFloat(surface.style.getPropertyValue('--dsh-mobile-popup-shift-y')) || 0
+      const rect = measure()
+      const measuredHeight = parseFloat(surface.style.getPropertyValue(height)) || 88
+      return { ...rect, height: measuredHeight, top: rect.bottom + shift - measuredHeight, bottom: rect.bottom + shift }
+    }
+    window.androidBridge = {} as never
+
+    guard = new ComposerPopupGuard()
+    guard.attach()
+    await flush()
+    expect(surface.hasAttribute(tabletMarker)).toBe(true)
+    expect(surface.style.getPropertyValue(height)).toBe('230px')
+
+    viewport.height = 686
+    window.dispatchEvent(new Event('resize'))
+    await flush()
+    expect(surface.style.getPropertyValue(height)).toBe('400px')
+    expect(listbox.style.getPropertyValue(height)).toBe('')
+
+    delete window.androidBridge
+    window.dispatchEvent(new Event('resize'))
+    await flush()
+    expect(surface.hasAttribute(tabletMarker)).toBe(false)
+    expect(surface.style.maxHeight).toBe('88px')
+
+    guard.detach()
+    guard = null
+    expect(surface.style.getPropertyValue(height)).toBe('')
   })
 
   it('re-measures an already shifted surface without drifting', async () => {
