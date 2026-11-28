@@ -314,7 +314,10 @@ export class ComposerPopupGuard {
     }
 
     const viewportWidth = document.documentElement.clientWidth
-    const widthCap = `${popupMaxWidth(viewportWidth)}px`
+    const defaultWidthCap = popupMaxWidth(viewportWidth)
+    const composerWidth = document.documentElement.hasAttribute('data-dsh-mobile-form')
+      ? Math.min(card.getBoundingClientRect().width, viewportWidth - 2 * POPUP_EDGE_GAP)
+      : 0
     const topbarBottom = topbar?.getBoundingClientRect().bottom ?? 0
     // The keyboard shrinks the visual viewport, not the layout viewport, and a pan
     // moves it down; both are measured per pass (no cached value can go stale across
@@ -324,7 +327,7 @@ export class ComposerPopupGuard {
     const visibleTop = visible?.top ?? 0
     const visibleBottom = visible === null ? Number.POSITIVE_INFINITY : visible.top + visible.height
     const styled = new Set<HTMLElement>()
-    const measured: Element[] = topbar === null ? [] : [topbar, card]
+    const measured: Element[] = topbar === null ? [card] : [topbar, card]
 
     for (const popup of popups) {
       // ModelSelect keeps the controlled portal surface as role=menu while
@@ -339,6 +342,9 @@ export class ComposerPopupGuard {
         else surface.removeAttribute('data-dsh-android-model-menu')
       }
 
+      // The suggestion surface sits flush with the composer through its own insets.
+      const matchesComposer = composerWidth > 0 && popup.matches("[data-menu-material='translucent'] > [role='listbox']")
+      const widthCap = `${matchesComposer ? composerWidth : defaultWidthCap}px`
       for (const element of surface === popup ? [popup] : [popup, surface]) {
         if (element.style.getPropertyValue('--dsh-mobile-popup-max-width') !== widthCap) {
           element.style.setProperty('--dsh-mobile-popup-max-width', widthCap)

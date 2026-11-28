@@ -234,6 +234,48 @@ describe('ComposerPopupGuard', () => {
     expect(listbox.style.getPropertyValue('--dsh-mobile-menu-max-height')).not.toBe('')
   })
 
+  it('matches the phone suggestion menu to its composer and preserves the other menu cap', async () => {
+    const rect = { left: 16, right: 396, bottom: 668 }
+    const { card: surface, listbox } = mountComposer(rect)
+    const composer = surface.parentElement!
+    const html = document.documentElement
+    surface.setAttribute('data-menu-material', 'translucent')
+    composer.getBoundingClientRect = surface.getBoundingClientRect
+    const menu = document.createElement('div')
+    menu.setAttribute('role', 'menu')
+    menu.setAttribute('data-menu-material', 'translucent')
+    composer.append(menu)
+    Object.defineProperty(html, 'clientWidth', { configurable: true, value: 412 })
+    html.setAttribute('data-dsh-mobile-form', '')
+    try {
+      guard = new ComposerPopupGuard()
+      guard.attach()
+      await flush()
+
+      const width = '--dsh-mobile-popup-max-width'
+      expect(surface.style.getPropertyValue(width)).toBe('380px')
+      expect(listbox.style.getPropertyValue(width)).toBe('380px')
+      expect(menu.style.getPropertyValue(width)).toBe('340px')
+
+      rect.right = 376
+      window.dispatchEvent(new Event('resize'))
+      await flush()
+      expect(surface.style.getPropertyValue(width)).toBe('360px')
+
+      rect.right = 426
+      window.dispatchEvent(new Event('resize'))
+      await flush()
+      expect(surface.style.getPropertyValue(width)).toBe('396px')
+
+      html.removeAttribute('data-dsh-mobile-form')
+      window.dispatchEvent(new Event('resize'))
+      await flush()
+      expect(surface.style.getPropertyValue(width)).toBe('340px')
+    } finally {
+      html.removeAttribute('data-dsh-mobile-form')
+    }
+  })
+
   it('re-measures an already shifted surface without drifting', async () => {
     const { card } = mountComposer({ left: 20, right: 340, bottom: 668 })
     guard = new ComposerPopupGuard()
