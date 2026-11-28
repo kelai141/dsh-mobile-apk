@@ -34,6 +34,8 @@ import { hasTerminalShellCandidates, patchTerminalShellCandidates } from './data
 import { hasZshFpath, patchZshFpath } from './data/subprocess-zsh-fpath-A1.mjs'
 import { hasManagedPortBind, patchManagedPortBind } from './data/managed-port-bind-EP1.mjs'
 import { BOOT_ATTRIBUTION_FILE, BOOT_ATTRIBUTION_ADDITIONAL, patchBootAttribution } from './data/boot-attribution.mjs'
+import { hasWebserverLazyCompression, patchWebserverLazyCompression } from './data/webserver-lazy-compression.mjs'
+import { hasAppbootCompileResolution, patchAppbootCompileResolution } from './data/appboot-compile-resolution-S2.mjs'
 import { IMAGE_HISTORY_CORE, planImageHistory } from './image-history-batch-offload-I1.mjs'
 import { PREVIEW_LOCAL, PREVIEW_PI, PREVIEW_DEEPSEEK, planRequestPreview } from './image-request-preview-P1.mjs'
 import { planImageExpiry } from './image-expiry-E1.mjs'
@@ -229,6 +231,20 @@ const IMPLS = {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js',
     check: hasManagedPortBind,
     apply: patchManagedPortBind,
+  },
+
+  'webserver-lazy-compression': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js',
+    scope: 'engine',
+    check: hasWebserverLazyCompression,
+    apply: patchWebserverLazyCompression,
+  },
+
+  'appboot-compile-resolution-S2': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
+    scope: 'engine',
+    check: hasAppbootCompileResolution,
+    apply: patchAppbootCompileResolution,
   },
 
   'profile-link-skip-PL1': {

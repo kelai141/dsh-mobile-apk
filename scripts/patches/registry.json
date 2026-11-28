@@ -50,6 +50,15 @@
       "test": "scripts/patches/tests/managed-port-bind-EP1.test.mjs"
     },
     {
+      "id": "webserver-lazy-compression",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js",
+      "scope": "engine",
+      "summary": "仅在 gzip 模式的 WebServer 初始化期间加载压缩中间件与编码协商模块",
+      "provenance": "0.2.2-rc.3 的 WebServer 默认 compression 为 none，原产物仍顶层加载 compression 与 negotiator",
+      "marker": "dsh-mobile webserver lazy compression",
+      "test": "scripts/patches/tests/webserver-lazy-compression.test.mjs"
+    },
+    {
       "id": "profile-link-skip-PL1",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
       "scope": "engine",
@@ -57,6 +66,15 @@
       "provenance": "2026-10-23 启动事故：共享存储插件软链 EACCES 阻断 profile 组合",
       "marker": "dsh-mobile profile link skip (PL1)",
       "test": "scripts/patches/tests/profile-link-skip-PL1.test.mjs"
+    },
+    {
+      "id": "appboot-compile-resolution-S2",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
+      "scope": "engine",
+      "summary": "在单次 compileResolution 调用中按原始路径复用 canonicalPath 结果",
+      "provenance": "0.2.2-rc.3 的 compileResolution 同时为 entries 和 installationPaths 对安装域目录调用 realpathSync",
+      "marker": "dsh-mobile appboot compileResolution realpath memo (S2)",
+      "test": "scripts/patches/tests/appboot-compile-resolution-s2.test.mjs"
     },
     {
       "id": "sidebar-bubble-reorder-B1",
