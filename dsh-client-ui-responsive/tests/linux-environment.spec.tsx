@@ -11,7 +11,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { readFileSync } from 'node:fs'
 import { LinuxEnvironmentSection } from '../src/client/linux-environment/LinuxEnvironmentSection.tsx'
-import { LinuxDownloadButton } from '../src/client/linux-environment/LinuxDownloadButton.tsx'
+import { LinuxDownloadButton, linuxDownloads } from '../src/client/linux-environment/LinuxDownloadButton.tsx'
 import { refreshInstallJob } from '../src/client/linux-environment/install-job.ts'
 import { assetsFor, fetchManifest, installRuntimeAssets, RouteError, type AssetSpec } from '../src/client/linux-environment/transport.ts'
 
@@ -96,7 +96,7 @@ async function render(close = vi.fn(), sidebar = false): Promise<HTMLElement> {
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
-  await act(async () => { root!.render(<LinuxEnvironmentSection close={close} sidebar={sidebar} />) })
+  await act(async () => { root!.render(<LinuxEnvironmentSection close={close} sidebar={sidebar} downloads={linuxDownloads} />) })
   // The mount fetch resolves in a microtask; flush it so assertions see real state.
   await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 0) }) })
   return host
@@ -132,11 +132,11 @@ describe('first-install manifest discovery', () => {
 })
 
 describe('index.ts registration', () => {
-  it('registers the optional resource section exactly once and imports the Linux section', () => {
+  it('registers the optional resource section exactly once and lazy-loads the Linux section', () => {
     const source = readFileSync('src/client/index.ts', 'utf8')
     const registrations = source.split("id: 'linux-environment'").length - 1
     expect(registrations).toBe(1)
-    expect(source).toContain("import { LinuxEnvironmentSection } from './linux-environment/LinuxEnvironmentSection.tsx'")
+    expect(source).toContain("import('./linux-environment/LinuxEnvironmentPanel.tsx')).LinuxEnvironmentSection")
     expect(source).toContain('}, LinuxEnvironmentSection))')
     expect(source).toMatch(/label: \(\) => tr\('可选资源'/)
   })
@@ -513,7 +513,7 @@ describe('LinuxEnvironmentSection', () => {
       host = document.createElement('div')
       document.body.appendChild(host)
       root = createRoot(host)
-      await act(async () => { root!.render(<LinuxEnvironmentSection close={vi.fn()} />) })
+      await act(async () => { root!.render(<LinuxEnvironmentSection close={vi.fn()} downloads={linuxDownloads} />) })
       await act(async () => { await vi.advanceTimersByTimeAsync(10) })
       element = host
 

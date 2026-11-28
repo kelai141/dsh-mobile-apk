@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
+import { runInNewContext } from 'node:vm'
 import { versionedFixture } from './lib/fixture.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -66,6 +67,15 @@ try {
   check('打过探针的产物可被 node 解析', parse.status === 0, (parse.stderr || '').split('\n')[0])
   apply()
   check('再施加零改动（幂等）', readFileSync(target, 'utf8') === patched)
+  const oldProbe = patched
+    .replace(/^.*clearInterval\(dshMobileComboProbeLoopTimer\).*\n/m, '')
+    .replace(/\tif \(name === "loader-settle-wait"\) \{\n(?:.*__dshMobileBootAttribution.*\n){2}\t\}\n/, '')
+  check('升级基线确实缺少新挂点和停表', !oldProbe.includes('clearInterval(dshMobileComboProbeLoopTimer)')
+    && !oldProbe.includes('__dshMobileBootAttribution'))
+  writeFileSync(target, oldProbe)
+  const upgrade = apply()
+  check('已打旧版 P1 的产物可原位升级，结果与干净安装一致',
+    upgrade.status === 0 && readFileSync(target, 'utf8') === patched, upgrade.stdout + upgrade.stderr)
 
   // ③ 解析契约：三行各自的字段集合（壳侧 LogCollector 与 scripts/perf/count-compose.mjs 按此解析）
   const composeLine = (patched.match(/console\.log\(`\[perf\] compose [^\n]*/) || [''])[0]
@@ -141,6 +151,8 @@ try {
   const composeLines = []
   const totalLines = []
   const phaseLines = []
+  const bootMarks = []
+  globalThis.__dshMobileBootAttribution = { mark: (name, at) => bootMarks.push({ name, at }) }
   const originalLog = console.log
   console.log = (...args) => {
     if (String(args[0]).startsWith('[perf] compose')) composeLines.push(String(args[0]))
@@ -216,11 +228,29 @@ try {
       totalLines.length === composeLines.length
         && new RegExp(`calls=${composeLines.length} `).test(totalLines.at(-1)),
       `compose=${composeLines.length} total=${totalLines.length} last=${totalLines.at(-1)}`)
+    check('实际 P1 compose/TOTAL 的完整字段和顺序保持兼容',
+      composeLines.every(line => /^\[perf\] compose #\d+ at=\d+ms dur=\d+ms instances=\d+ records=\d+ singles=-1 comboCache=none hits=0 misses=0$/.test(line))
+      && totalLines.every(line => /^\[perf\] TOTAL calls=\d+ totalMs=\d+ instances=\d+ firstAt=\d+ms singles=-1 loopP99Ms=(?:-1|\d+(?:\.\d+)?) loopSamples=(?:-1|\d+) comboCache=none hits=0 misses=0$/.test(line)))
+    const gateInput = [...composeLines, ...totalLines].join('\n')
+    // 门禁入口会在 import 时执行 CLI，只在行为夹具中执行原样解析器。
+    const gateSource = readFileSync(join(repoRoot, 'scripts', 'check-boot-budget.mjs'), 'utf8')
+    const parser = gateSource.match(/^export (function parseProbe\(text\) \{[\s\S]*?^\})/m)[1]
+    const parseProbe = runInNewContext(parser + '\nparseProbe')
+    const originalGate = parseProbe(gateInput)
+    const diagnosticRow = '[perf] boot-attribution {"runId":"fixture-1","loader":{"top":[{"importMs":20,"inertiaMs":50}]}}'
+    check('新增诊断行混入时，启动门禁的 C2/C4 与其余全部解析结果一致',
+      originalGate.composeCalls === composeLines.length && originalGate.composeDur.length === composeLines.length
+      && Number.isFinite(originalGate.loopP99Ms) && Number.isFinite(originalGate.loopSamples)
+      && JSON.stringify(parseProbe(gateInput + '\n' + diagnosticRow)) === JSON.stringify(originalGate))
     await new Promise((resolve) => setTimeout(resolve, 275))
     const parsedPhases = phaseLines.map((line) => {
       const match = /^\[perf\] phase name=(\S+) startMs=([\d.]+) durTotalMs=([\d.]+) durMaxMs=([\d.]+) observations=(\d+) forwardedCallbacks=(\d+)$/.exec(line)
       return match && { name: match[1], startMs: Number(match[2]), total: Number(match[3]), max: Number(match[4]), observations: Number(match[5]), callbacks: Number(match[6]) }
     }).filter(Boolean)
+    const waitPhase = parsedPhases.find(phase => phase.name === 'loader-settle-wait')
+    check('诊断挂点沿用实际 P1 等待的两个单调时间戳',
+      bootMarks.length === 2 && bootMarks[0].name === 'p1-wait-start' && bootMarks[1].name === 'p1-settled'
+      && Math.abs(bootMarks[1].at - bootMarks[0].at - waitPhase?.total) < 0.1)
     check('启动阶段测量在固定窗口后可观察，数值有限非负且聚合语义明确',
       ['constructor-flush', 'loader-settle-wait', 'deferred-startup-flush', 'loader-settle-to-first-compose-start']
         .every((name) => parsedPhases.some((phase) => phase.name === name))
@@ -257,6 +287,7 @@ try {
         && !patched.includes('dshMobileComboProbePhases.push'),
       `constructorRows=${floodRows.length} rounds=${FLOOD_ROUNDS} elapsedMs=${floodElapsedMs} maxWindows=${maxWindows}`)
   } finally {
+    delete globalThis.__dshMobileBootAttribution
     console.log = originalLog
   }
   check('行为夹具无 activation/compose 报错', errors.length === 0, errors.map(String).join(' | '))
@@ -294,6 +325,41 @@ try {
       // 旧实现恒为 ~11ms，落不进该区间。
       check('行为反证：arming 同 tick 的 400ms 同步块必须可见（旧实现在此恒报 ~11ms）',
         Number.isFinite(p99) && p99 > 250, line + '（p99=' + String(p99) + '）')
+
+      let now = 0
+      let pendingTick
+      let clears = 0
+      let arms = 0
+      const timer = { unref() {} }
+      const sampler = runInNewContext(hist + '\n' + loopLine + '\n'
+        + '({ arm: dshMobileComboProbeArmLoopSampler, line: dshMobileComboProbeLoopLine })', {
+        performance: { now: () => now },
+        setInterval(callback, interval) {
+          if (interval !== 10) throw new Error(`expected 10ms, got ${interval}`)
+          arms++
+          pendingTick = callback
+          return timer
+        },
+        clearInterval(handle) {
+          if (handle !== timer) throw new Error('wrong timer handle')
+          clears++
+          pendingTick = undefined
+        },
+      })
+      sampler.arm()
+      check('采样前仍返回 C4 原始哨兵', sampler.line() === 'loopP99Ms=-1 loopSamples=-1')
+      for (let i = 0; i < 8191; i++) {
+        now += 10
+        pendingTick()
+      }
+      check('8,191 样本时采样仍运行且直方图可读', clears === 0 && pendingTick
+        && sampler.line() === 'loopP99Ms=10 loopSamples=8191', sampler.line())
+      now += 10
+      pendingTick()
+      sampler.arm()
+      check('8,192 样本即清除 10ms 定时器，保留直方图且不再 arming',
+        clears === 1 && !pendingTick && arms === 1 && sampler.line() === 'loopP99Ms=10 loopSamples=8192',
+        `clears=${clears} arms=${arms} ${sampler.line()}`)
     }
   }
 } finally {

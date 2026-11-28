@@ -50,6 +50,15 @@
       "test": "scripts/patches/tests/managed-port-bind-EP1.test.mjs"
     },
     {
+      "id": "webserver-lazy-compression",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js",
+      "scope": "engine",
+      "summary": "仅在 gzip 模式的 WebServer 初始化期间加载压缩中间件与编码协商模块",
+      "provenance": "0.2.2-rc.3 的 WebServer 默认 compression 为 none，原产物仍顶层加载 compression 与 negotiator",
+      "marker": "dsh-mobile webserver lazy compression",
+      "test": "scripts/patches/tests/webserver-lazy-compression.test.mjs"
+    },
+    {
       "id": "profile-link-skip-PL1",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
       "scope": "engine",
@@ -57,6 +66,15 @@
       "provenance": "2026-10-23 启动事故：共享存储插件软链 EACCES 阻断 profile 组合",
       "marker": "dsh-mobile profile link skip (PL1)",
       "test": "scripts/patches/tests/profile-link-skip-PL1.test.mjs"
+    },
+    {
+      "id": "appboot-compile-resolution-S2",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
+      "scope": "engine",
+      "summary": "在单次 compileResolution 调用中按原始路径复用 canonicalPath 结果",
+      "provenance": "0.2.2-rc.3 的 compileResolution 同时为 entries 和 installationPaths 对安装域目录调用 realpathSync",
+      "marker": "dsh-mobile appboot compileResolution realpath memo (S2)",
+      "test": "scripts/patches/tests/appboot-compile-resolution-s2.test.mjs"
     },
     {
       "id": "sidebar-bubble-reorder-B1",
@@ -391,6 +409,25 @@
       "provenance": "2026-09-19 真实用户反馈（报错反馈/0.14.0/20260919-125714-engine-died-during-boot，华为 NOH-AN00 / Android 31 / arm64 / 0.14.0 vc39）：用户自装 dsh-live2d-pets 在 import 期抛 SyntaxError（@deepseek-ai/dsh-settings 不再导出 settingsNamespace）→ engine exit=1。boot-pending-G1 结构上无法覆盖：G1 锚点在 assertEntriesActivated（dsh-app-boot:1472-1505），而 import 失败在更早的 boot:1552 → mountRootInclude:553 → loader EntryTree.update（cordis-plugin-loader:86/97）→ updateError('import')（:309）处就抛出，assertEntriesActivated:1555 根本不可达",
       "marker": "dsh-mobile third-party boot isolation (G3)",
       "test": "scripts/patches/tests/boot-third-party-isolation-g3.test.mjs"
+    },
+    {
+      "id": "boot-attribution",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
+      "additionalTargets": [
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis-plugin-loader/lib/index.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis/lib/index.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-app/lib/index.js"
+      ],
+      "scope": "engine",
+      "summary": "启用诊断开关时，用同一单调时钟输出启动阶段与 P1 等待窗口内 Loader entry Top 10，分别量取 _initTask、模块 import 和 fiber.inertia",
+      "provenance": "0.2.2-rc.3 MuMu 冷启动分段归因",
+      "requires": [
+        "managed-port-bind-EP1",
+        "combo-probe-P1"
+      ],
+      "marker": "dsh-mobile boot attribution",
+      "test": "scripts/patches/tests/boot-attribution.test.mjs"
     },
     {
       "id": "external-draft-conversation-seam-J1",

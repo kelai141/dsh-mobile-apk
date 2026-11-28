@@ -446,10 +446,20 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
     // Linux 已安装且用户开启自动检查时，服务就绪后查询发布通道。
     ctx.inject(['linuxBootstrap'], scope => {
       const bootstrap = serviceOf<LinuxBootstrap>(scope, 'linuxBootstrap')
-      if (bootstrap) void lifecycle.attach(bootstrap).catch(error => lifecycle.fail(error))
-      if (bootstrap) void checkLinuxEnvironmentOnStartup(bootstrap).catch(() => {
-        ctx.logger?.('dsh-android-linux-env')?.warn?.('Linux 环境自动检查失败，请通过设置页重试。')
-      })
+      if (!bootstrap) return
+      const phase = lifecycle.snapshot().phase
+      if (phase === 'stopping' || phase === 'stopped') return
+      const initialStatus = (async () => await bootstrap.status())()
+      void lifecycle.attach(bootstrap, initialStatus).catch(error => lifecycle.fail(error))
+      void initialStatus
+        .then(status => {
+          const current = lifecycle.snapshot().phase
+          if (current === 'stopping' || current === 'stopped') return
+          return checkLinuxEnvironmentOnStartup(bootstrap, status)
+        })
+        .catch(() => {
+          ctx.logger?.('dsh-android-linux-env')?.warn?.('Linux 环境自动检查失败，请通过设置页重试。')
+        })
     })
   }
   for (const t of tools(ctx, bridgeOf)) ctx.tools.register(t)

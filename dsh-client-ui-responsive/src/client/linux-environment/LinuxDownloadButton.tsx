@@ -9,7 +9,7 @@ import {
 import { useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { tr } from '../i18n.ts'
-import { acknowledgeInstallJob, changeInstallJob, downloadPercent, formatBytes, useLinuxInstallJob } from './install-job.ts'
+import { acknowledgeInstallJob, changeInstallJob, downloadPercent, formatBytes, refreshInstallJob, useLinuxInstallJob } from './install-job.ts'
 import type { InstallJob } from './transport.ts'
 
 export function downloadStatus(job: InstallJob): string {
@@ -82,6 +82,16 @@ export function LinuxDownloadProgress({ job }: { job: InstallJob }) {
 }
 
 const POPOVER_GUTTER = 16
+
+// The header and the lazy Linux panel use the same install-job subscription.
+export const linuxDownloads = {
+  acknowledgeInstallJob,
+  downloadStatus,
+  formatBytes,
+  LinuxDownloadProgress,
+  refreshInstallJob,
+  useLinuxInstallJob,
+}
 
 export function LinuxDownloadButton({ open }: { open(): void }) {
   const job = useLinuxInstallJob()

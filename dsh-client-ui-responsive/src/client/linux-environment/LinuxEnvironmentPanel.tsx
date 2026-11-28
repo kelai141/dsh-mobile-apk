@@ -1,14 +1,11 @@
-import { IconCodeOutlineMedium } from '@deepseek-ai/dsh-client-ui-primitives'
-import { LinuxEnvironmentSection } from './LinuxEnvironmentSection.tsx'
+import { LinuxEnvironmentSection, type LinuxEnvironmentSectionProps } from './LinuxEnvironmentSection.tsx'
 
-export function LinuxPanelIcon({ size }: { size: number }) {
-  return <IconCodeOutlineMedium size={size} />
-}
+export { LinuxEnvironmentSection }
 
-export function LinuxEnvironmentPanel({ close }: { close(): void }) {
+export function LinuxEnvironmentPanel(props: Omit<LinuxEnvironmentSectionProps, 'sidebar'>) {
   return (
     <div className="dsh-linux-panel" data-dsh-linux-environment-panel="">
-      <LinuxEnvironmentSection close={close} sidebar />
+      <LinuxEnvironmentSection {...props} sidebar />
     </div>
   )
 }

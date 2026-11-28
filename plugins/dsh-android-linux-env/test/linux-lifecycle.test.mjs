@@ -76,3 +76,21 @@ test('SIGTERM drains Linux once and exits without hanging on live handles', { sk
     assert.match(output, /drained/)
   } finally { child.kill('SIGKILL') }
 })
+
+test('attach reuses a shared initialStatus while refresh queries live bootstrap status', async () => {
+  const lifecycle = createLinuxLifecycle()
+  let statusCalls = 0
+  let current = { installed: true, enabled: true, injectionActivated: true, runtime: { healthy: true } }
+  const bootstrap = {
+    status: async () => { statusCalls += 1; return current },
+  }
+  const shared = bootstrap.status()
+  await lifecycle.attach(bootstrap, shared)
+  assert.equal(statusCalls, 1)
+  assert.equal(lifecycle.snapshot().phase, 'ready')
+
+  current = { installed: true, enabled: false, injectionActivated: false }
+  await lifecycle.refresh()
+  assert.equal(statusCalls, 2)
+  assert.equal(lifecycle.snapshot().phase, 'disabled')
+})

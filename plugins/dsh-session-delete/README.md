@@ -40,14 +40,20 @@
   存储目录命中 2 个报 `ambiguous`（一个都不删）。永久删除同时清除该 id 的所有 `.corrupt/<id>.<时间戳>`
   隔离副本；只有存储与隔离都不存在才报 `not-found`。枚举失败如实报错，不能成为客户端视为成功的 404。
   每个目录先 `rename` 成 `.deleting-<t>` 再递归删除；失败报告残留，重试可继续清理。
-  启动 sweep 同时清理隔离区内明确删除产生的 graveyard，不自动过期清理可恢复的隔离件。
+  启动只做一次全树扫描：清理隔离区内明确删除产生的 graveyard，不自动过期清理可恢复的隔离件。
   **删除进行到一半的墓地目录也是删除目标**（issue #1587 第二条残留面）：`rm` 失败/进程被杀后
   目录停在 `<id>.deleting-*`，它既不在扫描路径上也不在隔离区 —— 旧实现只报 `not-found`，
   客户端按「已删除」收尾，重试永远清不掉。现在 `deleteStoredSession` 把
   `findGraveyardDirs()` 的命中一起删；隔离入口遇到只剩墓地目录时报 `deletion-incomplete`
   （409，带 paths），客户端渲染「再点一次删除即可收尾」，不再冒充已删除、也不假装可恢复。
-  隔离件本身**不自动过期**（可恢复承诺），但 `inspectQuarantine()` 在启动时把条数与字节数
-  记进 `engine.log`，让「.corrupt/ 吃掉多少」可查。
+  隔离件本身**不自动过期**（可恢复承诺），但 `inspectQuarantine()` 把条数与字节数记进
+  `engine.log`，让「.corrupt/ 吃掉多少」可查。它在首屏之后
+  （`DEFERRED_MAINTENANCE_DELAY_MS`）与孤立投影核对**共用一份目录快照**执行：旧实现在
+  `apply()` 里三路并行，各自重扫 `sessions/` 与每个 `.corrupt/`。调度挂 `ctx.effect`，
+  dispose / HMR 重载时清定时器；已开跑的任务在下一个目录边界停下，未执行的删除不发生。
+  投影核对只取日志**首行身份**：zstd 日志走有界流式首行读取（压缩输入 ≤ 1 MiB、解压首行
+  ≤ 8 KiB），不再 `readFile` 整份日志后同步解压；身份读不出来（损坏 / 截断 / 超限 / 目录
+  扫描不完整）一律保留缓存，绝不误删。
 
 ## 构建与安装
 
@@ -72,6 +78,10 @@
   host 编排拒绝 / 归档置顶清理顺序 / 每步日志 / 探测抛错与非数组拒绝 / 无瀑布拒绝 /
   目录中途消失→not-found / post-rename 钩子失败不残留 / 接口契约：不调用 `flush(`、
   `clearMain`、`shortcuts.find`）。
+- `node --test test/bounded-log-identity.test.mjs`：**7 项全过**（8 MiB zstd 日志只读首行即可识别身份；
+  身份未知 / 截断 / 损坏 / 超限 / 扫描不完整一律保留缓存；源码不得回退到整份同步解压或整份读取）
+- `node --test test/deferred-maintenance.test.mjs`：**4 项全过**（延后执行、共用一份快照；
+  dispose 取消未执行的定时器；已在跑的任务在删除前停下；apply 的延后维护挂第 4 个 effect）
 - `node scripts/check-api-route-auth.mjs`：三道路由均登记为 protected。
 - `node scripts/check-code-map.mjs`：新增文件已进覆盖账本。
 

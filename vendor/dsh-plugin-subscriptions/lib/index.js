@@ -3024,11 +3024,13 @@ function deterministicSessionId(sessionId) {
 
 //#endregion
 //#region src/providers/catalog-refresh.ts
-/** Model catalogs refresh at startup, then one hour after each run completes. */
+/** Model catalogs refresh after an optional startup delay, then one hour after each run completes. */
 const CATALOG_REFRESH_INTERVAL_MS = 60 * 6e4;
 /** Start a non-overlapping, disposable loop; failures wait for the next interval. */
-function startCatalogRefresh(refresh, onError = () => {}) {
+function startCatalogRefresh(refresh, onError = () => {}, options = {}) {
+	const initialDelayMs = typeof options === "number" ? options : options?.initialDelayMs ?? 0;
 	const controller = new AbortController();
+	let initialTimer;
 	let timer;
 	const run = async () => {
 		if (controller.signal.aborted) return;
@@ -3041,14 +3043,27 @@ function startCatalogRefresh(refresh, onError = () => {}) {
 				timer = setTimeout(() => {
 					run();
 				}, CATALOG_REFRESH_INTERVAL_MS);
-				timer.unref();
+				timer.unref?.();
 			}
 		}
 	};
-	run();
+	if (initialDelayMs > 0) {
+		initialTimer = setTimeout(() => {
+			initialTimer = void 0;
+			run();
+		}, initialDelayMs);
+		initialTimer.unref?.();
+	} else run();
 	return () => {
 		controller.abort();
-		if (timer !== void 0) clearTimeout(timer);
+		if (initialTimer !== void 0) {
+			clearTimeout(initialTimer);
+			initialTimer = void 0;
+		}
+		if (timer !== void 0) {
+			clearTimeout(timer);
+			timer = void 0;
+		}
 	};
 }
 
@@ -11289,7 +11304,7 @@ function apply(ctx, config) {
 			if (signal.aborted || overridden.has(provider)) return;
 			await adapter.listOwnModels(provider, void 0, signal);
 		}));
-	}, () => onWarn("background model catalog refresh failed; next automatic attempt is in one hour")), "dsh-plugin-subscriptions: hourly model catalog refresh");
+	}, () => onWarn("background model catalog refresh failed; next automatic attempt is in one hour"), { initialDelayMs: 15_000 }), "dsh-plugin-subscriptions: hourly model catalog refresh");
 	if (claudeTokens !== void 0) {
 		const tokens = claudeTokens;
 		const syncTimer = setInterval(() => {

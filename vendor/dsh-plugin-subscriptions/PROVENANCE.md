@@ -8,7 +8,7 @@
 | 发行版 | npm `dsh-plugin-subscriptions@0.9.12`（tarball shasum `a3aff899f615cec19f56b4bf11026a6cbf696382`，integrity `sha512-OHW6LsNjmfQ7gFZ734Lbz9iVtrPeWAaQz2sAzSezNDgyNGpEBzvLufGhzwffh1VgWz2TW8AMJ/JpgBec5Lscrg==`） |
 | 上游 gitHead | `b8023110864494acefc6f5963c2a197d85dda20c`（package.json 的 `gitHead` 字段；无对应 tag 时以此为准） |
 | 许可 | MIT（原文见本目录 `LICENSE`，随快照分发，见下「MIT 许可原文保留位置」） |
-| 解包体积 | 上游 npm 包 2,063,168 B / 143 文件；本目录裁掉源映射与类型声明后 **1,417,757 B / 70 文件**（见差异 #4） |
+| 解包体积 | 上游 npm 包 2,063,168 B / 143 文件；本目录裁掉源映射与类型声明后 **1,428,428 B / 71 文件**（见差异 #4 与后续本仓回归测试） |
 | 定位 | 把 ChatGPT(Codex)/Claude/Grok/Copilot 订阅当 LLM provider；OAuth 在 Settings → Subscriptions |
 
 ## 为什么 vendor（而不是直接依赖 npm 版本）
@@ -45,7 +45,9 @@
 | 19 |  `lib/providers/common.js`、`lib/providers/copilot.js`、`lib/index.js` | **Copilot 403 限流误判永久修（issue #1624）**：`OAuthEndpointError` 新增 `rateLimited` 字段，`oauthEndpointError` 同步读取 `parsed.message`、`retry-after` 与 `x-ratelimit-remaining: 0`；`isCopilotPermanentRefreshError` 对带限流信号或 `rate limit` 文案的 403 判瞬时错误，不再删除用户 GitHub token。两份打包副本同步改；判据见 `scripts/subs-copilot-rate-limit.test.mjs` |
 | 20 |  `lib/auth/claude-code-creds.js`、`lib/index.js` | **Claude Code 导入账号的同步标记透传（issue #1589）**：`refreshClaudeSynced` 的两条出口（采用源里更新的 token / 自己刷新）返回的会话都补回 `keychainBound: true`，只在入参本身带该标记时才补；两份打包副本同步改 | 缺陷形态：`keychainBound` 是「该账号跟随 `~/.claude/.credentials.json`」的唯一标记，导入时写入；但 `claudeSession()` / `refreshClaude()` 的返回不携带它，`refreshClaudeSynced` 的 base/next 也不携带，而 `TokenManager.doRefresh` 每次都 save ⇒ **第一次成功刷新就把标记从盘上抹掉**，5 分钟同步定时器（`if (session.keychainBound !== true) continue`）从此跳过该账号：DSH 不再读 CLI 轮换后的 token，自己那份 refresh token 过期 → `invalid_grant` → 判永久失效 → 删会话，用户必须重新导入且没有任何提示说明原因。回归：`vendor/dsh-plugin-subscriptions/test/claude-keychain-bound-1589.test.mjs`（4 例，修前红 3 例） |
 
-**未改动**：`lib/` 下运行时代码**除上表第 5、6、8、9、10、11、12、13、14、15、16、17、18、19、20 条所列代理面、SSE 面、宿主样式面、命令标题 locale、登出竞态、Android 回环页、OAuth 超时、Copilot 限流误判与 Claude Code 导入账号的同步标记透传外**逐字节保持上游（仅另删上表第 4 条的 `.map` / `.d.ts`）（含 provider 实现、OAuth 凭据交换、token 存储路径 `~/.dsh/plugins/subscriptions/auth.json` 与其 0600 权限）、`cordis.patch.yml`、`README.md`、`LICENSE`。`test/claude-keychain-bound-1589.test.mjs` 为本仓自有回归（上游无 test 目录），不属于上游字节。
+| 21 |  `lib/providers/catalog-refresh.js`、`lib/index.js` | **启动首拍目录刷新延后（冷启动首屏优化）**：① `startCatalogRefresh()` 新增可选延迟参数（默认 `0` 保持兼容，支持 `{ initialDelayMs }` 或数值传参），`initialDelayMs > 0` 时用 `setTimeout` + `unref?.()` 延后首拍，取消句柄同时清理首拍定时器、周期定时器并 `controller.abort()`；② `apply()` 传入 `{ initialDelayMs: 15_000 }`；两份副本同步改，全部路由、适配器注册、静态目录与手动刷新契约不变 | 冷启动时 `apply()` 原先同步触发 `startCatalogRefresh` 首拍，立即对已配置供应商并发 `listOwnModels` 网络发现请求，与首屏抢占资源；延后 15 秒避开首屏窗口并保证 dispose/HMR 时零残留触发。另经评估保留 `apply()` 内的无阻塞 `loadModelDefaults()`：因四个适配器 `resolveOwnModel()` 与 `modelDefaults.catalog()` 均同步读取 `defaultEffortOf`，若移至 15 秒后会导致首屏期内用户默认推理档失效。回归：`vendor/dsh-plugin-subscriptions/test/catalog-refresh-defer.test.mjs`（5 例） |
+
+**未改动**：`lib/` 下运行时代码**除上表第 5、6、8、9、10、11、12、13、14、15、16、17、18、19、20、21 条所列代理面、SSE 面、宿主样式面、命令标题 locale、登出竞态、Android 回环页、OAuth 超时、Copilot 限流误判、Claude Code 导入账号的同步标记透传与启动首拍目录刷新延后外**逐字节保持上游（仅另删上表第 4 条的 `.map` / `.d.ts`）（含 provider 实现、OAuth 凭据交换、token 存储路径 `~/.dsh/plugins/subscriptions/auth.json` 与其 0600 权限）、`cordis.patch.yml`、`README.md`、`LICENSE`。`test/claude-keychain-bound-1589.test.mjs` 与 `test/catalog-refresh-defer.test.mjs` 为本仓自有回归（上游无 test 目录），不属于上游字节。
 
 ## 我们删了什么、为什么
 

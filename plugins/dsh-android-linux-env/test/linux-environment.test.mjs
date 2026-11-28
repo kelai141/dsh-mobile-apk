@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
 import ts from 'typescript'
+import * as linuxEnvPlugin from '../lib/index.js'
 import { createLinuxPluginHost, registerLinuxEnvironmentRoutes, checkLinuxEnvironmentOnStartup, normalizeLinuxStatus, cordisScope } from '../lib/linux-environment.js'
 
 // Cordis 4.0.5 erases its exported const enum from JS; compile that declaration for these fixtures.
@@ -20,16 +21,20 @@ const TOKEN = 'a'.repeat(32)
 function makeBootstrap(overrides = {}) {
   const calls = []
   const state = { autoUpdateEnabled: false, currentMobileVersion: '0.14.9', installedLinuxVersion: null, operation: 'idle', ...overrides }
-  return {
-    calls, state,
+  const bootstrap = {
+    calls, state, statusCalls: 0,
     // overrides 同时可以替换行为（status 抛错等），不只是状态字段。
-    status: overrides.status ?? (async () => ({ ...state })),
+    status: async () => {
+      bootstrap.statusCalls += 1
+      return typeof overrides.status === 'function' ? overrides.status() : { ...state }
+    },
     checkForUpdates: async options => { calls.push(['check', options]); state.latestReleaseVersion = '1.2.0'; state.updateAvailable = true },
     install: overrides.install ?? (async options => { calls.push(['install', options]); state.installedLinuxVersion = '1.2.0' }),
     reinstall: async (...args) => { calls.push(['reinstall', ...args]) },
     uninstall: async (...args) => { calls.push(['uninstall', ...args]); state.installedLinuxVersion = null },
     setAutoUpdateEnabled: async enabled => { calls.push(['autoUpdate', enabled]); state.autoUpdateEnabled = enabled },
   }
+  return bootstrap
 }
 /**
  * The bootstrap aborts an install with "The installed runtime plugin did not provide a runtime
@@ -589,5 +594,167 @@ test('requests Node preparation only after an install failure with successful ro
     const response = await h.call('install')
     assert.equal(response.code, expected)
     assert.equal(response.payload.reason, expected === 409 ? 'linux-node-stage-required' : 'linux-environment-op-failed')
+  }
+})
+
+async function flushMicrotasks() {
+  for (let i = 0; i < 3; i += 1) await new Promise(resolve => setImmediate(resolve))
+}
+
+async function mountHostWithBootstrap(bootstrap) {
+  const previousFilesDir = process.env.DSH_FILES_DIR
+  delete process.env.DSH_FILES_DIR
+  const ctx = new Context()
+  const registeredTools = new Map()
+  const routes = new Map()
+  ctx.provide('tools', {
+    register(tool) {
+      registeredTools.set(tool.name, tool)
+      return () => registeredTools.delete(tool.name)
+    },
+  })
+  ctx.provide('webServer', {
+    register(route) {
+      routes.set(route.path, route)
+      return () => routes.delete(route.path)
+    },
+  })
+  ctx.provide('sandboxPolicy', { defaultMode: 'workspace-write', resolve: () => undefined })
+  ctx.provide('sessions', {})
+  ctx.provide('connection', { requestRejection: () => undefined })
+  const fiber = ctx.plugin(linuxEnvPlugin, {})
+  await fiber
+  if (bootstrap !== undefined) ctx.provide('linuxBootstrap', bootstrap)
+  await flushMicrotasks()
+  return {
+    ctx,
+    registeredTools,
+    routes,
+    async callRoute(action, { method = action === 'status' || action === 'manifest' ? 'GET' : 'POST', body = {} } = {}) {
+      const req = Readable.from([Buffer.from(JSON.stringify(body))])
+      req.method = method
+      req.headers = { host: '127.0.0.1:4145' }
+      const res = { code: 0, headers: {}, body: '', writeHead(code, headers) { this.code = code; this.headers = headers }, end(data = '') { this.body = data } }
+      await routes.get('/api/android/linux-environment/' + action).handler(req, res)
+      return { ...res, payload: res.body ? JSON.parse(res.body) : undefined }
+    },
+    async cleanup() {
+      await ctx.fiber.dispose()
+      if (previousFilesDir === undefined) delete process.env.DSH_FILES_DIR
+      else process.env.DSH_FILES_DIR = previousFilesDir
+    },
+  }
+}
+
+test('checkLinuxEnvironmentOnStartup enforces autoUpdate=false even with autoStart present and reuses initialStatus', async () => {
+  for (const state of [
+    { installed: true, version: '1.2.0', autoUpdate: false, autoStart: true, enabled: true, injectionActivated: true, operation: 'idle' },
+    { installed: true, version: '1.2.0', autoUpdate: false, autoStart: false, enabled: false, injectionActivated: false, operation: 'idle' },
+    { installed: true, version: '1.2.0', autoUpdateEnabled: false, autoStart: true, enabled: true, injectionActivated: true, operation: 'idle' },
+    { installed: true, version: '1.2.0', autoUpdate: true, autoStart: true, enabled: true, injectionActivated: false, operation: 'idle' },
+    { installed: true, version: '1.2.0', autoUpdate: true, autoStart: true, enabled: false, injectionActivated: true, operation: 'idle' },
+  ]) {
+    const bootstrap = makeBootstrap(state)
+    await checkLinuxEnvironmentOnStartup(bootstrap)
+    assert.deepEqual(bootstrap.calls, [], JSON.stringify(state))
+    assert.equal(bootstrap.statusCalls, 1)
+  }
+
+  const enabled = makeBootstrap({
+    installed: true, version: '1.2.0', autoUpdate: true, autoStart: true, enabled: true, injectionActivated: true, operation: 'idle',
+  })
+  await checkLinuxEnvironmentOnStartup(enabled, { ...enabled.state })
+  assert.equal(enabled.statusCalls, 0, 'passing initialStatus must avoid an extra status() call')
+  assert.deepEqual(enabled.calls, [['check', { source: 'startup' }]])
+})
+
+test('startup handoff invokes bootstrap.status() once and respects autoUpdate=false, autoUpdate=true, and not-installed', async () => {
+  // 1. 已安装 + autoUpdate=false：启动期 status() 仅 1 次，0 次 source: 'startup' 检测；UI / 手动检查仍正常工作
+  {
+    const bootstrap = makeBootstrap({
+      installed: true, version: '1.2.0', autoUpdate: false, autoStart: true, enabled: true, injectionActivated: true, operation: 'idle',
+    })
+    const host = await mountHostWithBootstrap(bootstrap)
+    try {
+      assert.equal(bootstrap.statusCalls, 1)
+      assert.deepEqual(bootstrap.calls, [])
+      assert.equal(typeof host.ctx.get('linuxPluginHost')?.install, 'function')
+
+      const statusRes = await host.callRoute('status')
+      assert.equal(statusRes.code, 200)
+      assert.equal(statusRes.payload.installed, true)
+      assert.equal(statusRes.payload.autoUpdate, false)
+      assert.equal(bootstrap.statusCalls, 2, 'opening UI status route still queries live bootstrap status')
+
+      const checkRes = await host.callRoute('check')
+      assert.equal(checkRes.code, 200)
+      assert.deepEqual(bootstrap.calls, [['check', { source: 'manual' }]])
+      assert.equal(checkRes.payload.availableVersion, '1.2.0')
+      assert.equal(checkRes.payload.updateAvailable, true)
+      assert.equal(checkRes.payload.autoUpdate, false)
+      assert.equal(bootstrap.statusCalls, 3)
+
+      const toolResult = await host.registeredTools.get('linux_environment_status').execute({})
+      assert.equal(toolResult.phase, 'ready')
+      assert.equal(toolResult.ready, true)
+      assert.equal(bootstrap.statusCalls, 4, 'runtime status tool refresh still queries live bootstrap status')
+    } finally {
+      await host.cleanup()
+    }
+  }
+
+  // 2. 已安装 + autoUpdate=true：启动期 status() 仅 1 次，且正常触发 source: 'startup' 检查
+  {
+    const bootstrap = makeBootstrap({
+      installed: true, version: '1.2.0', autoUpdate: true, autoStart: true, enabled: true, injectionActivated: true, operation: 'idle',
+    })
+    const host = await mountHostWithBootstrap(bootstrap)
+    try {
+      assert.equal(bootstrap.statusCalls, 1)
+      assert.deepEqual(bootstrap.calls, [['check', { source: 'startup' }]])
+      const toolResult = await host.registeredTools.get('linux_environment_status').execute({})
+      assert.equal(toolResult.phase, 'ready')
+      assert.equal(toolResult.ready, true)
+      assert.equal(bootstrap.statusCalls, 2)
+    } finally {
+      await host.cleanup()
+    }
+  }
+
+  // 3. 未安装（无论 autoUpdate 开关）：启动期 status() 仅 1 次，0 次检查
+  for (const autoUpdate of [false, true]) {
+    const bootstrap = makeBootstrap({
+      installed: false, autoUpdate, autoStart: true, enabled: false, injectionActivated: false, operation: 'idle',
+    })
+    const host = await mountHostWithBootstrap(bootstrap)
+    try {
+      assert.equal(bootstrap.statusCalls, 1)
+      assert.deepEqual(bootstrap.calls, [])
+      const toolResult = await host.registeredTools.get('linux_environment_status').execute({})
+      assert.equal(toolResult.phase, 'not-installed')
+      assert.equal(toolResult.ready, false)
+    } finally {
+      await host.cleanup()
+    }
+  }
+})
+
+test('startup check is skipped if the plugin shuts down before initial status resolves', async () => {
+  let resolveStatus
+  const bootstrap = makeBootstrap({
+    installed: true, version: '1.2.0', autoUpdate: true, autoStart: true, enabled: true, injectionActivated: true, operation: 'idle',
+    status: () => new Promise(resolve => { resolveStatus = resolve }),
+  })
+  const host = await mountHostWithBootstrap(undefined)
+  try {
+    host.ctx.provide('linuxBootstrap', bootstrap)
+    while (!resolveStatus) await new Promise(resolve => setImmediate(resolve))
+    assert.equal(bootstrap.statusCalls, 1)
+    await host.ctx.fiber.dispose()
+    resolveStatus({ ...bootstrap.state })
+    await flushMicrotasks()
+    assert.deepEqual(bootstrap.calls, [])
+  } finally {
+    await host.cleanup()
   }
 })

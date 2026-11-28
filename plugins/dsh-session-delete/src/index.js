@@ -24,12 +24,11 @@ import {
   SessionDeleteError,
   assertSessionId,
   deleteStoredSession,
-  inspectQuarantine,
   quarantineStoredSession,
   removeSessionProjectionCacheFile,
+  runDeferredStorageMaintenance,
   sessionsRoot,
   sweepGraveyards,
-  sweepOrphanProjectionCaches,
 } from './session-delete.js'
 export { collectGlobalAttachmentReferences, sweepOrphanAttachments } from './attachment-gc.js'
 
@@ -347,6 +346,46 @@ function failureOf(error) {
   return failure
 }
 
+/** 首屏窗口的保守上界；维护是 best-effort，晚做不影响删除/隔离契约。 */
+export const DEFERRED_MAINTENANCE_DELAY_MS = 15_000
+
+/**
+ * 把隔离件容量统计与孤立投影核对挪出启动首屏窗口。
+ *
+ * 旧实现 apply() 在同一轮并行发起三份全树扫描（墓地清扫、隔离容量、投影核对），
+ * 启动瞬间把 sessions/ 与每个 .corrupt/ 各读一遍。现在启动只保留墓地清扫；
+ * 这两项延后，共用一份目录快照（见 runDeferredStorageMaintenance）。
+ *
+ * 调度挂在 ctx.effect 上：HMR 重载 / 设置页「禁用→启用」时 clearTimeout；
+ * 已开始的任务由 shouldStop 在下一个目录边界停下，尚未执行的删除不发生。
+ *
+ * @param {object} ctx - cordis context。
+ * @param {string} home - 绝对 `DSH_HOME`。
+ * @param {{ delayMs?: number, logger?: (level: 'info'|'warn'|'error', message: string, extra?: object) => void }} [options] - 测试用的延后与日志注入。
+ */
+export function scheduleDeferredMaintenance(ctx, home, options = {}) {
+  const delayMs = Number.isSafeInteger(options.delayMs) && options.delayMs >= 0
+    ? options.delayMs
+    : DEFERRED_MAINTENANCE_DELAY_MS
+  const logger = typeof options.logger === 'function'
+    ? options.logger
+    : (level, message, extra) => log(ctx, level, message, extra)
+  ctx.effect(() => {
+    let disposed = false
+    const timer = setTimeout(() => {
+      runDeferredStorageMaintenance(home, logger, { shouldStop: () => disposed }).catch((error) => {
+        log(ctx, 'warn', 'deferred storage maintenance failed', { error: String(error?.message ?? error) })
+      })
+    }, delayMs)
+    // unref：进程退出/测试结束时，这个 best-effort 定时器不得把事件循环拖住。
+    if (typeof timer?.unref === 'function') timer.unref()
+    return () => {
+      disposed = true
+      clearTimeout(timer)
+    }
+  })
+}
+
 /**
  * Register the route.
  * @param {object} ctx - cordis context.
@@ -354,23 +393,14 @@ function failureOf(error) {
 export function apply(ctx) {
   log(ctx, 'info', 'registering route', { path: ROUTE })
   const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-  // 启动清扫上次失败删除留下的 *.deleting-* 墓地目录（best-effort；见 sweepGraveyards 注释）。
+  // 启动只做一次全树扫描：清掉上次失败删除留下的 *.deleting-* 墓地目录（best-effort；
+  // 见 sweepGraveyards 注释）。隔离件容量统计与孤立投影核对延后到首屏之后，
+  // 两者共用同一份快照 —— 旧实现在这里三路并行，各自重扫 sessions/ 与 .corrupt/。
   sweepGraveyards(home).then(
-    async (removed) => {
+    (removed) => {
       if (removed.length > 0) log(ctx, 'info', 'swept leftover graveyard directories', { count: removed.length })
-      await sweepOrphanProjectionCaches(home, (level, message, extra) => log(ctx, level, message, extra))
     },
-    () => {},
-  )
-  // issue #1587：隔离件不自动过期（可恢复承诺），但「磁盘被吃掉多少」必须可查。
-  // 以前 .corrupt/ 既没有清扫、也没有任何台账，用户报「存储一直涨」时无从下手。
-  inspectQuarantine(home).then(
-    (quarantine) => {
-      if (quarantine.count > 0) {
-        log(ctx, 'info', 'quarantine occupancy', { count: quarantine.count, bytes: quarantine.bytes })
-      }
-    },
-    () => {},
+    (error) => log(ctx, 'warn', 'startup graveyard sweep failed', { error: String(error?.message ?? error) }),
   )
   // issue #1595：register 在运行期返回 disposer，且同一 (kind,path) 重复注册会 throw，
   // 而 WebServer 不按 fiber 回收路由。裸调 + 丢弃 disposer 的后果：HMR 重载或设置页
@@ -451,4 +481,5 @@ export function apply(ctx) {
       }
     },
   }))
+  scheduleDeferredMaintenance(ctx, home)
 }

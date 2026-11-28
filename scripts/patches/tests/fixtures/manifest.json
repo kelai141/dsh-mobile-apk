@@ -3180,7 +3180,8 @@
         "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/package.json"
       },
       "patchIds": [
-        "managed-port-bind-EP1"
+        "managed-port-bind-EP1",
+        "webserver-lazy-compression"
       ]
     },
     "dsh-app-boot-0.2.2-rc.3": {
@@ -3206,7 +3207,9 @@
       },
       "patchIds": [
         "profile-link-skip-PL1",
-        "boot-third-party-isolation-G3"
+        "appboot-compile-resolution-S2",
+        "boot-third-party-isolation-G3",
+        "boot-attribution"
       ]
     },
     "dsh-client-ui-sidebar-right-0.2.2-rc.3": {
@@ -3434,7 +3437,8 @@
         "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/package.json"
       },
       "patchIds": [
-        "perf-compile-cache-flush-N2"
+        "perf-compile-cache-flush-N2",
+        "boot-attribution"
       ]
     },
     "dsh-client-ui-conversation-0.2.2-rc.3": {
@@ -3904,6 +3908,81 @@
       "patchIds": [
         "session-query-wal-vacuum-S2"
       ]
+    },
+    "cordis-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/cordis@4.1.0",
+      "provenance": {
+        "tarballFile": "deepseek-ai-cordis-4.1.0.tgz",
+        "tarballSha256": "3b0099a6aa9b0b52c3e199042acf6f1ae195c5690f7de11aa61171bca7752eca",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "627409afa06a265f7253200d3bc4648e88805c39fd3768568eb9b9518a31fe8f",
+        "package.json": "70be1056619663339433309474b1e6a2307088097af3cb082afe4b5ca2021b26"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis/package.json"
+      },
+      "patchIds": [
+        "boot-attribution"
+      ]
+    },
+    "cordis-plugin-loader-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/cordis-plugin-loader@1.1.0",
+      "provenance": {
+        "tarballFile": "deepseek-ai-cordis-plugin-loader-1.1.0.tgz",
+        "tarballSha256": "afb467fc85361e8ab99a88cdcbcf90ef3ffc270dfbe8c2e03f503bb4c899939f",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "4f0a93a1ef5bb09bd6e1c64b30df11be25efd46c316b9505c5ddf308974367a6",
+        "package.json": "af17686b3c2ec43cbeb9d918c7713db1d337b7b4ed70754d475eafa38a944751"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis-plugin-loader/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis-plugin-loader/package.json"
+      },
+      "patchIds": [
+        "boot-attribution"
+      ]
+    },
+    "dsh-web-app-0.2.2-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.3",
+      "package": "@deepseek-ai/dsh-web-app@0.2.2-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-web-app-0.2.2-rc.3.tgz",
+        "tarballSha256": "55a9198b916da182aa4ba833e19c0195f64077a382a3de6366a1c980389d5d45",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "6662ca712368c56fb8818efa53039ef92ce215a328a76b9cdd5e1bed624a0e84",
+        "package.json": "450dd887860bd5bbe3535d085cadebfe37d7eabdd8ad592d298392feec9da195"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-app/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-app/package.json"
+      },
+      "patchIds": [
+        "boot-attribution"
+      ]
     }
   },
   "capture": {
@@ -3915,7 +3994,7 @@
       ]
     },
     "overlaySha256": "4f0630defdce959d348ebd099ab66ee8ac92361ba421320470158a371eb398ca",
-    "registrySha256": "f8e9935de1b1041a742ddfeb10f3a8754c60c6da714c0d6e3c003964f5b44b57",
+    "registrySha256": "6b2d4f2b47cd21ebee262dae31dde42fafce586c5a08f53a99a532fc446546fe",
     "previousEngine": "0.2.2-rc.1"
   }
 }

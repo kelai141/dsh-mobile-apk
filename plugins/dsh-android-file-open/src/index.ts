@@ -47,10 +47,63 @@ function tmpWorkspace(): string {
   return join(dshHome, 'workspaces', 'incoming')
 }
 
+/** 队列目录路径（只拼路径，不建目录）。 */
+function queueDirPath(): string {
+  return join(tmpWorkspace(), '.sessions')
+}
+
+/**
+ * 已确认建出的队列目录（**按完整路径**为键）。
+ *
+ * 为什么每一条都必须带键：单测在同一进程内反复改 `DSH_HOME`（每个用例一个独立 HOME），
+ * 无键的单例缓存会把上一个 HOME 的「已建出」结论套到新路径上——目录根本没建，读队列直接
+ * ENOENT。只在 `mkdirSync` 成功后记入：EACCES 等失败照常抛给调用方，下一次调用仍会重试，
+ * 绝不把「建不出来」固化成结论。
+ */
+const establishedQueueDirs = new Set<string>()
+
+/** 队列目录是否已在本进程内确认建出（装配阶段判断「还需不需要兜底建工作区」）。 */
+function queueDirEstablished(): boolean {
+  return establishedQueueDirs.has(queueDirPath())
+}
+
+/**
+ * 目录被外部删除（ENOENT）后的失效：清掉该路径的「已建出」结论，下一次 `queueDir()` 重新 mkdir。
+ *
+ * 工作区 realpath 结论一并失效：ENOENT 说明这棵工作区目录被删掉/重建过，重建后的 canonical
+ * 形态可能已经不同（DSH_HOME 走软链时尤其如此），旧结论不得继续参与越界判定。
+ * @param dir - 失效的队列目录（必须是完整的 `.sessions` 路径）。
+ */
+function forgetQueueDir(dir: string): void {
+  establishedQueueDirs.delete(dir)
+  wsRealCache.clear()
+}
+
 function queueDir(): string {
-  const d = join(tmpWorkspace(), '.sessions')
+  const d = queueDirPath()
+  if (establishedQueueDirs.has(d)) return d
   mkdirSync(d, { recursive: true })
+  establishedQueueDirs.add(d)
   return d
+}
+
+/**
+ * 队列记录的落盘（目录被外部删除时自愈一次）。
+ *
+ * 缓存命中的前提是「目录还在」；落盘遇 ENOENT 说明缓存已过期（目录被壳侧/清理工具删掉），
+ * 必须清键重建后**重试一次**——否则队列目录永远不会被重新建出，投递会一直 400。
+ * 非 ENOENT 的失败（EACCES/ENOSPC 等）不重试，原样抛给调用方。
+ * @param name - 队列目录内的文件名。
+ * @param content - 文件内容。
+ */
+function writeQueueFile(name: string, content: string): void {
+  try {
+    writeFileSync(join(queueDir(), name), content)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') throw e
+    forgetQueueDir(queueDirPath())
+    writeFileSync(join(queueDir(), name), content)
+  }
 }
 
 /**
@@ -87,6 +140,38 @@ function canonicalPath(p: string): string {
 }
 
 /**
+ * 工作区 realpath 的进程内缓存（**按工作区词法路径**为键；只在 realpathSync 成功时记入）。
+ *
+ * 为什么每一条都必须带键：单测在同一进程内反复改 DSH_HOME，不同工作区必须各自解析；无键单例
+ * 会把上一个 HOME 的结论套到新路径上，越界判定随之失效（正常来件被判越界拒收，或反向放行）。
+ * 为什么失败不缓存：realpath 失败通常意味着工作区还没建出来，固化失败会让之后的调用永远拿不到
+ * canonical 形态（/data/user/0 与 /data/data 前缀混用的判据失效）。目录被重建时由 forgetQueueDir
+ * 整体失效。
+ */
+const wsRealCache = new Map<string, string>()
+
+/** 缓存条目上限：工作区形态本身就是个位数，超限只可能是轮换 HOME 的长时间进程（清空重来）。 */
+const WS_REAL_CACHE_LIMIT = 64
+
+/**
+ * 工作区 realpath（成功才进缓存，失败不缓存）。
+ * @param wsLex - 已 resolve 的工作区词法路径（缓存键）。
+ * @returns canonical 形态；解析失败返回 null，调用方沿用词法形态。
+ */
+function workspaceRealOf(wsLex: string): string | null {
+  const cached = wsRealCache.get(wsLex)
+  if (cached !== undefined) return cached
+  try {
+    const real = realpathSync(wsLex)
+    if (wsRealCache.size >= WS_REAL_CACHE_LIMIT) wsRealCache.clear()
+    wsRealCache.set(wsLex, real)
+    return real
+  } catch {
+    return null
+  }
+}
+
+/**
  * 自有临时项的归属断言（FX-205.5）：**两侧都 canonical 化**后比较。
  *
  * 设备实测（0.14.0-preview-SN-1-13）：清单里记的是 canonical 形态
@@ -94,11 +179,11 @@ function canonicalPath(p: string): string {
  * /data/user/0/... —— 只做词法比较会把自有临时项判为越界：/clean 恒返回 removed:0
  * 且清单被清空（所有权静默丢失）。Android 上这两个前缀指向同一目录，必须一律
  * canonical 化后再判定（同 gotcha「前缀混用」）。
+ * @param wsReal - 工作区 canonical 路径（调用方每批求值一次传进来，不在逐条循环里重复 realpath）。
  * @param owned - 清单里的路径（任一等价形态）。
  * @returns 可删除的 canonical 路径；越界/豁免/工作区根自身返回 null。
  */
-function ownedInsideWorkspace(owned: string): string | null {
-  const wsReal = canonicalPath(tmpWorkspace())
+function ownedInsideWorkspace(wsReal: string, owned: string): string | null {
   const real = canonicalPath(resolve(owned))
   if (real === wsReal || !real.startsWith(wsReal + sep)) return null
   // 豁免必须按**路径前缀**判，不能只看 basename：清单里出现 `.sessions/<record>.json` 时
@@ -422,7 +507,26 @@ function publicItem(item: IncomingItem): PublicIncomingItem {
   }
 }
 
+/**
+ * 队列读取（目录被外部删除时自愈一次）。
+ *
+ * 缓存命中说明「本进程建出过这个目录」，但不保证外部没删它；readdir 遇 ENOENT 必须清键重建后
+ * **重试一次**——否则空队列会被误报成读失败（GET 500、状态工具回 ok:false），而且缓存永远是
+ * 过期结论。非 ENOENT 的失败不重试，原样抛给调用方。
+ * @returns 队列条目（不可读记录已被剔除）。
+ */
 function readItems(): IncomingItem[] {
+  try {
+    return readItemsFromDisk()
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') throw e
+    forgetQueueDir(queueDirPath())
+    return readItemsFromDisk()
+  }
+}
+
+/** 单次读盘（不做自愈；ENOENT 由 readItems 清键后重试）。 */
+function readItemsFromDisk(): IncomingItem[] {
   const dir = queueDir()
   return readdirSync(dir).filter((f) => f.endsWith('.json')).map<IncomingItem | null>((f) => {
     try {
@@ -502,14 +606,12 @@ function enqueueSession(path: string, origin: IncomingOrigin = DEFAULT_ORIGIN, t
     const previous = targetedOutcomes.get(target.requestId)
     if (previous !== undefined) return { ok: previous.targetSessionId === target.targetSessionId, message: previous.state }
   }
-  const dir = queueDir()
   const ws = resolve(tmpWorkspace())
   const real = safeResolveInside(ws, path)
   if (real === null || !existsSync(real)) {
     return { ok: false, message: '路径不在临时工作区内或不存在' }
   }
   const entryId = randomBytes(18).toString('base64url')
-  const sessionFile = join(dir, entryId + '.json')
   const bytes = statSync(real).size
   const item: IncomingItem = {
     id: entryId,
@@ -522,7 +624,7 @@ function enqueueSession(path: string, origin: IncomingOrigin = DEFAULT_ORIGIN, t
     name: basename(real),
     bytes,
   }
-  writeFileSync(sessionFile, JSON.stringify(item, null, 2))
+  writeQueueFile(entryId + '.json', JSON.stringify(item, null, 2))
   // 受理即记自有临时项（/clean 只删这些）。
   recordOwnedTemp(real)
   if (target !== undefined) targetedOutcomes.set(target.requestId, { targetSessionId: target.targetSessionId, state: 'pending' })
@@ -579,15 +681,19 @@ async function resolveIncomingWorkspace(): Promise<string | undefined> {
     ctxLogger?.('dsh-android-file-open')?.warn?.('workspaceRegistry.list 失败: ' + String((e as Error).message))
     return undefined
   }
-  const sameDir = entries.filter((w) => canonicalPath(w.path) === canonical)
-  const usable = sameDir.find((w) => w.path === canonicalPath(w.path))
+  // 每个条目的 canonical 形态只在遍历时解析一次，随条目一起带着走：旧写法在 filter / find /
+  // for 里各解析一次，同一条目每轮最多 3 次 realpath 系统调用（设备上这是每轮启动的高频路径）。
+  // 判定谓词与遍历顺序保持不变，因此结论与逐个重复解析完全等价。
+  const resolved = entries.map((entry) => ({ entry, real: canonicalPath(entry.path) }))
+  const sameDir = resolved.filter((r) => r.real === canonical)
+  const usable = sameDir.find((r) => r.entry.path === r.real)
   // 自愈（IX-TW-01：该标题下必须只剩 1 条且 path == realpath(path)）：删除同目录 + 标题匹配 +
   // sessionIds 为空 + **非 canonical** 的历史残留——即使已有可用条目也要删（设备实测常驻两条）。
-  for (const w of sameDir) {
-    if (usable !== undefined && w.id === usable.id) continue
+  for (const { entry: w, real } of sameDir) {
+    if (usable !== undefined && w.id === usable.entry.id) continue
     if (w.title !== INCOMING_TITLE) continue
     if ((w.sessionIds?.length ?? 0) > 0) continue
-    if (w.path === canonicalPath(w.path)) continue
+    if (w.path === real) continue
     if (!registry.delete) {
       ctxLogger?.('dsh-android-file-open')?.warn?.('workspaceRegistry 无 delete：非 canonical 残留无法自愈')
       break
@@ -599,7 +705,7 @@ async function resolveIncomingWorkspace(): Promise<string | undefined> {
       ctxLogger?.('dsh-android-file-open')?.warn?.('临时工作区残留删除失败: ' + String((e as Error).message))
     }
   }
-  if (usable !== undefined) return String(usable.id)
+  if (usable !== undefined) return String(usable.entry.id)
   try {
     const created = await registry.create(canonical, INCOMING_TITLE) as HostWorkspace | undefined
     return created?.id === undefined ? undefined : String(created.id)
@@ -671,15 +777,14 @@ async function ensureSessionsOnce(): Promise<number> {
         ctxLogger?.('dsh-android-file-open')?.warn?.('空白来件会话未得到 durable id，条目保留待重试')
         continue
       }
-      const file = join(queueDir(), item.file)
       const updated: IncomingItem = { ...item, sessionId, state: 'session-created' }
       delete updated.file
-      writeFileSync(file, JSON.stringify(updated, null, 2))
+      writeQueueFile(item.file, JSON.stringify(updated, null, 2))
       created++
     } catch (e) {
       // One record cannot block the rest; leave it received for the next normal engine boot retry.
       try {
-        writeFileSync(join(queueDir(), 'last-error.txt'), String((e as Error).stack ?? e))
+        writeQueueFile('last-error.txt', String((e as Error).stack ?? e))
       } catch { /* diagnostic write has no safe recovery path */ }
     }
   }
@@ -703,14 +808,10 @@ let ctxServices: { sessions?: HostSessions; workspaceRegistry?: HostWorkspaceReg
 function safeResolveInside(ws: string, path: string): string | null {
   const wsLex = resolve(ws)
   const pathLex = resolve(path)
-  let wsReal: string
-  try {
-    wsReal = realpathSync(wsLex)
-  } catch {
-    // Workspace creation is mandatory before queue consumption; if its canonical form cannot be
-    // resolved, preserve the lexical form and fail closed for any alias mismatch.
-    wsReal = wsLex
-  }
+  // 工作区侧的 canonical 形态按 ws 路径进程内缓存：ws 是每个请求都要比对同一棵树，
+  // 重复 realpath 纯属白烧系统调用；解析失败不缓存（见 workspaceRealOf），失败时沿用词法形态，
+  // 任何别名不一致照旧 fail closed。
+  const wsReal = workspaceRealOf(wsLex) ?? wsLex
   let pathReal: string
   try {
     // Follow symlinks before the containment check so a workspace link cannot escape it.
@@ -792,9 +893,11 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
   }
   ctx.effect(() => () => { draftLeases.clear() }, 'dsh-android-file-open: draft stream leases')
   for (const t of tools()) ctx.tools.register(t)
-  // F5.1：引擎初始化即确保临时工作区存在（PRD：干净安装后首次启动即存在）
+  // F5.1：引擎初始化即确保临时工作区存在（PRD：干净安装后首次启动即存在）。
+  // 上一步的 boot 清理必然先读了一次队列（readItems → queueDir），队列目录建出时工作区及其
+  // 父目录必然已存在——这里不再重复 mkdir；清理失败（目录不可建/不可读）时才走兜底。
   try {
-    mkdirSync(tmpWorkspace(), { recursive: true })
+    if (!queueDirEstablished()) mkdirSync(tmpWorkspace(), { recursive: true })
   } catch { /* 工作区由入队路径兜底创建 */ }
   // Register the temporary workspace before a browser creates its blank Session. The browser-side
   // Session controller is the only creator because its create() result is locally addressable.
@@ -1195,8 +1298,10 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         let removed = 0
         const kept: string[] = []
         try {
+          // 工作区 canonical 形态每批只求值一次：清单可能上百条，逐条 realpath 工作区纯属重复。
+          const wsReal = canonicalPath(tmpWorkspace())
           for (const owned of ownedTemps()) {
-            const target = ownedInsideWorkspace(owned)
+            const target = ownedInsideWorkspace(wsReal, owned)
             if (target === null) {
               kept.push(owned) // 越界/豁免：不属本工具可删面，记录保留
               continue
