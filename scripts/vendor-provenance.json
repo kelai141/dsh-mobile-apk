@@ -181,8 +181,8 @@
           "bytes": 23875
         },
         "lib/index.js": {
-          "sha256": "3e0f4521320d4457b5a80cac638dda7c80cbcc871fc19475536e6c12cbca63a6",
-          "bytes": 456984
+          "sha256": "288f521380553a95198e4a5bcd7077247b56ad302712bc069d160493db510280",
+          "bytes": 457438
         },
         "lib/model-defaults.js": {
           "sha256": "3f7b108cf74e9b558e5e8231286c3b0432c3b7915a53c48cf06ce2bf84e61cff",
@@ -201,8 +201,8 @@
           "bytes": 6512
         },
         "lib/providers/catalog-refresh.js": {
-          "sha256": "97397067149233af449a96a4e1433d3fe80a064b27643d9dddc6058ccc823526",
-          "bytes": 974
+          "sha256": "169595b0107b99669240c3841d525484664eccc5029201549eccf4362d37ae34",
+          "bytes": 1524
         },
         "lib/providers/catalog-store.js": {
           "sha256": "5252b3a41fc8bf029a830cc059b99e15f6d9a29bf190d417c5a5e47d12185388",
@@ -315,6 +315,10 @@
         "package.json": {
           "sha256": "c13b0919cf80d5fdb0435cf73e12bef4aad2ee5c97b0ba7f62a86b5a1eeb8138",
           "bytes": 1553
+        },
+        "test/catalog-refresh-defer.test.mjs": {
+          "sha256": "8a9cdcb6f9d880980a22169de0b2f85780f28ff7cc151a4bb31bd4b521f51790",
+          "bytes": 9667
         },
         "test/claude-keychain-bound-1589.test.mjs": {
           "sha256": "7944cce09e3d91ad0f13360447fbe5689e88798811aaf376f0cd0ecab575d8c6",
@@ -465,8 +469,8 @@
       "bytes": 23875
     },
     "lib/index.js": {
-      "sha256": "3e0f4521320d4457b5a80cac638dda7c80cbcc871fc19475536e6c12cbca63a6",
-      "bytes": 456984
+      "sha256": "288f521380553a95198e4a5bcd7077247b56ad302712bc069d160493db510280",
+      "bytes": 457438
     },
     "lib/model-defaults.js": {
       "sha256": "3f7b108cf74e9b558e5e8231286c3b0432c3b7915a53c48cf06ce2bf84e61cff",
@@ -485,8 +489,8 @@
       "bytes": 6512
     },
     "lib/providers/catalog-refresh.js": {
-      "sha256": "97397067149233af449a96a4e1433d3fe80a064b27643d9dddc6058ccc823526",
-      "bytes": 974
+      "sha256": "169595b0107b99669240c3841d525484664eccc5029201549eccf4362d37ae34",
+      "bytes": 1524
     },
     "lib/providers/catalog-store.js": {
       "sha256": "5252b3a41fc8bf029a830cc059b99e15f6d9a29bf190d417c5a5e47d12185388",
@@ -599,6 +603,10 @@
     "package.json": {
       "sha256": "c13b0919cf80d5fdb0435cf73e12bef4aad2ee5c97b0ba7f62a86b5a1eeb8138",
       "bytes": 1553
+    },
+    "test/catalog-refresh-defer.test.mjs": {
+      "sha256": "8a9cdcb6f9d880980a22169de0b2f85780f28ff7cc151a4bb31bd4b521f51790",
+      "bytes": 9667
     },
     "test/claude-keychain-bound-1589.test.mjs": {
       "sha256": "7944cce09e3d91ad0f13360447fbe5689e88798811aaf376f0cd0ecab575d8c6",
