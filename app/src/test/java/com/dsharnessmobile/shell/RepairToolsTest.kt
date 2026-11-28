@@ -1,7 +1,13 @@
 package com.dsharnessmobile.shell
 
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermissions
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -280,7 +286,8 @@ class RepairToolsTest {
   @Test
   fun toolDefinitionsHaveStrictArgumentsAndARealStatusProbe() {
     val defs = RepairToolSchemas.definitions()
-    assertEquals(listOf("read", "write", "list", "bash", "engine_status", "restart_engine", "refresh_runtime"),
+    assertEquals(listOf("read", "write", "list", "bash", "engine_status", "restart_engine", "refresh_runtime",
+      "edit", "preflight"),
       (0 until defs.length()).map { defs.getJSONObject(it).getString("name") })
     for (i in 0 until defs.length()) {
       val parameters = defs.getJSONObject(i).getJSONObject("parameters")
@@ -288,6 +295,12 @@ class RepairToolsTest {
     }
     val read = defs.getJSONObject(0).getJSONObject("parameters")
     assertTrue((0 until read.getJSONArray("required").length()).any { read.getJSONArray("required").getString(it) == "path" })
+    assertEquals("boolean", read.getJSONObject("properties").getJSONObject("tail").getString("type"))
+    val edit = defs.getJSONObject(7).getJSONObject("parameters").getJSONArray("required")
+    assertEquals(listOf("path", "oldText", "newText"), (0 until edit.length()).map(edit::getString))
+    val preflight = defs.getJSONObject(8).getJSONObject("parameters")
+    assertEquals(0, preflight.getJSONArray("required").length())
+    assertEquals(0, preflight.getJSONObject("properties").length())
   }
 
   @Test
@@ -295,6 +308,198 @@ class RepairToolsTest {
     assertTrue(RepairToolsGuard.credentialLike("password=hunter2") != null)
     assertTrue(RepairToolsGuard.credentialLike("Authorization: Bearer x") != null)
     assertTrue(RepairToolsGuard.credentialLike("note: harmless") == null)
+  }
+
+  @Test
+  fun tailAlignsUtf8AndLinesAndReportsBytesSkipped() {
+    val file = File(runtime, "tail.log").apply { writeText("前置你好\r\n当前行\n最后") }
+    val expected = "当前行\n最后"
+    val expectedBytes = expected.toByteArray().size
+    val result = fs.read(file.absolutePath, limit = expectedBytes + 4, tail = true)
+    assertEquals(expected, result.getString("content"))
+    assertEquals((file.length() - expectedBytes), result.getLong("offset"))
+    assertEquals(result.getLong("offset"), result.getLong("omittedBeforeBytes"))
+    assertEquals(expectedBytes, result.getInt("readBytes"))
+    assertTrue(result.getBoolean("truncated"))
+    assertTrue(result.isNull("nextOffset"))
+    assertEquals(expected, fs.read(file.absolutePath, limit = expectedBytes, tail = true).getString("content"))
+    assertEquals("", fs.read(file.absolutePath, limit = 2, tail = true).getString("content"))
+  }
+
+  @Test
+  fun tailFitsWholeFilesAndRejectsEvenAnExplicitZeroOffset() {
+    val file = File(runtime, "tail.log").apply { writeText("完整\n") }
+    val tail = fs.read(file.absolutePath, tail = true)
+    assertEquals("完整\n", tail.getString("content"))
+    assertEquals(0L, tail.getLong("omittedBeforeBytes"))
+    assertFalse(tail.getBoolean("truncated"))
+    assertEquals("bad-arguments", failure { fs.read(file.absolutePath, 0L, tail = true) }.getString("error"))
+    assertEquals("bad-arguments", failure { readTailArgument(JSONObject().put("tail", "true")) }.getString("error"))
+    assertFalse(readTailArgument(JSONObject()))
+    assertTrue(readTailArgument(JSONObject().put("tail", true)))
+    file.writeText("x".repeat(20000))
+    assertEquals(16384, fs.read(file.absolutePath).getInt("readBytes"))
+    assertEquals(20000, fs.read(file.absolutePath, limit = 30000).getInt("readBytes"))
+  }
+
+  @Test
+  fun editIsLiteralBacksUpOriginalBytesAndPreservesModeWhereSupported() {
+    val original = "apiKey: OFFICE_KEY_REF\r\npassword=hunter2\r\n[old].\r\n"
+    val file = File(runtime, "settings.yaml").apply { writeText(original) }
+    val posix = Files.getFileStore(file.toPath()).supportsFileAttributeView("posix")
+    val permissions = PosixFilePermissions.fromString("rw-------")
+    if (posix) Files.setPosixFilePermissions(file.toPath(), permissions)
+    val changed = fs.edit(file.absolutePath, "[old].", "新值")
+    assertTrue(changed.getBoolean("changed"))
+    assertTrue(changed.getBoolean("backedUp"))
+    assertEquals(original, File(backups, changed.getString("backup")).readText())
+    assertEquals(original.replace("[old].", "新值"), file.readText())
+    if (posix) {
+      assertTrue(changed.getBoolean("modePreserved"))
+      assertEquals(permissions, Files.getPosixFilePermissions(file.toPath()))
+    }
+    assertTrue(fs.edit(file.absolutePath, "新值", "").getBoolean("changed"))
+    assertFalse(file.readText().contains("新值"))
+  }
+
+  @Test
+  fun editRejectsMissingAmbiguousAndInvalidInputsWithoutCreatingBackups() {
+    val file = File(runtime, "edit.txt").apply { writeText("aaaa\nexact\n") }
+    assertEquals("edit-ambiguous", failure { fs.edit(file.absolutePath, "aaa", "x") }.getString("error"))
+    assertEquals("edit-not-found", failure { fs.edit(file.absolutePath, "missing", "x") }.getString("error"))
+    assertEquals("bad-arguments", failure { fs.edit(file.absolutePath, "", "") }.getString("error"))
+    assertEquals("bad-arguments", failure { editTextArgument(JSONObject(), "newText") }.getString("error"))
+    assertEquals("", editTextArgument(JSONObject().put("newText", ""), "newText"))
+    assertEquals("not-found", failure { fs.edit("missing.txt", "x", "y") }.getString("error"))
+    File(runtime, "directory").mkdir()
+    assertEquals("is-directory", failure { fs.edit("directory", "x", "y") }.getString("error"))
+    val unchanged = fs.edit(file.absolutePath, "exact", "exact")
+    assertFalse(unchanged.getBoolean("changed"))
+    assertFalse(unchanged.getBoolean("backedUp"))
+    assertEquals("aaaa\nexact\n", file.readText())
+    file.writeBytes(byteArrayOf(0xc3.toByte(), 0x28))
+    assertEquals("invalid-utf8", failure { fs.edit(file.absolutePath, "x", "y") }.getString("error"))
+    assertEquals(0, backups.listFiles()!!.size)
+  }
+
+  @Test
+  fun editSharesProtectedAndReadOnlyScopesAndRejectsNewMaterialInContext() {
+    val file = File(runtime, "edit.yaml").apply { writeText("password: true\napiKey: OFFICE_KEY_REF\nnote=xx-key\n") }
+    val protected = File(runtime, ".credentials.yaml").apply { writeText("visible") }
+    val backup = File(backups, "existing.txt").apply { writeText("visible") }
+    val pub = File(publicRoot, "diagnostics/boot.log").apply { parentFile.mkdirs(); writeText("visible") }
+    assertEquals("protected-file", failure { fs.edit(protected.absolutePath, "visible", "other") }.getString("error"))
+    assertEquals("backup-reserved", failure { fs.edit(backup.absolutePath, "visible", "other") }.getString("error"))
+    assertEquals("read-only-scope", failure { fs.edit(pub.absolutePath, "visible", "other") }.getString("error"))
+    assertEquals("protected-file", failure { fs.edit(file.absolutePath, "true", "hunter2") }.getString("error"))
+    assertEquals("protected-file", failure { fs.edit(file.absolutePath, "xx-", "sk-") }.getString("error"))
+    assertEquals("protected-file", failure {
+      fs.edit(file.absolutePath, "OFFICE_KEY_REF", "'not-a-reference'")
+    }.getString("error"))
+    assertEquals("password: true\napiKey: OFFICE_KEY_REF\nnote=xx-key\n", file.readText())
+    assertTrue(fs.edit(file.absolutePath, "OFFICE_KEY_REF", "DEEPSEEK_API_KEY").getBoolean("changed"))
+  }
+
+  @Test
+  fun concurrentEditsFromTwoToolInstancesDoNotOverwriteOneAnother() {
+    val file = File(runtime, "shared.txt").apply { writeText("left=one\nright=two\n") }
+    val begin = CountDownLatch(1)
+    val workers = Executors.newFixedThreadPool(2)
+    try {
+      val left = workers.submit<JSONObject> {
+        begin.await()
+        fs.edit("shared.txt", "left=one", "left=updated")
+      }
+      val right = workers.submit<JSONObject> {
+        begin.await()
+        aliasFs.edit("shared.txt", "right=two", "right=updated")
+      }
+      begin.countDown()
+      val saved = listOf(left, right).map { task ->
+        File(backups, task.get(10, TimeUnit.SECONDS).getString("backup")).readText()
+      }
+      assertEquals("left=updated\nright=updated\n", file.readText())
+      assertTrue(saved.contains("left=one\nright=two\n"))
+      assertTrue(saved.any { it.count { ch -> ch == '\n' } == 2 && it.contains("updated") })
+    } finally {
+      workers.shutdownNow()
+    }
+  }
+
+  @Test
+  fun guardAllowsReferencesAndEmptyPlaceholdersAndRefusesActualMaterial() {
+    for (safe in listOf(
+      "apiKey: DEEPSEEK_API_KEY", "api_key='OFFICE_KEY_REF'", "password: true",
+      "token: false", "clientSecret: null", "token: \"\"", "apiKey=''",
+      "credentials:\n  provider: office\n  apiKey: OFFICE_KEY_REF\n",
+    )) assertEquals(safe, null, RepairToolsGuard.credentialLike(safe))
+    for (unsafe in listOf(
+      "note: sk-test", "note: ghp_example", "note: AIzaFakeKey", "note: xai-example",
+      "-----BEGIN OPENSSH PRIVATE KEY-----", "authorization: bearer sample", "Cookie: session=demo",
+      "password=hunter2", "apiKey: \"space separated secret\"", "password:\n  hunter2",
+      "apiKey: ''hunter2", "credentials: raw-secret",
+    )) assertTrue(unsafe, RepairToolsGuard.credentialLike(unsafe) != null)
+  }
+
+  @Test
+  fun processHeadTailPreservesFullUtf8AndDropsTheExactMiddleByteCount() {
+    val whole = "一尾\n"
+    val full = ProcIo.readBoundedHeadTailMillis(outputProcess(whole), 100, 2, 5)
+    assertEquals(whole, full.text)
+    assertFalse(full.truncated)
+    val body = "HEAD" + "x".repeat(30_017) + "last-output"
+    val clipped = ProcIo.readBoundedHeadTailMillis(outputProcess(body), 100, 4, 11)
+    assertEquals("HEAD\n[io-truncated: omitted 30017 bytes]\nlast-output", clipped.text)
+    assertTrue(clipped.truncated)
+    assertTrue(clipped.complete)
+    assertEquals(0, clipped.exitCode)
+  }
+
+  @Test
+  fun processHeadTailHandlesZeroWindowsAndTimeout() {
+    val tailOnly = ProcIo.readBoundedHeadTailMillis(outputProcess("012345"), 100, 0, 3)
+    assertEquals("\n[io-truncated: omitted 3 bytes]\n345", tailOnly.text)
+    val headOnly = ProcIo.readBoundedHeadTailMillis(outputProcess("012345"), 100, 3, 0)
+    assertEquals("012\n[io-truncated: omitted 3 bytes]\n", headOnly.text)
+    val timeout = ProcIo.readBoundedHeadTailMillis(outputProcess("partial", exits = false), 0, 0, 0)
+    assertTrue(timeout.exitTimedOut)
+    assertEquals(null, timeout.exitCode)
+    assertTrue(timeout.truncated)
+  }
+
+  @Test
+  fun processHeadTailDrainsARealPipeBeyondItsCapacity() {
+    val source = File(base, "PipeWriter.java").apply {
+      writeText("""
+        class PipeWriter {
+          public static void main(String[] args) {
+            System.out.print("HEAD");
+            System.out.print("x".repeat(262144));
+            System.out.print("TAIL");
+          }
+        }
+      """.trimIndent())
+    }
+    val executable = if (File.separatorChar == '\\') "java.exe" else "java"
+    val java = File(System.getProperty("java.home"), "bin/$executable")
+    val child = ProcessBuilder(java.absolutePath, source.absolutePath).redirectErrorStream(true).start()
+    val result = ProcIo.readBoundedHeadTailMillis(child, 15_000, 4, 4)
+    assertTrue(result.complete)
+    assertEquals(0, result.exitCode)
+    assertEquals("HEAD\n[io-truncated: omitted 262144 bytes]\nTAIL", result.text)
+  }
+
+  private fun outputProcess(text: String, exits: Boolean = true): Process = object : Process() {
+    private val input = ByteArrayInputStream(text.toByteArray())
+    private val error = ByteArrayInputStream(byteArrayOf())
+    private val output = ByteArrayOutputStream()
+    override fun getInputStream() = input
+    override fun getErrorStream() = error
+    override fun getOutputStream() = output
+    override fun waitFor() = 0
+    override fun waitFor(timeout: Long, unit: TimeUnit) = exits
+    override fun exitValue() = 0
+    override fun destroy() = Unit
   }
 
   private fun failure(block: () -> Unit): JSONObject {

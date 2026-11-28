@@ -174,6 +174,7 @@ class RepairToolCallParserTest {
 
   @Test
   fun incompleteNativeToolBatchIsClosedWithoutRewritingAssistantText() {
+    val resultBytes = "{ \"内容\" : \"已完成\\nsecond line\" }\n"
     val history = JSONArray()
       .put(JSONObject().put("role", "system").put("content", "system"))
       .put(JSONObject().put("role", "user").put("content", "fix it"))
@@ -183,17 +184,21 @@ class RepairToolCallParserTest {
             .put("function", JSONObject().put("name", "read").put("arguments", "{}")))
           .put(JSONObject().put("id", "call-2").put("type", "function")
             .put("function", JSONObject().put("name", "list").put("arguments", "{}")))))
-      .put(JSONObject().put("role", "tool").put("tool_call_id", "call-1").put("content", "content"))
+      .put(JSONObject().put("role", "tool").put("tool_call_id", "call-1").put("content", resultBytes))
 
+    val original = history.toString()
     val outbound = RepairToolCallParser.outboundHistory(history)
 
-    assertEquals(4, outbound.length())
+    assertEquals(5, outbound.length())
     assertEquals("reading", outbound.getJSONObject(2).getString("content"))
     assertEquals(2, outbound.getJSONObject(2).getJSONArray("tool_calls").length())
-    assertEquals("call-2", outbound.getJSONObject(3).getString("tool_call_id"))
+    assertEquals("call-1", outbound.getJSONObject(3).getString("tool_call_id"))
+    assertEquals(resultBytes, outbound.getJSONObject(3).getString("content"))
+    assertEquals("call-2", outbound.getJSONObject(4).getString("tool_call_id"))
     assertEquals(RepairToolCallParser.INTERRUPTED_TOOL_RESULT,
-      outbound.getJSONObject(3).getString("content"))
+      outbound.getJSONObject(4).getString("content"))
     assertEquals("reading", history.getJSONObject(2).getString("content"))
+    assertEquals(original, history.toString())
   }
 
   @Test

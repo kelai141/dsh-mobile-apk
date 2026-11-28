@@ -172,7 +172,7 @@ sequenceDiagram
 
 | ID | 名称 | 一句话职责 | 入口/触发 | 阶段 | 依赖 | 被谁拉起 | 关键文件 | 耦合 |
 |---|---|---|---|---|---|---|---|---|
-| K01 | 启动与引导面 | 点开 App 到引擎页面可见的进程入口、引导页与 WebView 宿主 | LAUNCHER 图标、VIEW/SEND 来件（`ACTION_UPDATE` 的 adb 触发入口已随 #682 移除） | 引导与启动 | 引擎进程与快照面、鉴权探活、诊断落盘 | 系统启动器与分享面板、BootReceiver、悬浮球跳转 | MainActivity.kt,EngineStartFlow.kt,GuidePageRenderer.kt,ForegroundPageRecoveryPolicy.kt,JsConfirmChromeClient.kt | 高 |
+| K01 | 启动与引导面 | 点开 App 到引擎页面可见的进程入口、引导页、WebView 宿主与启动失败修复助手 | LAUNCHER 图标、VIEW/SEND 来件（`ACTION_UPDATE` 的 adb 触发入口已随 #682 移除） | 引导与启动 | 引擎进程与快照面、鉴权探活、诊断落盘 | 系统启动器与分享面板、BootReceiver、悬浮球跳转 | MainActivity.kt,EngineStartFlow.kt,GuidePageRenderer.kt,ForegroundPageRecoveryPolicy.kt,JsConfirmChromeClient.kt,RepairActivity.kt,RepairPreflight.kt,RepairLoopGuard.kt | 高 |
 | K02 | 引擎生命周期与保活 | 起 node 引擎、Activity独立观察启动准备窗、5s 探活、看门狗重启熔断与日志落盘 | EngineStartFlow.start及生命周期结束后排队启动前台服务、EngineService先前台提升后初始化及5s tick | 引导与启动 | K01,K03 | MainActivity、BootReceiver、EngineStartFlow | EngineManager.kt,EngineService.kt,WatchdogV2.kt,LogCollector.kt | 高 |
 | K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼在线更新与清单合并 | 启动流判指纹不新鲜 / 引导页检查更新 / WebView 下载 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,SnapshotRefreshPolicy.kt,PublicRepoProvision.kt,UpdateManager.kt,PluginMounts.kt,SnapshotUserData.kt,SnapshotFingerprintPolicy.kt,ProfilePackageManifest.kt | 高 |
 | K04 | 页面桥与原生控制入口 | 页面 JS 桥、引擎鉴权与壳侧原生宿主生命周期 | 页面调 androidBridge；EngineService 起 NativeControlRuntime | 稳态控制 | 引导与启动（EngineService/MainActivity）、K05 无障碍、K06 特权执行、快照与更新（UndoGate） | MainActivity 装桥；EngineService.onCreate 起原生宿主；看门狗 tick 调 UndoGate | app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt,app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt,app/src/main/java/com/dsharnessmobile/shell/nativecontrol/NativeControlRuntime.kt,app/src/main/java/com/dsharnessmobile/shell/nativecontrol/NativeControlHost.kt | 高 |
@@ -740,6 +740,8 @@ Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text throug
 
 原生启动页的品牌、状态卡、底部操作区与管理宿主均跟随当前视口宽度，系统边距只由 `MainActivity` 的 insets 入口施加。`GuideChrome` 不再在 layout 回调中把它们压回固定手机列宽；实际测量与连续旋转回归由 `GuideViewportDeviceTest` 验证（#1320）。
 
+启动页失败相位的底栏是**同行裂开**：主按钮与「修复助手」共享 `primaryRow`（各占一半，原 `repairRow` 已删除），助手按钮使用主按钮样式，仅在 `GuidePhase.Error` 显示；隐藏时清空 `marginStart`，主按钮补满到齿轮。安全模式入口从底栏移入错误卡片底部（`safeModeButton` 挂在 `card` 末行），仅在错误相位且启动插件失败证据成立时显示。两处可见性都由 `GuidePageRenderer` 按相位设置，不再切换父容器可见性。
+
 开屏视频的几何链：`SplashOverlay.applyCover` 在媒体尺寸就绪与纹理尺寸变化时调用 `SplashPolicy.coverTransform`。输入矩形是 TextureView 的 View 尺寸，播放器已将视频映射到该矩形；变换按视频宽高比反算两个轴的 View 缩放，再居中裁切。不得直接把视频像素缩放率作为两个 View 轴的缩放率，否则高分辨率视频会露底，平板会变形（#1320）。
 
 **WebView 冻结自愈状态机（#1355 / #1513）**：置位（判定冻结 -> reload）与唯一复位（页面应答 -> onAck）收在 `FreezeRecoveryGate` 里，`onPageLoaded` 只重置计时**不复位**闸门；判据用可注入时钟直接跑状态转换，不再对源码文本切片——`app/src/main/java/com/dsharnessmobile/shell/FreezeRecoveryGate.kt:76#expect=fun%20tick(now%3A%20Long)%3A%20Action%20%7B`
@@ -802,10 +804,23 @@ scripts/verify-state-sync-cdp.test.mjs
 app/src/main/java/com/dsharnessmobile/shell/MainWebImeLayout.kt
 -->
 
+<!-- COVERAGE
+# 原生修复助手（K01）：预检与循环护栏是两块独立的纯 JVM 逻辑，前者负责只读采集与
+# 去噪、后者负责 append-only 字节预算与去重熔断；app/src 用精确清单而非 glob，
+# 故显式登记。新增单测已由 glob:app/src/test/java/com/dsharnessmobile/shell/*.kt 覆盖。
+app/src/main/java/com/dsharnessmobile/shell/RepairPreflight.kt
+app/src/main/java/com/dsharnessmobile/shell/RepairLoopGuard.kt
+-->
+
 原生插件页先探测引擎：OFFLINE 正常引导 → 用户显式启动（复用主操作）→ STARTING 轮询 → ONLINE 读库存；FAILED 提示恢复，离页取消轮询。控制台仍由独立 ConsoleActivity 承载原 bash 会话。
 
 原生管理导航：`GuidePageRenderer` 建 `GuideChrome` 后连接 `GuideManagementController`。齿轮点击与系统返回共用目的页；动画只从当前进度前往 0/240°，不累计角度。三级插件页先消费详情返回，再回管理中心。异步引擎探活仍运行，管理页打开时 `showWeb()` 不抢走当前页面。存储页只展示路径、容量和显式授权入口，不删除用户数据。
 
+原生修复助手（引擎连续启动失败后的离线自救面，K01）：`RepairActivity` 不依赖 Node、WebView、插件或快照。模型配置的唯一解析点是后台 `RepairModelConfig.loadDetailed(...)`：把「根目录缺失」「来源无效」「有路由但缺凭据」分开上报，同目录 `.yaml` 损坏时回退健康的 `.yml` 并使两份来源状态都可核对；`RepairYaml` 读取 BOM、`---`/`...` 文档标记、行内 flow 集合 `{}`/`[]`、indentless block sequence 与 `|2-`/`>2+` 块头，只保留节点种类，遇到不支持的写法拒绝而不是猜。每轮开始前由 `RepairPreflight.collectAndFormat(...)` 生成只读预检：汇总快照事务、运行树、引擎拒绝/退出码、模型来源与 `boot-fail.log`、`boot-diag.log`、`boot-segments.log`、`undo-gate.log` 的有界尾部（32 KiB、最多 200 行），按当前 boot 世代与 `page-ready`、`deferred`、401、`didCrash=false` 等证据去噪，输出 `schema=1` 的脱敏 JSON 且整份不超过 4 KiB（超出时 `budgetTruncated=true`），同一逻辑以无参 `preflight` 工具暴露给模型。
+
+工具循环由 `RepairLoopGuard.LoopTracker` 约束：24 步、60 次调用、累计 128 KiB 输出；单条结果按 UTF-8 与转义后字节做结构化裁剪到 8 KiB（优先保留 `ok/error/code/path/nextOffset` 等字段），调用签名按规范化 JSON 去重（写类同状态一次、读类两次），连续 3 个无进展或全为稳定错误码的批次分别熔断。预算只累计新追加的结果，不重算历史。`RepairModelClient` 对 `chat/completions`、`openai-responses`、`anthropic-messages` 统一请求 SSE 并解析三套事件；同一请求按 `Content-Type` 与有界预读区分 SSE/JSON，网关忽略 `stream:true` 时在当前请求内回退解析 JSON、不重发。Anthropic 回放把同一轮并行的多个 `tool` 结果合并为一条 user 消息的多个 `tool_result` 块，并原样保存 `_anthropic_blocks`（含 `thinking.signature`、`redacted_thinking` 与原始块序）；旧会话没有原块时才按 `reasoning_content` 回退。出站历史严格 append-only：既有助手正文、推理、工具结果与系统提示不重写，只为未返回的调用追加取消结果，以保持提供方 Prompt Cache 前缀稳定。
+
+`RepairActivity` 的运行中插话为形态 A：运行中且输入框有非空白内容时，圆形按钮切换为「插话发送」并把消息排入队列（气泡标「已排队，下轮发送」），在下一个工具批次结束后的安全点送入；运行中且输入为空时是停止。停止、销毁或请求失败会取消未发送队列并如实标记「已取消（未发送）」。流式回答与思考卡按 60ms 合帧增量刷新，最终落盘仍以完整响应为准。
 
 - **顺序**：MainActivity恢复saved/persistent userClosed、构造主WebView/guide/native holders并装精确可信桥；后台startup先共享RootOwnershipJobs，pending延后不读事务；已结算才恢复事务→探活→strict SHA/fresh→必要refresh→spawn→90s轮询→WebUI。
 - **CAS所有权**：StartupFlowOwnership的一份CAS状态绑定running/token/generation/destroyed；重复begin不推进世代，旧finally只finish旧token；close/destroy只中断caller，不取消共享root worker。阻塞维护/恢复后及每个UI/引擎后续效果均查generation。ownership pending六次2/4/8/16/30/30秒与普通engine失败5/10秒两次重试分开。
@@ -834,7 +849,7 @@ app/src/main/java/com/dsharnessmobile/shell/MainWebImeLayout.kt
 - **0.14.6 增量：APK 更新路径与不变量（三条主项 + 两个同族派生项）**（可判据，逐条可查）：
   - **唯一状态机与推进者**：`ApkUpdateController`（`app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:228`，Activity 作用域）；
     八态 `idle/checking/up-to-date/available/downloading/installing/need-permission/failed`（`:197-205`）。
-    引导页按钮（`app/src/main/java/com/dsharnessmobile/shell/GuidePageRenderer.kt:788#expect=when%20%28presentation%29%20%7B` 的 `onButtonPressed`）与设置页那一行经 `observe`（`:344`）**读同一份状态**。
+    引导页按钮（`app/src/main/java/com/dsharnessmobile/shell/GuidePageRenderer.kt:870#expect=private%20fun%20onCheckButton()%20%7B`，`onCheckButton` 只发检查）与设置页那一行经 `observe`（`:365`）**读同一份状态**。
     唯一桥入口 `AndroidBridge.apkUpdate(action=status|check|install)`（`app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt@500dc7a1`）。
   - **不变量 1（不占用主按钮与相位）**：APK 更新只改次级提示/次级按钮，APK 路径上 `applyGuidePhase` / `primaryButton` 引用数 = 0；
     「更新中」不再出现在 APK 路径。反例锚点 `UpdateCheckerTest.kt:393`（`updateNeverHijacksPhaseOrPrimaryButton`）。
@@ -1014,7 +1029,7 @@ app/src/main/java/com/dsharnessmobile/shell/MainWebImeLayout.kt
 
 漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:27-34` 说 OverlayService.kt 772 / OverlayHalo.kt 164 / OverlayPanel.kt 1217 / OverlayReport.kt 325 行，源码实测 `OverlayService.kt` 785 / `OverlayHalo.kt` 168 / `OverlayPanel.kt` 1222 / `OverlayReport.kt` 384（差 59 行正是块H 的 CompletionNotice 段）；**0.14.9-preview 块J 已把该表刷新到 923 / 224 / 1527 / 72 并新增 `OverlayRecall.kt` 198 行**（OverlayReport 行未动，仍按上面的实测口径）——表侧漂移随之失效，本条保留作为块H 的证据。
 
-漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:29` 与 `dsh-mobile-apk/docs/AGENTS/modules.md:78#expect=%7C%20%5BOverlayService.kt%5D(%3Capp%2Fsrc%2Fmain%2Fjava%2Fcom%2Fdsharnessmobile` 说「应答 POST /api/respond 全信封，approval value={sessionId,approvalId,outcome}；question 取消发 ok:false error cancelled」，源码 `OverlayPanel.kt:831` 是 POST /api/$events/result、payload={args:{clientId,eventId,outcome}}，审批取值 allowed-once/rejected（`OverlayPanel.kt:614-617`）、提问跳过是 kind=rejected 加 error{name:UserQuestionError,code:cancelled}（`OverlayPanel.kt:917-923`）；同族过期注释仍在源码里：`OverlayPanel.kt:24`、`OverlayPanel.kt:487`、`OverlayLiveFeed.kt:171#expect=%2F%2F%200.13.8%20G1-2%EF%BC%88%E7%BC%BA%E9%99%B7%20B-2%EF%BC%89%EF%BC%9Aturn_end%20%E5%90%8C%E6%97%B6%E6%B8%85%E7%90%86%E8%AF%A5%E4%BC%9A%E8%AF%9D%E7%9A%84%E5%BE%85%E7%AD%94%2F%E5%BE%85%E5%AE%A1%E6%89%B9`
+漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:29` 与 `dsh-mobile-apk/docs/AGENTS/modules.md:79#expect=%7C%20%5BOverlayService.kt%5D(%3Capp%2Fsrc%2Fmain%2Fjava%2Fcom%2Fdsharnessmobile` 说「应答 POST /api/respond 全信封，approval value={sessionId,approvalId,outcome}；question 取消发 ok:false error cancelled」，源码 `OverlayPanel.kt:831` 是 POST /api/$events/result、payload={args:{clientId,eventId,outcome}}，审批取值 allowed-once/rejected（`OverlayPanel.kt:614-617`）、提问跳过是 kind=rejected 加 error{name:UserQuestionError,code:cancelled}（`OverlayPanel.kt:917-923`）；同族过期注释仍在源码里：`OverlayPanel.kt:24`、`OverlayPanel.kt:487`、`OverlayLiveFeed.kt:171#expect=%2F%2F%200.13.8%20G1-2%EF%BC%88%E7%BC%BA%E9%99%B7%20B-2%EF%BC%89%EF%BC%9Aturn_end%20%E5%90%8C%E6%97%B6%E6%B8%85%E7%90%86%E8%AF%A5%E4%BC%9A%E8%AF%9D%E7%9A%84%E5%BE%85%E7%AD%94%2F%E5%BE%85%E5%AE%A1%E6%89%B9`
 
 漂移：`dsh-mobile/docs/0.14.1-preview-OVERLAY-COMPLETION-CARD.md` 的 1.1 表说 OverlayService.kt 673 / OverlayPanel.kt 1046 / OverlayLiveFeed.kt 172 / OverlayHalo.kt 91 / OverlayTheme.kt 33 行，源码实测 785 / 1222 / 196 / 168 / 38；该详档被源码注释当准绳引用（`OverlayService.kt:108#expect=internal%20var%20pendingKind%20%3D%20%22%22%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%2F%2F%20%E5%BE%85%E7%94%A8%E6%88%B7%E5%A4%84%E7%90%86%E6%80%81%EF%BC%9Aquestion%20%2F%20approval%20%2F%20%E7%A9%BA%EF%BC%88updateBallOnly%20%E6%B4%BE%E7%94%9F%EF%BC%89`、`OverlayReport.kt:252`）
 

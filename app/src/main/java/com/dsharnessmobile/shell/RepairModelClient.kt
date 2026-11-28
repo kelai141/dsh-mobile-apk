@@ -1,13 +1,29 @@
 package com.dsharnessmobile.shell
 
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.PushbackInputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
+import java.util.TreeMap
 import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONArray
 import org.json.JSONObject
+
+/**
+ * Streaming callbacks for one model request.
+ *
+ * The listener is optional: when it is null the client keeps the historical
+ * single JSON request and response. When it is present every protocol asks the
+ * server for SSE, but a gateway that ignores `stream: true` and answers with
+ * plain JSON is consumed by the same request via the JSON fallback path.
+ */
+internal interface RepairStreamListener {
+  fun onReasoningDelta(delta: String) {}
+  fun onTextDelta(delta: String) {}
+}
 
 /** One bounded model request. It never opens a browser, Node process, or engine dependency. */
 internal class RepairModelClient {
@@ -29,22 +45,42 @@ internal class RepairModelClient {
    * 所以预算取一个读超时的量级：第一次已经耗掉超过它就不再重试，杜绝 2×180s。
    */
   const val RETRY_TOTAL_BUDGET_MS = 180_000L
+
+    /** 单次响应（普通 JSON 或整条 SSE 流）的字节上限。 */
+    private const val MAX_RESPONSE_BYTES = 2_000_000
+
+    private val REASONING_FIELDS = listOf("reasoning_content", "reasoning", "reasoning_text")
   }
 
   private val active = AtomicReference<HttpURLConnection?>(null)
+
+  /**
+   * 请求级取消标记。cancel() 之后读循环、重试判定与所有回调都看它；
+   * 回调与 cancel() 共用 callbackLock，保证 cancel() 返回后不会再出现晚到回调。
+   */
+  @Volatile private var cancelled = false
+
+  private val callbackLock = Any()
+
   @Volatile internal var lastOutboundDigest: String = ""
     private set
   @Volatile internal var lastOutboundMessages: Int = 0
     private set
-  fun cancel() { active.getAndSet(null)?.disconnect() }
+
+  fun cancel() {
+    synchronized(callbackLock) { cancelled = true }
+    active.getAndSet(null)?.disconnect()
+  }
 
   fun complete(
     connection: RepairModelConnection,
     messages: JSONArray,
     tools: JSONArray,
     reasoningEffort: String? = connection.defaultReasoningEffort,
+    streamListener: RepairStreamListener? = null,
   ): JSONObject {
     require(connection.apiKey.isNotBlank()) { "模型凭据不在内存中；请重新打开修复助手" }
+    if (cancelled) throw InterruptedException()
     val endpoint = endpointFor(connection)
     val effort = reasoningEffort?.takeIf { id -> connection.reasoningEfforts.any { it.id == id } }
     val projected = RepairToolCallParser.outboundHistory(messages)
@@ -62,12 +98,16 @@ internal class RepairModelClient {
     lastOutboundDigest = MessageDigest.getInstance("SHA-256").digest(outboundBytes)
       .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
     lastOutboundMessages = outbound.length()
+    val streaming = streamListener != null
     val body = when (connection.api) {
-      "anthropic-messages" -> anthropicBody(connection, outbound, tools, effort)
-      "openai-responses" -> responsesBody(connection, outbound, tools, effort)
-      else -> completionsBody(connection, outbound, tools, effort)
+      "anthropic-messages" -> anthropicBody(connection, outbound, tools, effort, streaming)
+      "openai-responses" -> responsesBody(connection, outbound, tools, effort, streaming)
+      else -> completionsBody(connection, outbound, tools, effort, streaming)
     }
-    val response = postWithOneTransientRetry(connection, endpoint, body)
+    val state = AttemptState()
+    val response = postWithRetry(
+      connection, endpoint, body, RETRY_TOTAL_BUDGET_MS, { 0L }, streamListener, state,
+    )
     gatewayErrorOf(response, connection.apiKey)?.let { throw RepairModelFailure(it) }
     val parsed = JSONObject(response)
     val result = when (connection.api) {
@@ -75,7 +115,18 @@ internal class RepairModelClient {
       "openai-responses" -> responsesResult(parsed)
       else -> completionsResult(parsed)
     }
-    return RepairToolCallParser.normalize(result)
+    val normalized = RepairToolCallParser.normalize(result)
+    if (streamListener != null) {
+      if (!state.emittedReasoning) {
+        val reasoning = RepairToolCallParser.reasoningText(normalized)
+        if (reasoning.isNotBlank()) emitFinalReasoning(streamListener, state, reasoning)
+      }
+      if (!state.emittedText) {
+        val text = contentText(normalized)
+        if (text.isNotBlank()) emitFinalText(streamListener, state, text)
+      }
+    }
+    return normalized
   }
 
   internal fun endpointFor(connection: RepairModelConnection): String {
@@ -169,31 +220,63 @@ internal class RepairModelClient {
     return (scheme + rest).trimEnd('/')
   }
 
-
-  private fun completionsBody(
+  internal fun completionsBody(
     connection: RepairModelConnection,
     messages: JSONArray,
     tools: JSONArray,
     effort: String?,
+    stream: Boolean = false,
   ): String {
     // OpenAI-compatible chat endpoints require every tool to be wrapped in a
     // `{type:function, function:{...}}` envelope. Sending the bare Anthropic-like
     // schema let some gateways accept the request but silently ignore the tools,
     // which made the model print DSML markup into assistant content instead.
     // An explicitly configured route may project observations before this point.
-    val body = JSONObject().put("model", connection.model).put("messages", messages)
+    val outgoing = JSONArray(messages.toString())
+    for (i in 0 until outgoing.length()) {
+      val message = outgoing.optJSONObject(i) ?: continue
+      // 私有协议回放字段只属于各自的协议路由；跨协议发送时不能把未知字段带给网关。
+      message.remove("_anthropic_blocks")
+      message.remove("_responses_items")
+      if (message.optString("role") != "assistant") continue
+      // Android 的 org.json 会把 JSONObject.NULL 渲染成字面量 "null"。
+      // 出站前把空正文收敛为空串，并让 reasoning_content 从任一别名取真值，
+      // 否则 "null" 会遮蔽 reasoning/reasoning_text，或把空正文当正文发给网关。
+      val rawContent = message.opt("content")
+      if (rawContent == null || rawContent == JSONObject.NULL ||
+        (rawContent is String && rawContent.trim() == "null")
+      ) {
+        message.put("content", "")
+      }
+      val reasoning = reasoningField(message)
+      if (reasoning.isNotEmpty()) {
+        message.put("reasoning_content", reasoning)
+      } else {
+        val existing = message.opt("reasoning_content")
+        if (existing == null || existing == JSONObject.NULL ||
+          (existing is String && existing.trim() == "null")
+        ) {
+          message.remove("reasoning_content")
+          if (connection.requiresReasoningContentOnAssistantMessages) {
+            message.put("reasoning_content", "")
+          }
+        }
+      }
+    }
+    val body = JSONObject().put("model", connection.model).put("messages", outgoing)
       .put("tools", RepairToolCallParser.openAiTools(tools))
-      .put("tool_choice", "auto").put("stream", false)
+      .put("tool_choice", "auto").put("stream", stream)
     applyReasoning(connection, body, effort)
     body.put(connection.maxTokensField ?: "max_tokens", 8192)
     return body.toString()
   }
 
-  private fun responsesBody(
+  internal fun responsesBody(
     connection: RepairModelConnection,
     messages: JSONArray,
     tools: JSONArray,
     effort: String?,
+    stream: Boolean = false,
   ): String {
     val input = JSONArray()
     val mappedTools = JSONArray()
@@ -201,16 +284,35 @@ internal class RepairModelClient {
     for (i in 0 until messages.length()) {
       val m = messages.getJSONObject(i)
       when (m.optString("role")) {
-        "system" -> system += m.optString("content") + "\n"
-        "tool" -> input.put(JSONObject().put("type", "function_call_output").put("call_id", m.optString("tool_call_id")).put("output", m.optString("content")))
+        "system" -> system += contentText(m) + "\n"
+        "tool" -> input.put(
+          JSONObject().put("type", "function_call_output")
+            .put("call_id", m.optString("tool_call_id")).put("output", contentText(m)),
+        )
         else -> {
-          val content = m.optString("content")
-          if (content.isNotBlank()) input.put(JSONObject().put("role", m.optString("role")).put("content", content))
-          val calls = m.optJSONArray("tool_calls") ?: continue
-          for (j in 0 until calls.length()) {
-            val call = calls.getJSONObject(j); val fn = call.getJSONObject("function")
-            input.put(JSONObject().put("type", "function_call").put("call_id", call.getString("id"))
-              .put("name", fn.getString("name")).put("arguments", fn.optString("arguments", "{}")))
+          val native = m.optJSONArray("_responses_items")
+          if (m.optString("role") == "assistant" && native != null && native.length() > 0) {
+            // 同协议回放优先使用 provider 原生 output item：reasoning item 的
+            // encrypted_content 与原始顺序都必须逐字保留，否则下一轮网关会因
+            // 缺少加密推理或 item 次序变化而 400。
+            var hasFunctionCall = false
+            var hasMessage = false
+            for (j in 0 until native.length()) {
+              val item = native.optJSONObject(j) ?: continue
+              when (item.optString("type")) {
+                "function_call" -> hasFunctionCall = true
+                "message" -> hasMessage = true
+              }
+              input.put(JSONObject(item.toString()))
+            }
+            if (!hasMessage && contentText(m).isNotBlank()) {
+              input.put(JSONObject().put("role", "assistant").put("content", contentText(m)))
+            }
+            if (!hasFunctionCall) appendResponsesCalls(m, input)
+          } else {
+            val content = contentText(m)
+            if (content.isNotBlank()) input.put(JSONObject().put("role", m.optString("role")).put("content", content))
+            appendResponsesCalls(m, input)
           }
         }
       }
@@ -222,46 +324,69 @@ internal class RepairModelClient {
     }
     val body = JSONObject().put("model", connection.model).put("input", input).put("tools", mappedTools)
       .put("instructions", system).put("store", false)
+    if (stream) body.put("stream", true)
     if (effort != null && effort != "off") {
       body.put("reasoning", JSONObject().put("effort", effort))
     }
     return body.toString()
   }
 
-  private fun anthropicBody(
+  private fun appendResponsesCalls(message: JSONObject, input: JSONArray) {
+    val calls = message.optJSONArray("tool_calls") ?: return
+    for (j in 0 until calls.length()) {
+      val call = calls.optJSONObject(j) ?: continue
+      val fn = call.optJSONObject("function") ?: continue
+      input.put(
+        JSONObject().put("type", "function_call").put("call_id", call.optString("id"))
+          .put("name", fn.optString("name"))
+          .put("arguments", fieldText(fn, "arguments").ifBlank { "{}" }),
+      )
+    }
+  }
+
+  internal fun anthropicBody(
     connection: RepairModelConnection,
     messages: JSONArray,
     tools: JSONArray,
     effort: String?,
+    stream: Boolean = false,
   ): String {
-    val system = StringBuilder(); val converted = JSONArray()
+    val system = StringBuilder()
+    val converted = JSONArray()
+    var pendingResults: JSONArray? = null
+
+    fun flushToolResults() {
+      val results = pendingResults ?: return
+      if (results.length() > 0) {
+        converted.put(JSONObject().put("role", "user").put("content", results))
+      }
+      pendingResults = null
+    }
+
     for (i in 0 until messages.length()) {
       val m = messages.getJSONObject(i)
       when (m.optString("role")) {
-        "system" -> system.append(m.optString("content")).append("\n")
-        "tool" -> converted.put(JSONObject().put("role", "user").put("content", JSONArray().put(
-          JSONObject().put("type", "tool_result").put("tool_use_id", m.optString("tool_call_id"))
-            .put("content", m.optString("content")))))
-        "assistant" -> {
-          val contents = JSONArray()
-          m.optString("reasoning_content").takeIf { it.isNotBlank() }?.let {
-            contents.put(JSONObject().put("type", "thinking").put("thinking", it))
-          }
-          m.optString("content").takeIf { it.isNotBlank() && it != "null" }?.let {
-            contents.put(JSONObject().put("type", "text").put("text", it))
-          }
-          val calls = m.optJSONArray("tool_calls") ?: JSONArray()
-          for (j in 0 until calls.length()) {
-            val call = calls.getJSONObject(j); val fn = call.getJSONObject("function")
-            val input = runCatching { JSONObject(fn.optString("arguments", "{}")) }.getOrDefault(JSONObject())
-            contents.put(JSONObject().put("type", "tool_use").put("id", call.getString("id"))
-              .put("name", fn.getString("name")).put("input", input))
-          }
-          converted.put(JSONObject().put("role", "assistant").put("content", contents))
+        "system" -> system.append(contentText(m)).append("\n")
+        "tool" -> {
+          // 同一轮并行的多个 tool 消息必须是**一条** user 消息的多个 tool_result
+          // 块。拆成多条连续 user 消息会被 Anthropic 判为角色不交替而 400。
+          val results = pendingResults ?: JSONArray().also { pendingResults = it }
+          results.put(
+            JSONObject().put("type", "tool_result").put("tool_use_id", m.optString("tool_call_id"))
+              .put("content", contentText(m)),
+          )
         }
-        else -> converted.put(JSONObject().put("role", "user").put("content", m.optString("content")))
+        "assistant" -> {
+          flushToolResults()
+          converted.put(JSONObject().put("role", "assistant").put("content", anthropicAssistantBlocks(m)))
+        }
+        else -> {
+          flushToolResults()
+          converted.put(JSONObject().put("role", "user").put("content", contentText(m)))
+        }
       }
     }
+    flushToolResults()
     val anthTools = JSONArray()
     for (i in 0 until tools.length()) {
       val t = tools.getJSONObject(i)
@@ -275,11 +400,36 @@ internal class RepairModelClient {
     val plan = anthropicTokenPlan(effort)
     val body = JSONObject().put("model", connection.model).put("max_tokens", plan.maxTokens)
       .put("messages", converted).put("tools", anthTools)
+    if (stream) body.put("stream", true)
     if (system.isNotBlank()) body.put("system", system.toString())
     if (plan.budgetTokens != null) {
       body.put("thinking", JSONObject().put("type", "enabled").put("budget_tokens", plan.budgetTokens))
     }
     return body.toString()
+  }
+
+  private fun anthropicAssistantBlocks(message: JSONObject): JSONArray {
+    val native = message.optJSONArray("_anthropic_blocks")
+    if (native != null && native.length() > 0) return JSONArray(native.toString())
+    // 旧会话没有原块时的既有拼装逻辑：思考文本、正文、工具调用按此顺序重建。
+    val contents = JSONArray()
+    val reasoning = reasoningField(message)
+    if (reasoning.isNotBlank()) {
+      contents.put(JSONObject().put("type", "thinking").put("thinking", reasoning))
+    }
+    val text = contentText(message)
+    if (text.isNotBlank() && text.trim() != "null") {
+      contents.put(JSONObject().put("type", "text").put("text", text))
+    }
+    val calls = message.optJSONArray("tool_calls") ?: JSONArray()
+    for (j in 0 until calls.length()) {
+      val call = calls.getJSONObject(j)
+      val fn = call.getJSONObject("function")
+      val input = runCatching { JSONObject(fieldText(fn, "arguments").ifBlank { "{}" }) }.getOrDefault(JSONObject())
+      contents.put(JSONObject().put("type", "tool_use").put("id", call.getString("id"))
+        .put("name", fn.getString("name")).put("input", input))
+    }
+    return contents
   }
 
   private fun applyReasoning(connection: RepairModelConnection, body: JSONObject, effort: String?) {
@@ -372,7 +522,15 @@ internal class RepairModelClient {
     return "模型接口错误：" + redacted.take(300)
   }
 
-  private fun post(connection: RepairModelConnection, endpoint: String, body: String): String {
+  private fun post(
+    connection: RepairModelConnection,
+    endpoint: String,
+    body: String,
+    streamListener: RepairStreamListener?,
+    state: AttemptState,
+  ): String {
+    state.beginAttempt()
+    if (cancelled) throw InterruptedException()
     val conn = URL(endpoint).openConnection() as HttpURLConnection
     active.set(conn)
     try {
@@ -382,7 +540,10 @@ internal class RepairModelClient {
       conn.instanceFollowRedirects = false
       conn.doOutput = true
       conn.setRequestProperty("Content-Type", "application/json")
-      conn.setRequestProperty("Accept", "application/json")
+      conn.setRequestProperty(
+        "Accept",
+        if (streamListener != null) "text/event-stream, application/json" else "application/json",
+      )
       for ((key, value) in connection.headers) {
         if (key.equals("Host", true) || key.equals("Content-Length", true)) continue
         conn.setRequestProperty(key, value)
@@ -395,31 +556,168 @@ internal class RepairModelClient {
       }
       conn.outputStream.use { it.write(body.toByteArray(StandardCharsets.UTF_8)) }
       val code = conn.responseCode
-      val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-      val bytes = stream?.use { input ->
-        val out = ByteArrayOutputStream(); val buffer = ByteArray(8192)
-        var total = 0
-        while (true) {
-          val n = input.read(buffer); if (n < 0) break
-          total += n
-          if (total > 2_000_000) throw RepairModelFailure("模型响应过大")
-          out.write(buffer, 0, n)
-        }
-        out.toByteArray()
-      } ?: ByteArray(0)
-      val text = bytes.toString(StandardCharsets.UTF_8)
+      state.responseReceived = true
       if (code in 300..399) {
         throw RepairModelFailure("模型端点返回重定向（HTTP $code）；为避免凭据发送到其它域，已拒绝跟随")
       }
-      if (code !in 200..299) throw RepairModelFailure("模型请求失败（HTTP $code）：" + text.replace(connection.apiKey, "***").take(300))
+      if (code !in 200..299) {
+        val errorText = conn.errorStream?.let { readBounded(it) { cancelled } }.orEmpty()
+        throw RepairModelFailure(
+          "模型请求失败（HTTP $code）：" + errorText.replace(connection.apiKey, "***").take(300),
+        )
+      }
+      val (sse, input) = openResponseBody(conn)
+      if (sse) {
+        return parseSse(connection, input, streamListener, state)
+      }
+      val text = readBounded(input) { cancelled }.removePrefix("\uFEFF")
       if (text.isBlank()) throw RepairModelFailure("模型返回空响应")
       return text
-    } catch (e: RepairModelFailure) { throw e }
+    } catch (e: InterruptedException) {
+      throw e
+    } catch (e: RepairModelFailure) {
+      if (cancelled) throw InterruptedException()
+      throw e
+    }
     // 异常消息常带完整 URL：查询串必须抹掉再进文案（见 redactUrlQuery）。
-    catch (e: Exception) { throw RepairModelFailure("模型连接失败：" + redactUrlQuery(e.message ?: e.javaClass.simpleName)) }
-    finally {
+    catch (e: Exception) {
+      if (cancelled) throw InterruptedException()
+      throw RepairModelFailure("模型连接失败：" + redactUrlQuery(e.message ?: e.javaClass.simpleName))
+    } finally {
       active.compareAndSet(conn, null)
       conn.disconnect()
+    }
+  }
+
+  /**
+   * 2xx 之后用 Content-Type 或有界预读判断响应形态。
+   *
+   * 预读只吞掉空白/BOM 与第一个有意义字节，并全部 unread 回去，因此普通 JSON
+   * 回退与 SSE 都从完整字节流开始读，绝不会为了判断形态丢掉响应开头。
+   */
+  private fun openResponseBody(conn: HttpURLConnection): Pair<Boolean, InputStream> {
+    val pushback = PushbackInputStream(conn.inputStream, 256)
+    val prefix = ByteArrayOutputStream()
+    var significant = -1
+    while (prefix.size() < 256) {
+      val b = pushback.read()
+      if (b < 0) break
+      prefix.write(b)
+      if (b == 0xEF || b == 0xBB || b == 0xBF) continue
+      val ch = b.toChar()
+      if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') continue
+      significant = b
+      break
+    }
+    if (significant < 0) throw RepairModelFailure("模型返回空响应")
+    pushback.unread(prefix.toByteArray())
+    val contentType = conn.contentType.orEmpty().lowercase()
+    val sse = when {
+      contentType.contains("text/event-stream") -> true
+      significant == '{'.code || significant == '['.code -> false
+      else -> true
+    }
+    return sse to pushback
+  }
+
+  private fun readBounded(input: InputStream, stopped: () -> Boolean = { false }): String {
+    val out = ByteArrayOutputStream()
+    val buffer = ByteArray(8192)
+    var total = 0
+    while (true) {
+      if (stopped()) throw InterruptedException()
+      val n = input.read(buffer)
+      if (n < 0) break
+      total += n
+      if (total > MAX_RESPONSE_BYTES) throw RepairModelFailure("模型响应过大")
+      out.write(buffer, 0, n)
+    }
+    return out.toByteArray().toString(StandardCharsets.UTF_8)
+  }
+
+  private fun parseSse(
+    connection: RepairModelConnection,
+    input: InputStream,
+    listener: RepairStreamListener?,
+    state: AttemptState,
+  ): String {
+    val accumulator: SseAccumulator = when (connection.api) {
+      "anthropic-messages" -> AnthropicSseAccumulator(connection, listener, state)
+      "openai-responses" -> ResponsesSseAccumulator(connection, listener, state)
+      else -> ChatSseAccumulator(connection, listener, state)
+    }
+    val reader = SseLineReader(input, MAX_RESPONSE_BYTES) { cancelled }
+    var event = ""
+    val data = StringBuilder()
+    var terminal = false
+    while (!terminal) {
+      if (cancelled) throw InterruptedException()
+      val line = reader.readLine() ?: break
+      if (line.isEmpty()) {
+        if (data.isNotEmpty() || event.isNotEmpty()) {
+          terminal = accumulator.accept(event, data.toString())
+          event = ""
+          data.setLength(0)
+        }
+        continue
+      }
+      if (line.startsWith(":")) continue
+      val colon = line.indexOf(':')
+      val field = if (colon < 0) line else line.substring(0, colon)
+      var value = if (colon < 0) "" else line.substring(colon + 1)
+      if (value.startsWith(" ")) value = value.substring(1)
+      when (field) {
+        "event" -> event = value
+        "data" -> {
+          if (data.isNotEmpty()) data.append('\n')
+          data.append(value)
+        }
+      }
+    }
+    if (!terminal && (data.isNotEmpty() || event.isNotEmpty())) {
+      terminal = accumulator.accept(event, data.toString())
+    }
+    if (!terminal) throw RepairModelFailure("模型流式响应中断：未收到终止事件")
+    val payload = accumulator.payload().toString()
+    flushFilters(listener, state)
+    return payload
+  }
+
+  private fun flushFilters(listener: RepairStreamListener?, state: AttemptState) {
+    if (listener == null) return
+    val textTail = state.textFilter.finish()
+    if (textTail.isNotEmpty()) emitFinalText(listener, state, textTail)
+    val reasoningTail = state.reasoningFilter.finish()
+    if (reasoningTail.isNotEmpty()) emitFinalReasoning(listener, state, reasoningTail)
+  }
+
+  private fun postWithRetry(
+    connection: RepairModelConnection,
+    endpoint: String,
+    body: String,
+    elapsedBudgetMs: Long,
+    elapsed: () -> Long,
+    streamListener: RepairStreamListener?,
+    state: AttemptState,
+  ): String {
+    val started = System.nanoTime()
+    var attempts = 0
+    while (true) {
+      try {
+        return post(connection, endpoint, body, streamListener, state)
+      } catch (failure: RepairModelFailure) {
+        if (cancelled) throw failure
+        if (!isTransientTransportFailure(failure.message.orEmpty())) throw failure
+        // 只有在 HTTP 响应与首帧回调都尚未到达时才允许原样重发一次。
+        // 流已经开始后断流既不重试（避免重复生成/重复计费），也不吞掉已有回调。
+        if (state.responseReceived || state.streamStarted || state.emittedText || state.emittedReasoning) {
+          throw failure
+        }
+        // 已经耗掉的时间 + 这次剩余预算：超了就不重试（防止 2×180s 的尾巴）
+        val spent = elapsed().coerceAtLeast((System.nanoTime() - started) / 1_000_000L)
+        if (spent >= elapsedBudgetMs || attempts >= 1) throw failure
+        attempts++
+      }
     }
   }
 
@@ -439,18 +737,8 @@ internal class RepairModelClient {
     body: String,
     elapsedBudgetMs: Long = RETRY_TOTAL_BUDGET_MS,
     elapsed: () -> Long = { 0L },
-  ): String {
-    val started = System.nanoTime()
-    try {
-      return post(connection, endpoint, body)
-    } catch (failure: RepairModelFailure) {
-      if (!isTransientTransportFailure(failure.message.orEmpty())) throw failure
-      // 已经耗掉的时间 + 这次剩余预算：超了就不重试（防止 2×180s 的尾巴）
-      val spent = elapsed().coerceAtLeast((System.nanoTime() - started) / 1_000_000L)
-      if (spent >= elapsedBudgetMs) throw failure
-    }
-    return post(connection, endpoint, body)
-  }
+    streamListener: RepairStreamListener? = null,
+  ): String = postWithRetry(connection, endpoint, body, elapsedBudgetMs, elapsed, streamListener, AttemptState())
 
   /**
    * 哪些传输失败值得原样重发一次。
@@ -466,66 +754,720 @@ internal class RepairModelClient {
     val detail = message.lowercase()
     return listOf(
       "socket closed", "connection reset", "broken pipe", "unexpected end of stream",
-      "connection refused", "connection aborted", "eof",
+      "unexpected end of file", "connection refused", "connection aborted", "eof",
     ).any { detail.contains(it) }
   }
 
-  private fun completionsResult(root: JSONObject): JSONObject {
+  internal fun completionsResult(root: JSONObject): JSONObject {
     val choice = root.optJSONArray("choices")?.optJSONObject(0)
       ?: throw RepairModelFailure("模型响应缺少 choices")
     val message = choice.optJSONObject("message") ?: throw RepairModelFailure("模型响应缺少 message")
-    val reasoning = listOf("reasoning_content", "reasoning", "reasoning_text")
-      .firstNotNullOfOrNull { field -> message.optString(field).takeIf { it.isNotBlank() } }
-    if (reasoning != null && message.optString("reasoning_content").isBlank()) {
+    val reasoning = reasoningField(message)
+    message.put("content", contentText(message))
+    if (reasoning.isNotEmpty()) {
       message.put("reasoning_content", reasoning)
+    } else if (message.opt("reasoning_content") == JSONObject.NULL ||
+      (message.opt("reasoning_content") is String &&
+        (message.optString("reasoning_content").trim() == "null" || message.optString("reasoning_content").isBlank()))
+    ) {
+      message.put("reasoning_content", "")
     }
     return message
   }
 
-  private fun responsesResult(root: JSONObject): JSONObject {
-    val output = root.optJSONArray("output") ?: JSONArray(); val calls = JSONArray()
-    val text = StringBuilder(); val reasoning = StringBuilder()
+  internal fun responsesResult(root: JSONObject): JSONObject {
+    val status = fieldText(root, "status")
+    if (status == "failed" || status == "incomplete") {
+      val detail = responseFailureDetail(root)
+      throw RepairModelFailure(
+        if (status == "failed") "模型响应失败：" + detail else "模型响应不完整：" + detail,
+      )
+    }
+    val output = root.optJSONArray("output") ?: throw RepairModelFailure("模型响应缺少 output")
+    if (output.length() == 0) throw RepairModelFailure("模型响应 output 为空")
+    val calls = JSONArray()
+    val text = StringBuilder()
+    val reasoning = StringBuilder()
     for (i in 0 until output.length()) {
-      val item = output.getJSONObject(i)
+      val item = output.optJSONObject(i) ?: continue
       when (item.optString("type")) {
         "message" -> {
           val content = item.optJSONArray("content") ?: JSONArray()
-          for (j in 0 until content.length()) text.append(content.getJSONObject(j).optString("text"))
+          for (j in 0 until content.length()) {
+            val part = content.optJSONObject(j) ?: continue
+            text.append(fieldText(part, "text"))
+          }
         }
-        "function_call" -> calls.put(JSONObject().put("id", item.optString("call_id"))
-          .put("type", "function").put("function", JSONObject().put("name", item.optString("name"))
-            .put("arguments", item.optString("arguments", "{}"))))
+        "function_call" -> calls.put(
+          JSONObject().put("id", fieldText(item, "call_id")).put("type", "function")
+            .put(
+              "function",
+              JSONObject().put("name", fieldText(item, "name"))
+                .put("arguments", fieldText(item, "arguments").ifBlank { "{}" }),
+            ),
+        )
         "reasoning" -> {
           val summary = item.optJSONArray("summary")
           if (summary != null) for (j in 0 until summary.length()) {
-            reasoning.append(summary.getJSONObject(j).optString("text"))
+            reasoning.append(fieldText(summary.optJSONObject(j) ?: JSONObject(), "text"))
           }
           val content = item.optJSONArray("content")
           if (content != null) for (j in 0 until content.length()) {
-            reasoning.append(content.getJSONObject(j).optString("text"))
+            reasoning.append(fieldText(content.optJSONObject(j) ?: JSONObject(), "text"))
           }
         }
       }
     }
     return JSONObject().put("role", "assistant").put("content", text.toString())
       .put("tool_calls", calls).put("reasoning_content", reasoning.toString())
+      .put("_responses_items", JSONArray(output.toString()))
   }
 
-  private fun anthropicResult(root: JSONObject): JSONObject {
-    val content = root.optJSONArray("content") ?: JSONArray(); val calls = JSONArray()
-    val text = StringBuilder(); val reasoning = StringBuilder()
+  internal fun anthropicResult(root: JSONObject): JSONObject {
+    val content = root.optJSONArray("content") ?: JSONArray()
+    val blocks = JSONArray()
+    val calls = JSONArray()
+    val text = StringBuilder()
+    val reasoning = StringBuilder()
     for (i in 0 until content.length()) {
-      val item = content.getJSONObject(i)
+      val item = content.optJSONObject(i) ?: continue
+      blocks.put(JSONObject(item.toString()))
       when (item.optString("type")) {
-        "text" -> text.append(item.optString("text"))
-        "thinking" -> reasoning.append(item.optString("thinking"))
-        "tool_use" -> calls.put(JSONObject().put("id", item.optString("id")).put("type", "function")
-          .put("function", JSONObject().put("name", item.optString("name"))
-            .put("arguments", item.optJSONObject("input")?.toString() ?: "{}")))
+        "text" -> text.append(fieldText(item, "text"))
+        "thinking" -> reasoning.append(fieldText(item, "thinking"))
+        "tool_use" -> calls.put(
+          JSONObject().put("id", fieldText(item, "id")).put("type", "function")
+            .put(
+              "function",
+              JSONObject().put("name", fieldText(item, "name"))
+                .put("arguments", item.optJSONObject("input")?.toString() ?: "{}"),
+            ),
+        )
       }
     }
     return JSONObject().put("role", "assistant").put("content", text.toString())
       .put("tool_calls", calls).put("reasoning_content", reasoning.toString())
+      .put("_anthropic_blocks", blocks)
+  }
+
+  private fun responseFailureDetail(root: JSONObject): String {
+    val error = root.optJSONObject("error")
+    val message = (error?.opt("message") as? String)?.takeIf { it.isNotBlank() }
+      ?: (root.opt("error") as? String)?.takeIf { it.isNotBlank() }
+      ?: fieldText(root.optJSONObject("incomplete_details") ?: JSONObject(), "reason").takeIf { it.isNotBlank() }
+      ?: "未提供原因"
+    return message.take(300)
+  }
+
+  private fun streamFailure(connection: RepairModelConnection, root: JSONObject): RepairModelFailure {
+    val error = root.optJSONObject("error")
+    val raw = (error?.opt("message") as? String)?.takeIf { it.isNotBlank() }
+      ?: (root.opt("error") as? String)?.takeIf { it.isNotBlank() }
+      ?: (root.opt("message") as? String)?.takeIf { it.isNotBlank() }
+      ?: "模型流式响应错误"
+    val redacted = if (connection.apiKey.isEmpty()) raw else raw.replace(connection.apiKey, "***")
+    return RepairModelFailure("模型接口错误：" + redacted.take(300))
+  }
+
+  private fun emitText(listener: RepairStreamListener?, state: AttemptState, delta: String) {
+    if (listener == null || delta.isEmpty()) return
+    val filtered = state.textFilter.feed(delta)
+    if (filtered.isEmpty()) return
+    synchronized(callbackLock) {
+      if (cancelled) return
+      state.streamStarted = true
+      state.emittedText = true
+      listener.onTextDelta(filtered)
+    }
+  }
+
+  private fun emitReasoning(listener: RepairStreamListener?, state: AttemptState, delta: String) {
+    if (listener == null || delta.isEmpty()) return
+    val filtered = state.reasoningFilter.feed(delta)
+    if (filtered.isEmpty()) return
+    synchronized(callbackLock) {
+      if (cancelled) return
+      state.streamStarted = true
+      state.emittedReasoning = true
+      listener.onReasoningDelta(filtered)
+    }
+  }
+
+  private fun emitFinalText(listener: RepairStreamListener, state: AttemptState, text: String) {
+    synchronized(callbackLock) {
+      if (cancelled) return
+      state.streamStarted = true
+      state.emittedText = true
+      listener.onTextDelta(text)
+    }
+  }
+
+  private fun emitFinalReasoning(listener: RepairStreamListener, state: AttemptState, text: String) {
+    synchronized(callbackLock) {
+      if (cancelled) return
+      state.streamStarted = true
+      state.emittedReasoning = true
+      listener.onReasoningDelta(text)
+    }
+  }
+
+  private fun fieldText(obj: JSONObject, key: String): String {
+    val value = obj.opt(key)
+    return when (value) {
+      is String -> if (value.trim() == "null") "" else value
+      is Number, is Boolean -> value.toString()
+      else -> ""
+    }
+  }
+
+  private fun reasoningField(obj: JSONObject): String {
+    for (key in REASONING_FIELDS) {
+      val value = obj.opt(key)
+      if (value is String && value.isNotBlank() && value.trim() != "null") return value
+    }
+    return ""
+  }
+
+  private fun contentText(obj: JSONObject): String {
+    val value = obj.opt("content") ?: return ""
+    return when (value) {
+      is String -> if (value.trim() == "null") "" else value
+      is JSONArray -> {
+        val text = StringBuilder()
+        for (i in 0 until value.length()) {
+          when (val part = value.opt(i)) {
+            is String -> if (part.trim() != "null") text.append(part)
+            is JSONObject -> text.append(fieldText(part, "text"))
+          }
+        }
+        text.toString()
+      }
+      else -> ""
+    }
+  }
+
+  private fun parseStreamJson(data: String): JSONObject =
+    runCatching { JSONObject(data) }.getOrElse { throw RepairModelFailure("模型流式响应格式错误") }
+
+  private interface SseAccumulator {
+    fun accept(event: String, data: String): Boolean
+    fun payload(): JSONObject
+  }
+
+  private class ChatToolCall {
+    var id = ""
+    var type = "function"
+    val name = StringBuilder()
+    val arguments = StringBuilder()
+  }
+
+  private inner class ChatSseAccumulator(
+    private val connection: RepairModelConnection,
+    private val listener: RepairStreamListener?,
+    private val state: AttemptState,
+  ) : SseAccumulator {
+    private val text = StringBuilder()
+    private val reasoning = StringBuilder()
+    private val calls = TreeMap<Int, ChatToolCall>()
+    private var terminal = false
+
+    override fun accept(event: String, data: String): Boolean {
+      val payload = data.trim()
+      if (payload.isEmpty()) return false
+      if (payload == "[DONE]") {
+        terminal = true
+        return true
+      }
+      val root = parseStreamJson(payload)
+      if (root.optJSONObject("error") != null) throw streamFailure(connection, root)
+      if (fieldText(root, "type") == "error") throw streamFailure(connection, root)
+      val choices = root.optJSONArray("choices") ?: return false
+      val choice = choices.optJSONObject(0) ?: return false
+      val delta = choice.optJSONObject("delta")
+      if (delta != null) {
+        val reasoningDelta = reasoningField(delta)
+        if (reasoningDelta.isNotEmpty()) {
+          reasoning.append(reasoningDelta)
+          emitReasoning(listener, state, reasoningDelta)
+        }
+        val contentDelta = contentText(delta)
+        if (contentDelta.isNotEmpty()) {
+          text.append(contentDelta)
+          emitText(listener, state, contentDelta)
+        }
+        accumulateCalls(delta)
+      } else {
+        val message = choice.optJSONObject("message")
+        if (message != null && text.isEmpty() && reasoning.isEmpty() && calls.isEmpty()) {
+          val reasoningText = reasoningField(message)
+          if (reasoningText.isNotEmpty()) {
+            reasoning.append(reasoningText)
+            emitReasoning(listener, state, reasoningText)
+          }
+          val content = contentText(message)
+          if (content.isNotEmpty()) {
+            text.append(content)
+            emitText(listener, state, content)
+          }
+          accumulateCalls(message)
+        }
+      }
+      val finish = choice.opt("finish_reason")
+      if (finish is String && finish.isNotBlank()) terminal = true
+      return terminal
+    }
+
+    private fun accumulateCalls(source: JSONObject) {
+      val deltaCalls = source.optJSONArray("tool_calls") ?: return
+      for (j in 0 until deltaCalls.length()) {
+        val item = deltaCalls.optJSONObject(j) ?: continue
+        val index = item.optInt("index", j)
+        val call = calls.getOrPut(index) { ChatToolCall() }
+        val id = fieldText(item, "id")
+        if (id.isNotEmpty()) call.id = id
+        val type = fieldText(item, "type")
+        if (type.isNotEmpty()) call.type = type
+        val fn = item.optJSONObject("function") ?: continue
+        val name = fieldText(fn, "name")
+        if (name.isNotEmpty()) call.name.append(name)
+        when (val arguments = fn.opt("arguments")) {
+          is String -> if (arguments.trim() != "null") call.arguments.append(arguments)
+          is JSONObject -> call.arguments.append(arguments.toString())
+          is JSONArray -> call.arguments.append(arguments.toString())
+        }
+      }
+    }
+
+    override fun payload(): JSONObject {
+      if (!terminal) throw RepairModelFailure("模型流式响应中断：未收到终止事件")
+      val message = JSONObject().put("role", "assistant").put("content", text.toString())
+      if (reasoning.isNotEmpty()) message.put("reasoning_content", reasoning.toString())
+      if (calls.isNotEmpty()) {
+        val array = JSONArray()
+        for ((_, call) in calls) {
+          array.put(
+            JSONObject().put("id", call.id).put("type", call.type.ifBlank { "function" })
+              .put(
+                "function",
+                JSONObject().put("name", call.name.toString())
+                  .put("arguments", call.arguments.toString().ifBlank { "{}" }),
+              ),
+          )
+        }
+        message.put("tool_calls", array)
+      }
+      return JSONObject().put(
+        "choices",
+        JSONArray().put(JSONObject().put("message", message).put("finish_reason", "stop")),
+      )
+    }
+  }
+
+  private inner class ResponsesSseAccumulator(
+    private val connection: RepairModelConnection,
+    private val listener: RepairStreamListener?,
+    private val state: AttemptState,
+  ) : SseAccumulator {
+    private val items = TreeMap<Int, JSONObject>()
+    private val textByIndex = HashMap<Int, StringBuilder>()
+    private val argumentsByIndex = HashMap<Int, StringBuilder>()
+    private val reasoningByIndex = HashMap<Int, StringBuilder>()
+    private var finalResponse: JSONObject? = null
+    private var terminal = false
+
+    override fun accept(event: String, data: String): Boolean {
+      if (data.isBlank()) {
+        if (event == "response.completed") terminal = true
+        if (event == "response.failed") throw RepairModelFailure("模型响应失败：未提供原因")
+        if (event == "response.incomplete") throw RepairModelFailure("模型响应不完整：未提供原因")
+        return terminal
+      }
+      val root = parseStreamJson(data)
+      if (root.optJSONObject("error") != null) throw streamFailure(connection, root)
+      val type = if (event.isBlank() || event == "message") fieldText(root, "type") else event
+      when (type) {
+        "error" -> throw streamFailure(connection, root)
+        "response.output_item.added", "response.output_item.done" -> {
+          val index = root.optInt("output_index", items.size)
+          val item = root.optJSONObject("item") ?: return false
+          if (type.endsWith(".done")) items[index] = JSONObject(item.toString())
+          else if (!items.containsKey(index)) items[index] = JSONObject(item.toString())
+        }
+        "response.output_text.delta" -> {
+          val delta = fieldText(root, "delta")
+          if (delta.isEmpty()) return false
+          val index = root.optInt("output_index", 0)
+          val builder = textByIndex.getOrPut(index) { StringBuilder() }
+          builder.append(delta)
+          val item = ensureMessage(index)
+          val content = item.optJSONArray("content") ?: JSONArray().also { item.put("content", it) }
+          val contentIndex = root.optInt("content_index", 0)
+          while (content.length() <= contentIndex) {
+            content.put(JSONObject().put("type", "output_text").put("text", ""))
+          }
+          val part = content.optJSONObject(contentIndex) ?: JSONObject()
+          part.put("type", "output_text").put("text", builder.toString())
+          content.put(contentIndex, part)
+          emitText(listener, state, delta)
+        }
+        "response.output_text.done" -> {
+          val full = fieldText(root, "text")
+          if (full.isEmpty()) return false
+          val index = root.optInt("output_index", 0)
+          val item = ensureMessage(index)
+          item.put(
+            "content",
+            JSONArray().put(JSONObject().put("type", "output_text").put("text", full)),
+          )
+          textByIndex[index] = StringBuilder(full)
+        }
+        "response.function_call_arguments.delta" -> {
+          val delta = fieldText(root, "delta")
+          if (delta.isEmpty()) return false
+          val index = root.optInt("output_index", 0)
+          val builder = argumentsByIndex.getOrPut(index) { StringBuilder() }
+          builder.append(delta)
+          val item = ensureFunctionCall(index, root)
+          item.put("arguments", builder.toString())
+        }
+        "response.function_call_arguments.done" -> {
+          val index = root.optInt("output_index", 0)
+          val full = fieldText(root, "arguments")
+          if (full.isNotEmpty()) {
+            argumentsByIndex[index] = StringBuilder(full)
+            ensureFunctionCall(index, root).put("arguments", full)
+          }
+        }
+        "response.reasoning_summary_text.delta", "response.reasoning_summary.delta",
+        "response.reasoning_text.delta" -> {
+          val delta = fieldText(root, "delta")
+          if (delta.isEmpty()) return false
+          val index = root.optInt("output_index", 0)
+          val builder = reasoningByIndex.getOrPut(index) { StringBuilder() }
+          builder.append(delta)
+          val item = ensureReasoning(index)
+          val summary = item.optJSONArray("summary") ?: JSONArray().also { item.put("summary", it) }
+          val summaryIndex = root.optInt("summary_index", 0)
+          while (summary.length() <= summaryIndex) {
+            summary.put(JSONObject().put("type", "summary_text").put("text", ""))
+          }
+          val part = summary.optJSONObject(summaryIndex) ?: JSONObject()
+          part.put("type", "summary_text").put("text", builder.toString())
+          summary.put(summaryIndex, part)
+          emitReasoning(listener, state, delta)
+        }
+        "response.completed" -> {
+          finalResponse = root.optJSONObject("response") ?: root
+          terminal = true
+        }
+        "response.failed" -> throw streamFailure(
+          connection,
+          root.optJSONObject("response") ?: root,
+        )
+        "response.incomplete" -> {
+          val response = root.optJSONObject("response") ?: root
+          throw RepairModelFailure("模型响应不完整：" + responseFailureDetail(response))
+        }
+      }
+      return terminal
+    }
+
+    private fun ensureMessage(index: Int): JSONObject = items.getOrPut(index) {
+      JSONObject().put("type", "message").put("role", "assistant").put("content", JSONArray())
+    }
+
+    private fun ensureFunctionCall(index: Int, source: JSONObject): JSONObject {
+      val existing = items[index]
+      if (existing != null && existing.optString("type") == "function_call") return existing
+      val itemId = fieldText(source, "item_id")
+      val call = JSONObject().put("type", "function_call")
+      if (itemId.isNotEmpty()) call.put("id", itemId)
+      val callId = fieldText(source, "call_id")
+      if (callId.isNotEmpty()) call.put("call_id", callId)
+      val name = fieldText(source, "name")
+      if (name.isNotEmpty()) call.put("name", name)
+      call.put("arguments", argumentsByIndex[index]?.toString() ?: "")
+      items[index] = call
+      return call
+    }
+
+    private fun ensureReasoning(index: Int): JSONObject = items.getOrPut(index) {
+      JSONObject().put("type", "reasoning").put("summary", JSONArray())
+    }
+
+    override fun payload(): JSONObject {
+      if (!terminal) throw RepairModelFailure("模型流式响应中断：未收到终止事件")
+      val response = finalResponse
+      if (response != null) {
+        val output = response.optJSONArray("output")
+        if (output != null && output.length() > 0) {
+          return JSONObject().put("status", "completed").put("output", JSONArray(output.toString()))
+        }
+      }
+      val output = JSONArray()
+      for ((_, item) in items) output.put(JSONObject(item.toString()))
+      return JSONObject().put("status", "completed").put("output", output)
+    }
+  }
+
+  private class AnthropicBlock(val raw: JSONObject) {
+    val type: String = fieldText(raw, "type")
+    val text = StringBuilder(fieldText(raw, "text"))
+    val thinking = StringBuilder(fieldText(raw, "thinking"))
+    val signature = StringBuilder(fieldText(raw, "signature"))
+    val partialJson = StringBuilder()
+    val input: JSONObject? = raw.optJSONObject("input")?.let { JSONObject(it.toString()) }
+
+    fun build(): JSONObject {
+      val block = JSONObject(raw.toString())
+      when (type) {
+        "text" -> block.put("text", text.toString())
+        "thinking" -> {
+          block.put("thinking", thinking.toString())
+          if (signature.isNotEmpty()) block.put("signature", signature.toString())
+        }
+        "tool_use" -> {
+          val parsed = if (partialJson.isNotEmpty()) {
+            runCatching { JSONObject(partialJson.toString()) }.getOrNull()
+          } else null
+          if (parsed != null) block.put("input", parsed)
+          else if (input != null) block.put("input", input)
+        }
+      }
+      return block
+    }
+
+    private fun fieldText(obj: JSONObject, key: String): String {
+      val value = obj.opt(key)
+      return if (value is String && value.trim() != "null") value else ""
+    }
+  }
+
+  private inner class AnthropicSseAccumulator(
+    private val connection: RepairModelConnection,
+    private val listener: RepairStreamListener?,
+    private val state: AttemptState,
+  ) : SseAccumulator {
+    private val blocks = TreeMap<Int, AnthropicBlock>()
+    private var terminal = false
+
+    override fun accept(event: String, data: String): Boolean {
+      if (data.isBlank()) {
+        if (event == "message_stop") terminal = true
+        return terminal
+      }
+      val root = parseStreamJson(data)
+      val type = if (event.isBlank() || event == "message") fieldText(root, "type") else event
+      when (type) {
+        "error" -> throw streamFailure(connection, root)
+        "message_start" -> {
+          val message = root.optJSONObject("message") ?: return false
+          val content = message.optJSONArray("content") ?: return false
+          for (i in 0 until content.length()) {
+            val block = content.optJSONObject(i) ?: continue
+            blocks[i] = AnthropicBlock(block)
+          }
+        }
+        "content_block_start" -> {
+          val index = root.optInt("index", blocks.size)
+          val block = root.optJSONObject("content_block") ?: return false
+          val stateBlock = AnthropicBlock(block)
+          blocks[index] = stateBlock
+          when (stateBlock.type) {
+            "text" -> {
+              val initial = stateBlock.text.toString()
+              if (initial.isNotEmpty()) emitText(listener, state, initial)
+            }
+            "thinking" -> {
+              val initial = stateBlock.thinking.toString()
+              if (initial.isNotEmpty()) emitReasoning(listener, state, initial)
+            }
+          }
+        }
+        "content_block_delta" -> {
+          val index = root.optInt("index", 0)
+          val block = blocks.getOrPut(index) { AnthropicBlock(JSONObject().put("type", "text")) }
+          val delta = root.optJSONObject("delta") ?: return false
+          when (fieldText(delta, "type")) {
+            "text_delta" -> {
+              val value = fieldText(delta, "text")
+              if (value.isNotEmpty()) {
+                block.text.append(value)
+                emitText(listener, state, value)
+              }
+            }
+            "thinking_delta" -> {
+              val value = fieldText(delta, "thinking")
+              if (value.isNotEmpty()) {
+                block.thinking.append(value)
+                emitReasoning(listener, state, value)
+              }
+            }
+            "signature_delta" -> {
+              val value = fieldText(delta, "signature")
+              if (value.isNotEmpty()) block.signature.append(value)
+            }
+            "input_json_delta" -> {
+              val value = fieldText(delta, "partial_json")
+              if (value.isNotEmpty()) block.partialJson.append(value)
+            }
+          }
+        }
+        "content_block_stop" -> {
+          // 块内容在 payload() 里统一 build；这里只需要保证索引已存在。
+          val index = root.optInt("index", 0)
+          if (!blocks.containsKey(index)) blocks[index] = AnthropicBlock(JSONObject().put("type", "text"))
+        }
+        "message_delta" -> {
+          // stop_reason 与 usage 不参与正文，终止由 message_stop 负责。
+        }
+        "message_stop" -> terminal = true
+      }
+      return terminal
+    }
+
+    override fun payload(): JSONObject {
+      if (!terminal) throw RepairModelFailure("模型流式响应中断：未收到终止事件")
+      val content = JSONArray()
+      for ((_, block) in blocks) content.put(block.build())
+      return JSONObject().put("content", content)
+    }
+  }
+
+  private class AttemptState {
+    @Volatile var responseReceived = false
+    @Volatile var streamStarted = false
+    @Volatile var emittedText = false
+    @Volatile var emittedReasoning = false
+    val textFilter = DsmlStreamFilter()
+    val reasoningFilter = DsmlStreamFilter()
+
+    fun beginAttempt() {
+      responseReceived = false
+      streamStarted = false
+      emittedText = false
+      emittedReasoning = false
+      textFilter.reset()
+      reasoningFilter.reset()
+    }
+  }
+
+  /**
+   * Holds back a trailing fragment that may be the beginning of a DSML tag.
+   *
+   * Streaming cannot know whether "<" or "<|DS" is ordinary prose or the first
+   * slice of a DSML marker, so those prefixes are buffered until the next delta
+   * decides. Complete DSML tags are dropped instead of being shown as text.
+   */
+  private class DsmlStreamFilter {
+    private val pending = StringBuilder()
+
+    fun reset() {
+      pending.setLength(0)
+    }
+
+    fun feed(delta: String): String {
+      pending.append(delta)
+      return drain()
+    }
+
+    fun finish(): String {
+      val out = drain()
+      if (pending.isEmpty()) return out
+      val rest = pending.toString()
+      pending.setLength(0)
+      return if (looksLikeDsmlPrefix(rest)) out else out + rest
+    }
+
+    private fun drain(): String {
+      val out = StringBuilder()
+      var consumed = 0
+      while (consumed < pending.length) {
+        val lt = pending.indexOf("<", consumed)
+        if (lt < 0) {
+          out.append(pending, consumed, pending.length)
+          consumed = pending.length
+          break
+        }
+        if (lt > consumed) out.append(pending, consumed, lt)
+        val rest = pending.substring(lt)
+        val gt = rest.indexOf('>')
+        if (gt < 0) {
+          if (looksLikeDsmlPrefix(rest)) {
+            consumed = lt
+            break
+          }
+          out.append('<')
+          consumed = lt + 1
+          continue
+        }
+        val tag = rest.substring(0, gt + 1)
+        if (isDsmlTag(tag)) {
+          consumed = lt + gt + 1
+        } else {
+          out.append('<')
+          consumed = lt + 1
+        }
+      }
+      if (consumed > 0) pending.delete(0, consumed)
+      return out.toString()
+    }
+
+    private fun looksLikeDsmlPrefix(text: String): Boolean {
+      if (!text.startsWith("<")) return false
+      val after = text.substring(1).filterNot { it == ' ' || it == '\t' }.lowercase()
+      return "|dsml|".startsWith(after) || after.startsWith("|dsml|") ||
+        "/|dsml|".startsWith(after) || after.startsWith("/|dsml|")
+    }
+
+    private fun isDsmlTag(tag: String): Boolean {
+      val normalized = tag.filterNot { it == ' ' || it == '\t' }.lowercase()
+      return normalized.startsWith("<|dsml|") || normalized.startsWith("</|dsml|")
+    }
+  }
+
+  private class SseLineReader(
+    private val input: InputStream,
+    private val maxBytes: Int,
+    private val stopped: () -> Boolean,
+  ) {
+    private val buffer = ByteArray(8192)
+    private var offset = 0
+    private var length = 0
+    private var total = 0
+
+    fun readLine(): String? {
+      val line = ByteArrayOutputStream()
+      while (true) {
+        if (stopped()) throw InterruptedException()
+        if (offset >= length) {
+          val n = input.read(buffer)
+          if (n < 0) {
+            if (line.size() == 0) return null
+            return decode(line.toByteArray())
+          }
+          total += n
+          if (total > maxBytes) throw RepairModelFailure("模型响应过大")
+          offset = 0
+          length = n
+        }
+        val b = buffer[offset].toInt() and 0xff
+        offset++
+        if (b == '\n'.code) return decode(line.toByteArray())
+        line.write(b)
+        if (line.size() > MAX_LINE_BYTES) throw RepairModelFailure("模型流式响应单行过大")
+      }
+    }
+
+    private fun decode(bytes: ByteArray): String {
+      var end = bytes.size
+      if (end > 0 && bytes[end - 1] == '\r'.code.toByte()) end--
+      return String(bytes, 0, end, StandardCharsets.UTF_8)
+    }
+
+    private companion object {
+      const val MAX_LINE_BYTES = 1_000_000
+    }
   }
 }
 

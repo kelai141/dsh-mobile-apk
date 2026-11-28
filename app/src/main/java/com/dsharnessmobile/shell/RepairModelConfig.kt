@@ -116,7 +116,12 @@ internal object RepairModelConfig {
    */
   fun loadDetailed(context: Context): RepairModelLoad {
     val result = loadDetailed(File(context.filesDir, "home"),
-      mapOf("DEEPSEEK_API_KEY" to privateKey(context, "deepseek-key.txt")))
+      mapOf(
+        "DEEPSEEK_API_KEY" to privateKey(context, "deepseek-key.txt"),
+        // 与 EngineManager.shellEnv 对齐：视觉后端（Qwen-VL）也从独立私有文件注入。
+        // 助手离线解析时必须看到同一份环境，否则「引擎能用、助手说没模型」的盲区还在。
+        "DASHSCOPE_API_KEY" to privateKey(context, "dashscope-key.txt"),
+      ))
     // Diagnostic evidence only: never serialize model configuration, key values or YAML errors.
     runCatching {
       val json = org.json.JSONObject().put("candidates", result.connections.size)
@@ -143,7 +148,7 @@ internal object RepairModelConfig {
     // 五个文件各记一条 missing，与用户真删了配置在 UI 上完全同形，于是助手报
     // 「未读到可用模型」——把一个「先重试引擎」的问题说成「去写配置」（issue #1012）。
     // 这里直接短路：给出唯一一条 root-missing，上层据此换一句话。
-    if (!dsh.exists()) {
+    if (!dsh.exists() || isHalfExtractedRoot(dsh)) {
       return RepairModelLoad(emptyList(), listOf(RepairModelSource(relToHome(home, dsh), "root-missing")),
         defaultAvailable = false, rootMissing = true)
     }
@@ -183,6 +188,11 @@ internal object RepairModelConfig {
        */
       val custom = LinkedHashMap<String, RepairYamlValue.Mapping>()
       val disabled = HashMap<String, Boolean>()
+      fun markDisabled(entry: RepairYamlValue.Mapping, id: String) {
+        // 用户手写 YAML 常见 TRUE / False；布尔语义必须与大小写无关。
+        val flag = entry.string("disabled")?.trim()?.lowercase() ?: return
+        if (flag == "true" || flag == "false") disabled[id] = flag == "true"
+      }
       fun apply(root: RepairYamlValue?, depth: Int = 0) {
         if (depth > 32) return
         val sequence = root as? RepairYamlValue.Sequence ?: return
@@ -195,13 +205,13 @@ internal object RepairModelConfig {
           // name 只用来确认「这个 id 还是官方那个插件」。改名/自建的 fork 占着同一个 id 时，
           // 它已经不是内置路径能读懂的东西了——但也不能整条丢，交给泛化扫描。
           if (id in names && (declared == null || declared == names[id])) {
-            if (entry.string("disabled") in setOf("true", "false")) disabled[id] = entry.string("disabled") == "true"
+            markDisabled(entry, id)
             // An inserted provider with no explicit config still has its schema defaults.
             if (config != null) configs[id] = merge(configs[id], config)
             else configs.putIfAbsent(id, RepairYamlValue.Mapping(LinkedHashMap()))
           } else if (config != null) {
             // 名单外的条目不再整条丢弃：它是不是 provider 由泛化扫描判，不看 id。
-            if (entry.string("disabled") in setOf("true", "false")) disabled[id] = entry.string("disabled") == "true"
+            markDisabled(entry, id)
             custom[id] = merge(custom[id], config)
           }
         }
@@ -238,12 +248,14 @@ internal object RepairModelConfig {
      * 但用户自建/手工编辑的现场会出现 `.yaml`（YAML 的常见扩展名），旧实现只拼 `.yml`，
      * 于是那份配置整个读不到——这正是「助手说没模型、引擎却能用」的又一来源。
      *
-     * 同目录下两份都在时**只取 `.yaml` 并显式记一条冲突来源**，不静默双用：两份配置叠起来会产生
+     * 同目录下两份都在时**优先 .yaml**，但 .yaml 解析失败（invalid）时自动回退 .yml：
+     * 用户把 .yaml 改坏后，旧 .yml 往往还是引擎正在用的那一份，不能因为一份坏文件把整层候选丢掉。
+     * 两份都正常时仍只取 .yaml 并显式记一条冲突来源，不静默双用：两份配置叠起来会产生
      * 用户没写过的合并结果（例如两边各写一半 provider），比缺一份更难排查。
      *
-     * @param sink 来源表收集器，冲突时在这里留痕。
+     * @param sink 来源表收集器，冲突/缺失时在这里留痕。
      * @param directory 文档所在目录。
-     * @returns 存在的候选文件（0 或 1 个）；都不存在时返回空列表，并由这里记一条 missing。
+     * @returns 候选文件（0..2 个），按尝试优先级排列；都不存在时返回空列表，并由这里记一条 missing。
      */
     fun firstPatch(sink: MutableList<RepairModelSource>, directory: File): List<File> {
       val yaml = File(directory, "cordis.patch.yaml")
@@ -251,16 +263,7 @@ internal object RepairModelConfig {
       val yamlExists = yaml.isFile
       val ymlExists = yml.isFile
       return when {
-        yamlExists && ymlExists -> {
-          // 两份都在：取 .yaml（用户手写/自建现场的常见扩展名），并把「忽略的是 .yml」写进来源。
-          // 只记一个状态码不够——诊断包里看不出被忽略的是哪一份，用户也就没法判断该删哪个。
-          sink += RepairModelSource(
-            rel(yml),
-            "conflict-skipped",
-            detail = "ignored because " + yaml.name + " also exists in the same directory",
-          )
-          listOf(yaml)
-        }
+        yamlExists && ymlExists -> listOf(yaml, yml)
         yamlExists -> listOf(yaml)
         ymlExists -> listOf(yml)
         else -> {
@@ -279,14 +282,35 @@ internal object RepairModelConfig {
         applied += rel(document)
         layer.apply(readInto(sink, document))
       }
-      for (document in firstPatch(sink, profileDir)) {
-        applied += rel(document)
-        layer.apply(readInto(sink, document))
+      fun applyDirectory(directory: File) {
+        val candidates = firstPatch(sink, directory)
+        if (candidates.isEmpty()) return
+        val primary = readInto(sink, candidates.first())
+        if (primary != null) {
+          applied += rel(candidates.first())
+          layer.apply(primary)
+          if (candidates.size > 1) {
+            // 两份都正常：只采用 .yaml，并把「忽略的是 .yml」写进来源。
+            // 只记一个状态码不够——诊断包里看不出被忽略的是哪一份，用户也就没法判断该删哪个。
+            sink += RepairModelSource(
+              rel(candidates[1]),
+              "conflict-skipped",
+              detail = "ignored because " + candidates.first().name + " also exists in the same directory",
+            )
+          }
+          return
+        }
+        if (candidates.size > 1) {
+          // .yaml 解析失败：回退读取 .yml；readInto 已分别留下 .yaml=invalid 与 .yml 的真实状态。
+          val alternate = readInto(sink, candidates[1])
+          if (alternate != null) {
+            applied += rel(candidates[1])
+            layer.apply(alternate)
+          }
+        }
       }
-      for (document in firstPatch(sink, dsh)) {
-        applied += rel(document)
-        layer.apply(readInto(sink, document))
-      }
+      applyDirectory(profileDir)
+      applyDirectory(dsh)
       return layer
     }
     val allCredentials = credentials + environment.filterValues { it.isNotBlank() }.filterKeys { it !in credentials }
@@ -306,10 +330,10 @@ internal object RepairModelConfig {
       if (layer.disabled["llm-deepseek"] != true) {
         val explicit = layer.configs["llm-deepseek"]
         // A user-selected official route is sufficient even if the runtime bundle is damaged.
-        val official = explicit ?: out.selected?.takeIf { it.first == "deepseek-official" }
-          ?.let { RepairYamlValue.Mapping(LinkedHashMap()) }
+        val selectedOfficial = out.selected?.takeIf { it.first.equals("deepseek-official", ignoreCase = true) }
+        val official = explicit ?: selectedOfficial?.let { RepairYamlValue.Mapping(LinkedHashMap()) }
         if (official != null) addOfficial(official, credentials, environment, out.connections,
-          out.selected?.takeIf { it.first == "deepseek-official" }?.second, ::note, out.unavailable)
+          selectedOfficial?.second, ::note, out.unavailable)
       }
       // 泛化面：不在三条内置路径里的条目，只要能拼出 provider + model + baseURL + 凭据就算候选。
       // 内置路径先跑（保持既有优先级），泛化候选只做补充；去重由 order() 的 identity 负责。
@@ -336,7 +360,7 @@ internal object RepairModelConfig {
     }
     val ordered = order(attempts, resolved.selected)
     val defaultAvailable = if (resolved.selected == null) ordered.size == 1 else ordered.any {
-      it.provider == resolved.selected!!.first && it.model == resolved.selected!!.second
+      providerMatches(it, resolved.selected!!.first) && it.model == resolved.selected!!.second
     }
     // 缺凭据的路由如实上报（引用名不带 key 值），但绝不混进可用候选。
     val unavailable = resolved.unavailable.distinctBy { it.provider + "|" + it.model }
@@ -357,6 +381,25 @@ internal object RepairModelConfig {
   private fun relToHome(home: File, file: File): String {
     val root = home.parentFile?.toPath()?.normalize() ?: return file.path
     return root.relativize(file.toPath().normalize()).toString()
+  }
+
+  /**
+   * 半解压空壳：`.dsh` 目录存在，但五个关键入口一个都没有。
+   *
+   * 为什么不能只看目录是否存在：快照事务先建目录再铺文件，进程被杀会留下一个空壳；
+   * 此时继续按「五个文件各自 missing」上报，上层会把「运行时还没解出来」误诊成
+   * 「用户没配模型」（issue #1012）。判据只认**结构入口**，不读文件内容。
+   *
+   * @param dsh 运行时配置根目录。
+   * @returns true 表示目录在但处于半解压状态，调用方应按 root-missing 处理。
+   */
+  private fun isHalfExtractedRoot(dsh: File): Boolean {
+    if (!dsh.isDirectory) return false
+    val hasSettings = File(dsh, "settings.yaml").isFile
+    val hasCredentials = File(dsh, ".credentials.yaml").isFile
+    val hasHomePatch = File(dsh, "cordis.patch.yml").isFile || File(dsh, "cordis.patch.yaml").isFile
+    val hasWebProfile = File(dsh, "profiles/web").isDirectory
+    return !hasSettings && !hasCredentials && !hasHomePatch && !hasWebProfile
   }
 
   /** Resolve declared patch files like app-boot (installation first), restricted to private data. */
@@ -407,11 +450,9 @@ internal object RepairModelConfig {
   ): List<RepairModelConnection> {
     val distinct = candidates.distinctBy { it.identity }
     if (selected == null) return distinct
-    val wantedProvider = selected.first.lowercase()
     val wantedModel = selected.second
     return distinct.sortedWith(compareByDescending<RepairModelConnection> {
-      val providerMatch = it.provider.equals(selected.first, ignoreCase = true) ||
-        it.label.lowercase().startsWith(wantedProvider + " /")
+      val providerMatch = providerMatches(it, selected.first)
       when {
         providerMatch && it.model == wantedModel -> 3
         it.model == wantedModel -> 2
@@ -419,6 +460,19 @@ internal object RepairModelConfig {
         else -> 0
       }
     })
+  }
+
+  /**
+   * 判断一条候选是否就是配置里选中的 provider。
+   *
+   * provider 名与显示名都按大小写不敏感比较；label 的格式是「模型 · 显示名」，
+   * 旧实现按 `provider + " /"` 前缀匹配 label——那个分隔符从未出现过，是永远不成立的死代码。
+   * 这里按真实后缀匹配，显示名等于 provider 时也能排到前面。
+   */
+  private fun providerMatches(connection: RepairModelConnection, provider: String): Boolean {
+    if (connection.provider.equals(provider, ignoreCase = true)) return true
+    if (connection.providerLabel.equals(provider, ignoreCase = true)) return true
+    return connection.label.lowercase().endsWith(" · " + provider.lowercase())
   }
 
   private fun addPiAi(
@@ -431,27 +485,24 @@ internal object RepairModelConfig {
     val providers = config.mapping("providers") ?: return
     for ((route, value) in providers.values) {
       val profile = value as? RepairYamlValue.Mapping ?: continue
-      val base = profile.string("baseURL") ?: continue
+      val base = baseUrlOf(profile) ?: continue
       val api = profile.string("api") ?: "openai-completions"
       val display = profile.string("displayName") ?: route
       val routeHeaders = headers(profile)
-      val models = profile.sequence("models")?.values?.mapNotNull { item ->
-        val entry = item as? RepairYamlValue.Mapping ?: return@mapNotNull null
-        val id = entry.string("id") ?: return@mapNotNull null
-        Triple(entry.string("name") ?: id, id, entry)
-      } ?: continue
+      // models 允许对象数组、字符串数组；一个都没写时按引擎口径回落单 model / modelId。
+      val models = modelSpecs(profile, listOf("model", "modelId"))
+      if (models.isEmpty()) continue
       // 引用名 join：patch 里只写引用名，真 key 在 .credentials.yaml 的 refs 里。
       // 缺 apiKeyEnv / 引用名没命中都是「配了但用不了」，不是「没配」——旧实现静默 continue，
       // UI 只能说「未读到可用模型」，用户无从判断该去补什么。
-      val ref = credentialRefOf(profile)
-      val key = ref?.let { credentials[it] }
+      val (key, ref) = credentialFor(profile, route, credentials)
       if (key == null) {
         noteBlocked("no-credential")
-        unavailable += RepairModelUnavailable(route, models.firstOrNull()?.second ?: "", ref)
+        unavailable += RepairModelUnavailable(route, models.first().id, ref)
         continue
       }
-      for ((modelName, id, entry) in models) {
-        out += connection(route, display, base, api, key, routeHeaders, modelName, id, entry)
+      for (model in models) {
+        out += connection(route, display, base, api, key, routeHeaders, model.label, model.id, model.config)
       }
     }
   }
@@ -465,29 +516,23 @@ internal object RepairModelConfig {
     noteBlocked: (String) -> Unit = {},
     unavailable: MutableList<RepairModelUnavailable> = ArrayList(),
   ) {
-    val ref = credentialRefOf(config) ?: "DEEPSEEK_API_KEY"
-    val models = config.sequence("models")?.values?.mapNotNull { item ->
-      val model = item as? RepairYamlValue.Mapping ?: return@mapNotNull null
-      val id = model.string("id") ?: return@mapNotNull null
-      Triple(model.string("name") ?: id, id, model)
-    } ?: listOf(
-      Triple(
-        config.string("model") ?: selectedModel ?: "deepseek-chat",
-        config.string("model") ?: selectedModel ?: "deepseek-chat",
-        RepairYamlValue.Mapping(LinkedHashMap()),
-      ),
-    )
     val route = "deepseek-official"
     val routeHeaders = headers(config)
-    val key = credentials[ref] ?: environment[ref]?.takeIf { it.isNotBlank() }
+    // models: [] 是「写了这个键但没列模型」，与缺键一样回落到单模型字段。
+    val models = modelSpecs(config, listOf("model", "modelId", "defaultModel")).ifEmpty {
+      val single = selectedModel ?: "deepseek-chat"
+      listOf(ModelSpec(single, single, emptyMapping()))
+    }
+    val keys = credentials + environment.filterValues { it.isNotBlank() }.filterKeys { it !in credentials }
+    val (key, ref) = credentialFor(config, route, keys, defaultRef = "DEEPSEEK_API_KEY")
     if (key == null) {
       noteBlocked("no-credential")
-      unavailable += RepairModelUnavailable(route, models.firstOrNull()?.second ?: "", ref)
+      unavailable += RepairModelUnavailable(route, models.first().id, ref)
       return
     }
-    val base = config.string("baseURL") ?: "https://api.deepseek.com/anthropic"
-    for ((modelName, id, entry) in models) {
-      out += connection(route, "DeepSeek", base, "anthropic-messages", key, routeHeaders, modelName, id, entry)
+    val base = baseUrlOf(config) ?: "https://api.deepseek.com/anthropic"
+    for (model in models) {
+      out += connection(route, "DeepSeek", base, "anthropic-messages", key, routeHeaders, model.label, model.id, model.config)
     }
   }
 
@@ -538,34 +583,103 @@ internal object RepairModelConfig {
     unavailable: MutableList<RepairModelUnavailable> = ArrayList(),
   ) {
     // 没有 baseURL 就不猜端点：猜错等于给用户一条注定失败的候选，比不给更糟。
-    val base = profile.string("baseURL") ?: profile.string("baseUrl") ?: return
-    val models = profile.sequence("models")?.values?.mapNotNull { item ->
-      val entry = item as? RepairYamlValue.Mapping ?: return@mapNotNull null
-      val modelId = entry.string("id") ?: entry.string("model") ?: return@mapNotNull null
-      Triple(entry.string("name") ?: modelId, modelId, entry)
-    }.orEmpty().ifEmpty {
-      val single = profile.string("model") ?: profile.string("modelId") ?: profile.string("defaultModel")
-      listOfNotNull(single?.takeIf { it.isNotBlank() }
-        ?.let { Triple(it, it, RepairYamlValue.Mapping(LinkedHashMap())) })
-    }
+    val base = baseUrlOf(profile) ?: return
+    val models = modelSpecs(profile, listOf("model", "modelId", "defaultModel"))
     if (models.isEmpty()) return
     // 引用名 join：命中即可用；未命中是「配了但缺凭据」，必须作为不可用条目上报（带引用名、不带值）。
-    val ref = credentialRefOf(profile)
-    val key = ref?.let { credentials[it] }
+    // 没写 apiKeyEnv 时按引擎的 deriveKeyRef(provider) 回落（demo -> DEMO_API_KEY）。
+    val (key, ref) = credentialFor(profile, route, credentials)
     if (key == null) {
-      // 只对「确实声明了凭据引用」的条目留痕，免得把无关配置记成缺凭据。
-      if (ref != null) {
-        noteBlocked("no-credential")
-        unavailable += RepairModelUnavailable(route, models.first().second, ref)
-      }
+      noteBlocked("no-credential")
+      unavailable += RepairModelUnavailable(route, models.first().id, ref)
       return
     }
     val api = profile.string("api") ?: "openai-completions"
     val display = profile.string("displayName") ?: profile.string("label") ?: fallbackLabel
     val routeHeaders = headers(profile)
-    for ((modelName, modelId, entry) in models) {
-      out += connection(route, display, base, api, key, routeHeaders, modelName, modelId, entry)
+    for (model in models) {
+      out += connection(route, display, base, api, key, routeHeaders, model.label, model.id, model.config)
     }
+  }
+
+  /** 一条路由声明里解析出的模型：展示名、请求用的 id、该模型的 compat 配置。 */
+  private data class ModelSpec(
+    val label: String,
+    val id: String,
+    val config: RepairYamlValue.Mapping,
+  )
+
+  private fun emptyMapping(): RepairYamlValue.Mapping = RepairYamlValue.Mapping(LinkedHashMap())
+
+  /**
+   * 解析路由的模型列表。
+   *
+   * 引擎接受两种写法：对象数组 `[{id: ...}]` 与字符串数组 `["model-a", ...]`。
+   * 旧实现只认前者，字符串数组会被当成「没有 models」整条丢掉。一个模型都没写时，
+   * 再按调用方给的字段顺序回落单模型（addPiAi 只认 model/modelId，泛化路由还认 defaultModel）。
+   */
+  private fun modelSpecs(
+    profile: RepairYamlValue.Mapping,
+    fallbackFields: List<String>,
+  ): List<ModelSpec> {
+    val listed = profile.sequence("models")?.values.orEmpty().mapNotNull { item ->
+      when (item) {
+        is RepairYamlValue.Mapping -> {
+          val id = item.string("id") ?: item.string("model") ?: return@mapNotNull null
+          id.takeIf { it.isNotBlank() }?.let { ModelSpec(item.string("name") ?: it, it, item) }
+        }
+        is RepairYamlValue.Scalar ->
+          item.value.takeIf { it.isNotBlank() }?.let { ModelSpec(it, it, emptyMapping()) }
+        else -> null
+      }
+    }
+    if (listed.isNotEmpty()) return listed
+    for (field in fallbackFields) {
+      val single = profile.string(field)?.trim()?.takeIf { it.isNotBlank() } ?: continue
+      return listOf(ModelSpec(single, single, emptyMapping()))
+    }
+    return emptyList()
+  }
+
+  /** baseURL 的三种常见写法（引擎 schema 与手写 YAML 都会出现）。 */
+  private fun baseUrlOf(profile: RepairYamlValue.Mapping): String? =
+    profile.string("baseURL")?.takeIf { it.isNotBlank() }
+      ?: profile.string("baseUrl")?.takeIf { it.isNotBlank() }
+      ?: profile.string("base_url")?.takeIf { it.isNotBlank() }
+
+  /** 与引擎 deriveKeyRef 完全一致：provider 名规范为大写下划线后追加 _API_KEY。 */
+  internal fun deriveKeyRef(provider: String): String =
+    provider.uppercase().replace(Regex("[^A-Z0-9]+"), "_") + "_API_KEY"
+
+  /**
+   * 解析一条路由真正可用的 key，同时给出**只用于诊断**的引用名。
+   *
+   * 优先级与引擎一致：显式引用名 > 配置里直接写的明文密钥（只进连接内部 key） > deriveKeyRef 回落。
+   * 明文密钥绝不进入第二个返回值，调用方拿它写 RepairModelUnavailable 就不会泄漏。
+   *
+   * @returns (key, 可上报的引用名)；key 为 null 表示该路由缺凭据。
+   */
+  private fun credentialFor(
+    profile: RepairYamlValue.Mapping,
+    route: String,
+    credentials: Map<String, String>,
+    defaultRef: String? = null,
+  ): Pair<String?, String?> {
+    val declared = credentialRefOf(profile)
+    if (declared != null) return credentials[declared]?.takeIf { it.isNotBlank() } to declared
+    val literal = literalSecretOf(profile)
+    if (literal != null) return literal to null
+    val ref = defaultRef ?: deriveKeyRef(route)
+    return credentials[ref]?.takeIf { it.isNotBlank() } to ref
+  }
+
+  /** 配置里直接写出的明文密钥；只允许作为连接内部 key，绝不回传引用名/UI。 */
+  private fun literalSecretOf(profile: RepairYamlValue.Mapping): String? {
+    for (field in CREDENTIAL_FIELDS) {
+      val value = profile.string(field)?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+      if (looksLikeSecret(value)) return value
+    }
+    return null
   }
 
   /**
@@ -584,7 +698,7 @@ internal object RepairModelConfig {
    * @returns 引用名；没有声明或形似密钥时返回 null。
    */
   internal fun credentialRefOf(profile: RepairYamlValue.Mapping): String? {
-    for (field in listOf("apiKeyEnv", "apiKeyRef", "tokenEnv", "tokenRef", "apiKey", "token", "accessToken")) {
+    for (field in CREDENTIAL_FIELDS) {
       val value = profile.string(field)?.trim()?.takeIf { it.isNotEmpty() } ?: continue
       if (looksLikeSecret(value)) continue
       return value
@@ -601,10 +715,17 @@ internal object RepairModelConfig {
   internal fun looksLikeSecret(value: String): Boolean {
     val text = value.trim()
     if (text.length >= 40) return true
-    if (text.startsWith("sk-") || text.startsWith("Bearer ")) return true
-    // 长串且不含分隔符 = 更像密钥而不是引用名（引用名是 POSIX 标识符或 kebab 名）。
-    return text.length >= 20 && !text.contains('-') && !text.contains('_')
+    if (text.startsWith("sk-") || text.startsWith("Bearer ", ignoreCase = true)) return true
+    // 20 位以上的长串一律按密钥处理：旧实现放过了「20–39 位且含 - / _」的形态，
+    // 于是 sk-live-... 这类值会被当成引用名写进 UI。规范的大写环境变量名（如
+    // CUSTOM_OPENAI_API_KEY）是明确的引用名，不作误判。
+    if (text.length >= 20 && !text.matches(Regex("[A-Z][A-Z0-9_]*"))) return true
+    return false
   }
+
+  private val CREDENTIAL_FIELDS = listOf(
+    "apiKeyEnv", "apiKeyRef", "tokenEnv", "tokenRef", "apiKey", "token", "accessToken",
+  )
 
 
   /**

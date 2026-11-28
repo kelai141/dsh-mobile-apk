@@ -24,6 +24,8 @@ class RepairModelNoticeTest {
     defaultModelAvailable: Boolean = true,
     diagnosticsReady: Boolean = true,
     rootMissing: Boolean = false,
+    unavailableCount: Int = 0,
+    unavailableText: String = "",
   ) = RepairModelNotice.present(
     failure = failure,
     candidateCount = candidateCount,
@@ -34,6 +36,8 @@ class RepairModelNoticeTest {
     defaultUnavailableText = "当前默认模型不可用。请点右上角选择模型，再发送修复需求。",
     rootMissing = rootMissing,
     rootMissingText = "运行时还没解出来（配置目录尚不存在）。请返回启动页重试引擎。",
+    unavailableCount = unavailableCount,
+    unavailableText = unavailableText,
   )
 
   // ── 1. 0 候选：社群那句话 ─────────────────────────────────────────────────
@@ -146,6 +150,24 @@ class RepairModelNoticeTest {
     val notice = present(candidateCount = 0)
     assertFalse("0 候选时模型选择器必须禁用（点下去只会拿到空列表）", notice.modelControlsEnabled)
     assertTrue("但发送键不能被一起关掉", notice.sendEnabled)
+  }
+
+  @Test
+  fun `缺凭据路由优先于笼统的未读到可用模型`() {
+    // 0 候选有两种截然不同的现场：没配置（去写配置）与配了但凭据引用没命中（去补 key）。
+    // 后者必须由 unavailableCount 分支单独说明，不能被「未读到可用模型」吞掉。
+    val notice = present(
+      candidateCount = 0,
+      defaultModelAvailable = false,
+      unavailableCount = 2,
+      unavailableText = "有 2 条模型路由的凭据引用未命中，请补 key 或修改引用名。",
+    )
+    assertTrue(notice.visible)
+    assertEquals("有 2 条模型路由的凭据引用未命中，请补 key 或修改引用名。", notice.text)
+    assertTrue("缺凭据也要附来源表", notice.appendSources)
+    assertFalse("0 候选时模型选择器仍禁用", notice.modelControlsEnabled)
+    assertTrue("但发送键保持可用（issue #1012 A3）", notice.sendEnabled)
+    assertEquals(2, notice.unavailableCount)
   }
 
   @Test

@@ -216,22 +216,14 @@ internal object RepairToolCallParser {
   /** Appends a complete native pair or preserves prose without an orphan result. */
   private fun flushPending(out: JSONArray, pending: PendingCalls?) {
     if (pending == null) return
-    if (pending.seen != pending.ids) {
-      out.put(pending.assistant)
-      // Preserve the provider-issued assistant response. A request cannot carry
-      // only part of a tool batch, so project truthful cancellation results for
-      // calls that have not returned yet. The canonical history is left alone.
-      for (id in pending.ids) {
-        if (id in pending.seen) continue
-        out.put(
-          JSONObject().put("role", "tool").put("tool_call_id", id)
-            .put("content", INTERRUPTED_TOOL_RESULT),
-        )
-      }
-      return
-    }
     out.put(pending.assistant)
     for (i in 0 until pending.results.length()) out.put(pending.results.getJSONObject(i))
+    // Close only the unreturned calls in this projection. Existing results keep their original bytes.
+    for (id in pending.ids) {
+      if (id in pending.seen) continue
+      out.put(JSONObject().put("role", "tool").put("tool_call_id", id)
+        .put("content", INTERRUPTED_TOOL_RESULT))
+    }
   }
 
   /**

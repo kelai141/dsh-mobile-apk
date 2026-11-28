@@ -479,10 +479,17 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       // 其余（Idle / Info）＝尚未启动或中性事实陈述，主按钮是「启动引擎」
       else -> activity.getString(R.string.ds_start_engine)
     }
-    // The assistant row appears with a failure phase and stays available even when the durable
-    // repair gate is set; its absence was what forced users to open the assistant to retry.
-    (chrome.repairButton.parent as? View)?.visibility =
-      if (phase == GuidePhase.Error) View.VISIBLE else View.GONE
+    // The assistant button shares primaryRow with the retry button in Error phase; never hide
+    // primaryRow itself, and clear marginStart when hidden so primaryButton fills up to gear.
+    val showRepair = phase == GuidePhase.Error
+    chrome.repairButton.visibility = if (showRepair) View.VISIBLE else View.GONE
+    (chrome.repairButton.layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
+      val gap = if (showRepair) activity.resources.getDimensionPixelSize(R.dimen.ds_space_8) else 0
+      if (lp.marginStart != gap) {
+        lp.marginStart = gap
+        chrome.repairButton.layoutParams = lp
+      }
+    }
     chrome.safeModeButton.visibility = if (phase == GuidePhase.Error && runCatching {
       val tail = PluginMounts.readEngineLogTail(activity, 32_000)
       startupPluginFailure(tail)

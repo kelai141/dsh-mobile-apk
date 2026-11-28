@@ -87,7 +87,7 @@ internal object ProcIo {
     val limit = limitBytes.coerceIn(1, MAX_OUTPUT_BYTES)
     val state = DrainState(limit)
     val drainer = Thread({
-      try { drainInto(proc.inputStream, state) }
+      try { drainInto(proc.inputStream, state::accept) }
       catch (failure: Throwable) { state.fail(failure) }
     }, "dsh-proc-drain").apply { isDaemon = true }
     drainer.start()
@@ -98,6 +98,21 @@ internal object ProcIo {
       ": output exceeded " + limit + " bytes]\n" else drain.text
     val exitCode = if (wait.exitTimedOut) null else runCatching { proc.exitValue() }.getOrNull()
     return ProcResult(text, wait.exitTimedOut, wait.drainTimedOut, drain.truncated,
+      wait.cleanupIncomplete, drain.readError ?: wait.waitError, exitCode)
+  }
+
+  fun readBoundedHeadTailMillis(process: Process, timeoutMs: Long, headBytes: Int, tailBytes: Int): ProcResult {
+    require(headBytes in 0..MAX_OUTPUT_BYTES && tailBytes in 0..MAX_OUTPUT_BYTES)
+    val state = HeadTailDrain(headBytes, tailBytes)
+    val drainer = Thread({
+      try { drainInto(process.inputStream, state::accept) }
+      catch (failure: Throwable) { state.fail(failure) }
+    }, "dsh-proc-drain").apply { isDaemon = true }
+    drainer.start()
+    val wait = awaitCompletion(process, drainer, timeoutMs)
+    val drain = state.snapshot()
+    val exitCode = if (wait.exitTimedOut) null else runCatching { process.exitValue() }.getOrNull()
+    return ProcResult(drain.text, wait.exitTimedOut, wait.drainTimedOut, drain.truncated,
       wait.cleanupIncomplete, drain.readError ?: wait.waitError, exitCode)
   }
 
@@ -176,19 +191,64 @@ internal object ProcIo {
       BoundedDrain(String(sink.toByteArray(), Charsets.UTF_8), truncated, readError)
   }
 
-  private fun drainInto(input: InputStream, state: DrainState) {
+  private class HeadTailDrain(headBytes: Int, tailBytes: Int) {
+    private val head = ByteArray(headBytes)
+    private val tail = ByteArray(tailBytes)
+    private var headSize = 0
+    private var tailSize = 0
+    private var tailNext = 0
+    private var total = 0L
+    private var readError: String? = null
+
+    @Synchronized fun accept(buffer: ByteArray, size: Int) {
+      total += size
+      val headTake = minOf(size, head.size - headSize)
+      buffer.copyInto(head, headSize, 0, headTake)
+      headSize += headTake
+      val tailTake = minOf(size - headTake, tail.size)
+      if (tailTake == 0) return
+      val first = minOf(tailTake, tail.size - tailNext)
+      buffer.copyInto(tail, tailNext, size - tailTake, size - tailTake + first)
+      buffer.copyInto(tail, 0, size - tailTake + first, size)
+      tailNext = (tailNext + tailTake) % tail.size
+      tailSize = minOf(tail.size, tailSize + tailTake)
+    }
+
+    @Synchronized fun fail(failure: Throwable) { readError = errorText(failure) }
+
+    @Synchronized fun snapshot(): BoundedDrain {
+      val end = ByteArray(tailSize)
+      if (tailSize > 0) {
+        val start = if (tailSize == tail.size) tailNext else 0
+        val first = minOf(tailSize, tail.size - start)
+        tail.copyInto(end, 0, start, start + first)
+        tail.copyInto(end, first, 0, tailSize - first)
+      }
+      val omitted = total - headSize - tailSize
+      val text = if (omitted == 0L) {
+        // Decode the joined bytes so a code point spanning the windows stays intact.
+        (head.copyOf(headSize) + end).toString(Charsets.UTF_8)
+      } else {
+        String(head, 0, headSize, Charsets.UTF_8) +
+          "\n[$TRUNCATED_FLAG: omitted $omitted bytes]\n" + end.toString(Charsets.UTF_8)
+      }
+      return BoundedDrain(text, omitted > 0L, readError)
+    }
+  }
+
+  private fun drainInto(input: InputStream, accept: (ByteArray, Int) -> Unit) {
     val buf = ByteArray(8 * 1024)
     while (true) {
       val n = input.read(buf)
       if (n < 0) return
-      if (n > 0) state.accept(buf, n)
+      if (n > 0) accept(buf, n)
     }
   }
 
   /** Keep draining after the cap; a read exception is not EOF or a known-empty result. */
   internal fun drainBounded(input: InputStream, limitBytes: Int = MAX_OUTPUT_BYTES): BoundedDrain {
     val state = DrainState(limitBytes.coerceIn(1, MAX_OUTPUT_BYTES))
-    try { drainInto(input, state) }
+    try { drainInto(input, state::accept) }
     catch (failure: Throwable) { state.fail(failure) }
     return state.snapshot()
   }
